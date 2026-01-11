@@ -62,6 +62,9 @@ message ListAvailableResponse { repeated AvailableToolchain items = 1; PageInfo 
 message ListInstalledRequest { ToolchainKind kind = 1; }
 message ListInstalledResponse { repeated InstalledToolchain items = 1; }
 
+message ListToolchainSetsRequest { Pagination page = 1; }
+message ListToolchainSetsResponse { repeated ToolchainSet sets = 1; PageInfo page_info = 2; }
+
 // Long-running actions return a job_id (JobService is the canonical event stream).
 message InstallToolchainRequest {
   Id provider_id = 1;
@@ -87,6 +90,7 @@ service ToolchainService {
   rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
   rpc ListAvailable(ListAvailableRequest) returns (ListAvailableResponse);
   rpc ListInstalled(ListInstalledRequest) returns (ListInstalledResponse);
+  rpc ListToolchainSets(ListToolchainSetsRequest) returns (ListToolchainSetsResponse);
 
   rpc InstallToolchain(InstallToolchainRequest) returns (InstallToolchainResponse);
   rpc VerifyToolchain(VerifyToolchainRequest) returns (VerifyToolchainResponse);

@@ -7,11 +7,13 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     toolchain_service_client::ToolchainServiceClient,
     target_service_client::TargetServiceClient,
-    CancelJobRequest, CreateProjectRequest, ExportEvidenceBundleRequest, ExportSupportBundleRequest,
-    GetCuttlefishStatusRequest, Id, InstallCuttlefishRequest, JobState, ListProvidersRequest,
+    CancelJobRequest, CreateProjectRequest, CreateToolchainSetRequest, ExportEvidenceBundleRequest,
+    ExportSupportBundleRequest, GetActiveToolchainSetRequest, GetCuttlefishStatusRequest,
+    GetDefaultTargetRequest, Id, InstallCuttlefishRequest, JobState, ListProvidersRequest,
     ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    OpenProjectRequest, Pagination, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
-    StreamJobEventsRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, SetActiveToolchainSetRequest,
+    SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
+    StopCuttlefishRequest, StreamJobEventsRequest,
 };
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -75,12 +77,54 @@ enum ToolchainCmd {
         #[arg(long, default_value_t = default_toolchain_addr())]
         addr: String,
     },
+    /// List toolchain sets
+    ListSets {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        #[arg(long, default_value_t = 25)]
+        page_size: u32,
+        #[arg(long, default_value = "")]
+        page_token: String,
+    },
+    /// Create a toolchain set from installed SDK/NDK ids
+    CreateSet {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        #[arg(long)]
+        sdk_toolchain_id: Option<String>,
+        #[arg(long)]
+        ndk_toolchain_id: Option<String>,
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    /// Set the active toolchain set
+    SetActive {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        toolchain_set_id: String,
+    },
+    /// Get the active toolchain set
+    GetActive {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum TargetsCmd {
     /// List targets
     List {
+        #[arg(long, default_value_t = default_targets_addr())]
+        addr: String,
+    },
+    /// Set the default target id
+    SetDefault {
+        #[arg(long, default_value_t = default_targets_addr())]
+        addr: String,
+        target_id: String,
+    },
+    /// Get the configured default target
+    GetDefault {
         #[arg(long, default_value_t = default_targets_addr())]
         addr: String,
     },
@@ -142,6 +186,26 @@ enum ProjectCmd {
         #[arg(long, default_value_t = default_project_addr())]
         addr: String,
         path: String,
+    },
+    /// Update project toolchain/target defaults
+    SetConfig {
+        #[arg(long, default_value_t = default_project_addr())]
+        addr: String,
+        project_id: String,
+        #[arg(long)]
+        toolchain_set_id: Option<String>,
+        #[arg(long)]
+        default_target_id: Option<String>,
+    },
+    /// Apply active toolchain set + default target to a project
+    UseActiveDefaults {
+        #[arg(long, default_value_t = default_project_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        toolchain_addr: String,
+        #[arg(long, default_value_t = default_targets_addr())]
+        targets_addr: String,
+        project_id: String,
     },
 }
 
@@ -239,6 +303,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}\t{}\tkind={}", id, p.name, p.kind);
                 }
             }
+            ToolchainCmd::ListSets { addr, page_size, page_token } => {
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client.list_toolchain_sets(ListToolchainSetsRequest {
+                    page: Some(Pagination { page_size, page_token }),
+                }).await?.into_inner();
+                for set in resp.sets {
+                    let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
+                    let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    let ndk = set.ndk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    println!("{}\t{}\tsdk={}\tndk={}", set_id, set.display_name, sdk, ndk);
+                }
+                if let Some(page_info) = resp.page_info {
+                    if !page_info.next_page_token.is_empty() {
+                        println!("next_page_token={}", page_info.next_page_token);
+                    }
+                }
+            }
+            ToolchainCmd::CreateSet {
+                addr,
+                sdk_toolchain_id,
+                ndk_toolchain_id,
+                display_name,
+            } => {
+                let sdk_id = sdk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+                let ndk_id = ndk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+                if sdk_id.is_none() && ndk_id.is_none() {
+                    eprintln!("Provide --sdk-toolchain-id and/or --ndk-toolchain-id");
+                    return Ok(());
+                }
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client.create_toolchain_set(CreateToolchainSetRequest {
+                    sdk_toolchain_id: sdk_id.map(|value| Id { value: value.to_string() }),
+                    ndk_toolchain_id: ndk_id.map(|value| Id { value: value.to_string() }),
+                    display_name: display_name.unwrap_or_default(),
+                }).await?.into_inner();
+                if let Some(set) = resp.set {
+                    let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
+                    let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    let ndk = set.ndk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    println!("set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}", set.display_name);
+                } else {
+                    println!("no toolchain set returned");
+                }
+            }
+            ToolchainCmd::SetActive { addr, toolchain_set_id } => {
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client.set_active_toolchain_set(SetActiveToolchainSetRequest {
+                    toolchain_set_id: Some(Id { value: toolchain_set_id.clone() }),
+                }).await?.into_inner();
+                println!("ok={}", resp.ok);
+            }
+            ToolchainCmd::GetActive { addr } => {
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client.get_active_toolchain_set(GetActiveToolchainSetRequest {}).await?.into_inner();
+                if let Some(set) = resp.set {
+                    let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
+                    let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    let ndk = set.ndk_toolchain_id.map(|i| i.value).unwrap_or_default();
+                    println!("set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}", set.display_name);
+                } else {
+                    println!("no active toolchain set");
+                }
+            }
         },
 
         Cmd::Targets { cmd } => match cmd {
@@ -248,6 +375,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for t in resp.targets {
                     let id = t.target_id.map(|i| i.value).unwrap_or_default();
                     println!("{}\t{}\t{}\t{}", id, t.display_name, t.state, t.provider);
+                }
+            }
+            TargetsCmd::SetDefault { addr, target_id } => {
+                let mut client = TargetServiceClient::new(connect(&addr).await?);
+                let resp = client.set_default_target(SetDefaultTargetRequest {
+                    target_id: Some(Id { value: target_id.clone() }),
+                }).await?.into_inner();
+                println!("ok={}", resp.ok);
+            }
+            TargetsCmd::GetDefault { addr } => {
+                let mut client = TargetServiceClient::new(connect(&addr).await?);
+                let resp = client.get_default_target(GetDefaultTargetRequest {}).await?.into_inner();
+                if let Some(target) = resp.target {
+                    let id = target.target_id.map(|i| i.value).unwrap_or_default();
+                    println!("{}\t{}\t{}\t{}", id, target.display_name, target.state, target.provider);
+                } else {
+                    println!("no default target configured");
                 }
             }
             TargetsCmd::StartCuttlefish { addr, show_full_ui } => {
@@ -272,7 +416,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             TargetsCmd::InstallCuttlefish { addr, force } => {
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.install_cuttlefish(InstallCuttlefishRequest { force }).await?.into_inner();
+                let resp = client
+                    .install_cuttlefish(InstallCuttlefishRequest {
+                        force,
+                        branch: "".into(),
+                        target: "".into(),
+                        build_id: "".into(),
+                    })
+                    .await?
+                    .into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
@@ -342,6 +494,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}\t{}\t{}", id, project.name, project.path);
                 } else {
                     println!("no project returned");
+                }
+            }
+            ProjectCmd::SetConfig {
+                addr,
+                project_id,
+                toolchain_set_id,
+                default_target_id,
+            } => {
+                if project_id.trim().is_empty() {
+                    eprintln!("project_id is required");
+                    return Ok(());
+                }
+                let toolchain_set_id = toolchain_set_id
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty());
+                let default_target_id = default_target_id
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty());
+
+                if toolchain_set_id.is_none() && default_target_id.is_none() {
+                    eprintln!("Provide --toolchain-set-id and/or --default-target-id");
+                    return Ok(());
+                }
+
+                let mut client = ProjectServiceClient::new(connect(&addr).await?);
+                let resp = client.set_project_config(SetProjectConfigRequest {
+                    project_id: Some(Id { value: project_id.clone() }),
+                    toolchain_set_id: toolchain_set_id.map(|value| Id { value: value.to_string() }),
+                    default_target_id: default_target_id.map(|value| Id { value: value.to_string() }),
+                }).await?.into_inner();
+                println!("ok={}", resp.ok);
+            }
+            ProjectCmd::UseActiveDefaults {
+                addr,
+                toolchain_addr,
+                targets_addr,
+                project_id,
+            } => {
+                if project_id.trim().is_empty() {
+                    eprintln!("project_id is required");
+                    return Ok(());
+                }
+
+                let mut toolchain_set_id = None;
+                match connect(&toolchain_addr).await {
+                    Ok(channel) => {
+                        let mut client = ToolchainServiceClient::new(channel);
+                        match client.get_active_toolchain_set(GetActiveToolchainSetRequest {}).await {
+                            Ok(resp) => {
+                                toolchain_set_id = resp
+                                    .into_inner()
+                                    .set
+                                    .and_then(|set| set.toolchain_set_id)
+                                    .map(|id| id.value)
+                                    .filter(|value| !value.trim().is_empty());
+                            }
+                            Err(err) => {
+                                eprintln!("active toolchain set lookup failed: {err}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("toolchain service connection failed: {err}");
+                    }
+                }
+
+                let mut default_target_id = None;
+                match connect(&targets_addr).await {
+                    Ok(channel) => {
+                        let mut client = TargetServiceClient::new(channel);
+                        match client.get_default_target(GetDefaultTargetRequest {}).await {
+                            Ok(resp) => {
+                                default_target_id = resp
+                                    .into_inner()
+                                    .target
+                                    .and_then(|target| target.target_id)
+                                    .map(|id| id.value)
+                                    .filter(|value| !value.trim().is_empty());
+                            }
+                            Err(err) => {
+                                eprintln!("default target lookup failed: {err}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("targets service connection failed: {err}");
+                    }
+                }
+
+                if toolchain_set_id.is_none() && default_target_id.is_none() {
+                    eprintln!("no active toolchain set or default target found");
+                    return Ok(());
+                }
+
+                let mut client = ProjectServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .set_project_config(SetProjectConfigRequest {
+                        project_id: Some(Id { value: project_id.clone() }),
+                        toolchain_set_id: toolchain_set_id.clone().map(|value| Id { value }),
+                        default_target_id: default_target_id.clone().map(|value| Id { value }),
+                    })
+                    .await?
+                    .into_inner();
+
+                if resp.ok {
+                    println!(
+                        "ok=true\ntoolchain_set_id={}\ndefault_target_id={}",
+                        toolchain_set_id.unwrap_or_default(),
+                        default_target_id.unwrap_or_default()
+                    );
+                } else {
+                    println!("ok=false");
                 }
             }
         },

@@ -43,9 +43,11 @@ Default addresses (override with env vars):
   retention are still TODO.
 
 ## Shared data and locations
+- Project state: ~/.local/share/aadk/state/projects.json
 - Toolchain state: ~/.local/share/aadk/state/toolchains.json
 - Toolchain downloads: ~/.local/share/aadk/downloads
 - Toolchain installs: ~/.local/share/aadk/toolchains
+- Target state: ~/.local/share/aadk/state/targets.json
 - Observe state: ~/.local/share/aadk/state/observe.json
 - Observe bundle outputs: ~/.local/share/aadk/bundles
 
@@ -63,11 +65,6 @@ Default addresses (override with env vars):
 ## Prioritized TODO checklist by service
 
 ### ProjectService (aadk-project)
-- P0: Replace hard-coded templates with a real template registry + validation. main.rs (line 32) main.rs (line 46)
-- P0: Implement create_project to scaffold files on disk, handle collisions, and return real job tracking. main.rs (line 55)
-- P0: Implement open_project to read actual metadata/config instead of fabricating IDs. main.rs (line 82)
-- P0: Persist projects/recent list to durable storage and support paging tokens. main.rs (line 110)
-- P1: Persist set_project_config (toolchain/target defaults) with input validation. main.rs (line 121)
 - P2: Add template defaults resolution (minSdk/compileSdk) with schema errors. main.rs (line 32)
 
 ### JobService (aadk-core)
@@ -92,20 +89,16 @@ Default addresses (override with env vars):
 ### ToolchainService (aadk-toolchain)
 - P0: Replace fixed providers/versions with provider discovery + version catalog. main.rs (line 162) main.rs (line 1163)
 - P0: Expand host support beyond linux/aarch64; add fallback behavior. main.rs (line 224) main.rs (line 263)
-- P1: Persist toolchain sets and reference them in set_active. main.rs (line 1496) main.rs (line 1511)
 - P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
 - P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)
 
 ### TargetService (aadk-targets)
-- P0: Persist default target across restarts (currently in-memory). main.rs (line 2818)
 - P0: Add provider abstraction beyond adb/cuttlefish discovery. main.rs (line 1193)
 - P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
 - P1: Normalize/validate target IDs and address formats consistently. main.rs (line 1050)
 - P2: Add target inventory persistence and reconciliation on startup. main.rs (line 2809)
 
 ### Clients (aadk-ui, aadk-cli)
-- P0: Add project create/open flows with template selection and errors. main.rs (line 436) main.rs (line 946)
 - P0: Replace demo-job UI/CLI with real job type selection/status views. main.rs (line 790) main.rs (line 41)
 - P1: Add project recent list + job history viewer. main.rs (line 157)
-- P1: Add toolchain set management UI/CLI commands. main.rs (line 829) main.rs (line 55)
 - P2: Persist UI config (service addresses) and export logs. main.rs (line 34)

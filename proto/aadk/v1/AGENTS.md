@@ -11,10 +11,10 @@ Update this file whenever proto contracts change or when commits touching this d
 - common.proto: shared primitives (Id, Timestamp, KeyValue, PageInfo)
 - errors.proto: ErrorCode and ErrorDetail
 - job.proto: JobService and job event types
-- toolchain.proto: ToolchainService
+- toolchain.proto: ToolchainService (includes ListToolchainSets)
 - project.proto: ProjectService
 - build.proto: BuildService
-- target.proto: TargetService
+- target.proto: TargetService (includes ResolveCuttlefishBuild and install overrides)
 - observe.proto: ObserveService
 
 ## Code generation

@@ -999,14 +999,28 @@ impl ProjectService for Svc {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| Status::invalid_argument("project_id is required"))?;
 
-        let toolchain_set_id = req
-            .toolchain_set_id
-            .map(|id| id.value)
-            .filter(|value| !value.trim().is_empty());
-        let default_target_id = req
-            .default_target_id
-            .map(|id| id.value)
-            .filter(|value| !value.trim().is_empty());
+        let toolchain_set_update = req.toolchain_set_id.map(|id| {
+            let value = id.value.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        });
+        let default_target_update = req.default_target_id.map(|id| {
+            let value = id.value.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        });
+
+        if toolchain_set_update.is_none() && default_target_update.is_none() {
+            return Err(Status::invalid_argument(
+                "toolchain_set_id or default_target_id is required",
+            ));
+        }
 
         let mut st = self.state.lock().await;
         let pos = st
@@ -1017,8 +1031,12 @@ impl ProjectService for Svc {
 
         let project_path = PathBuf::from(&st.recent[pos].path);
         let mut meta = st.recent[pos].clone();
-        meta.toolchain_set_id = toolchain_set_id;
-        meta.default_target_id = default_target_id;
+        if let Some(value) = toolchain_set_update {
+            meta.toolchain_set_id = value;
+        }
+        if let Some(value) = default_target_update {
+            meta.default_target_id = value;
+        }
 
         if let Err(err) = write_project_metadata(&project_path, &meta) {
             return Err(Status::internal(format!(

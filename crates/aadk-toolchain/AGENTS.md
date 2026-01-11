@@ -10,8 +10,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 
 ## gRPC contract
 - proto/aadk/v1/toolchain.proto
-- RPCs: ListProviders, ListAvailable, ListInstalled, InstallToolchain, VerifyToolchain,
-  CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
+- RPCs: ListProviders, ListAvailable, ListInstalled, ListToolchainSets, InstallToolchain,
+  VerifyToolchain, CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
 
 ## Current implementation details
 - Implementation lives in crates/aadk-toolchain/src/main.rs with a tonic server.
@@ -25,11 +25,13 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   ~/.local/share/aadk/downloads; state is persisted in ~/.local/share/aadk/state/toolchains.json.
 - verify_toolchain checks that the install path exists, a provenance file exists, and
   validates layout; it re-fetches the artifact for verification when needed.
-- Toolchain sets are created and "active" is stored in memory only.
+- Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
+  toolchain set id.
 
 ## Data flow and dependencies
 - Uses JobService for install/verify jobs and publishes logs/progress events.
-- UI/CLI call ListProviders/ListAvailable/Install/Verify.
+- UI/CLI call ListProviders/ListAvailable/ListInstalled/ListToolchainSets/Install/Verify plus
+  toolchain set management RPCs.
 
 ## Environment / config
 - AADK_TOOLCHAIN_ADDR sets the bind address (default 127.0.0.1:50052).
@@ -39,6 +41,5 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 ## Prioritized TODO checklist by service
 - P0: Replace fixed providers/versions with provider discovery + version catalog. main.rs (line 162) main.rs (line 1163)
 - P0: Expand host support beyond linux/aarch64; add fallback behavior. main.rs (line 224) main.rs (line 263)
-- P1: Persist toolchain sets and reference them in set_active. main.rs (line 1496) main.rs (line 1511)
 - P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
 - P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)

@@ -19,9 +19,9 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Service coverage
 - Home: starts demo job and streams events from JobService.
-- Toolchains: list providers, install, verify, list installed.
-- Projects: list templates only.
-- Targets: list targets, install/start/stop Cuttlefish, logcat, install APK, launch app.
+- Toolchains: list providers/available/installed/sets, install/verify with pinned version inputs, create/set/get toolchain sets.
+- Projects: list templates, create/open, list recent, set project config, use active defaults.
+- Targets: list targets, set/get default target, resolve Cuttlefish build ids, install/start/stop Cuttlefish, logcat, install APK, launch app.
 - Console: run builds via BuildService, stream job events.
 - Evidence: list runs, export support bundles, export evidence bundles, stream job events.
 
@@ -31,8 +31,6 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
-- P0: Add project create/open flows with template selection and errors. main.rs (line 436) main.rs (line 946)
 - P0: Replace demo-job UI/CLI with real job type selection/status views. main.rs (line 790) main.rs (line 41)
 - P1: Add project recent list + job history viewer. main.rs (line 157)
-- P1: Add toolchain set management UI/CLI commands. main.rs (line 829) main.rs (line 55)
 - P2: Persist UI config (service addresses) and export logs. main.rs (line 34)

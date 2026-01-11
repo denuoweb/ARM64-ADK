@@ -11,14 +11,17 @@ Update this file whenever TargetService behavior changes or when commits touchin
 ## gRPC contract
 - proto/aadk/v1/target.proto
 - RPCs: ListTargets, SetDefaultTarget, GetDefaultTarget, InstallApk, Launch, StopApp,
-  StreamLogcat, InstallCuttlefish, StartCuttlefish, StopCuttlefish, GetCuttlefishStatus
+  StreamLogcat, InstallCuttlefish, ResolveCuttlefishBuild, StartCuttlefish, StopCuttlefish, GetCuttlefishStatus
 
 ## Current implementation details
 - Implementation lives in crates/aadk-targets/src/main.rs with a tonic server.
 - list_targets shells out to `adb devices -l` and parses output; optionally adds a Cuttlefish
   synthetic target with detailed status metadata.
-- default target is stored in memory only.
+- default target is persisted under ~/.local/share/aadk/state/targets.json and refreshed from
+  live adb discovery when possible.
 - APK install/launch/stop and logcat are implemented via adb commands.
+- Cuttlefish install can accept per-request branch/target/build_id overrides; build resolution is
+  exposed via ResolveCuttlefishBuild.
 - Cuttlefish operations run external commands and report state via JobService events.
 
 ## Data flow and dependencies
@@ -51,7 +54,6 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_CUTTLEFISH_BRANCH / AADK_CUTTLEFISH_TARGET / AADK_CUTTLEFISH_BUILD_ID
 
 ## Prioritized TODO checklist by service
-- P0: Persist default target across restarts (currently in-memory). main.rs (line 2818)
 - P0: Add provider abstraction beyond adb/cuttlefish discovery. main.rs (line 1193)
 - P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
 - P1: Normalize/validate target IDs and address formats consistently. main.rs (line 1050)

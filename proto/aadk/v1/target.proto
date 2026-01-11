@@ -39,8 +39,25 @@ message LaunchResponse { Id job_id = 1; }
 message StopAppRequest { Id target_id = 1; string application_id = 2; }
 message StopAppResponse { Id job_id = 1; }
 
-message InstallCuttlefishRequest { bool force = 1; }
+message InstallCuttlefishRequest {
+  bool force = 1;
+  string branch = 2;
+  string target = 3;
+  string build_id = 4;
+}
 message InstallCuttlefishResponse { Id job_id = 1; }
+
+message ResolveCuttlefishBuildRequest {
+  string branch = 1;
+  string target = 2;
+  string build_id = 3;
+}
+message ResolveCuttlefishBuildResponse {
+  string branch = 1;
+  string target = 2;
+  string build_id = 3;
+  string product = 4;
+}
 
 message StartCuttlefishRequest { bool show_full_ui = 1; }
 message StartCuttlefishResponse { Id job_id = 1; }
@@ -72,6 +89,7 @@ service TargetService {
   rpc Launch(LaunchRequest) returns (LaunchResponse);
   rpc StopApp(StopAppRequest) returns (StopAppResponse);
   rpc InstallCuttlefish(InstallCuttlefishRequest) returns (InstallCuttlefishResponse);
+  rpc ResolveCuttlefishBuild(ResolveCuttlefishBuildRequest) returns (ResolveCuttlefishBuildResponse);
   rpc StartCuttlefish(StartCuttlefishRequest) returns (StartCuttlefishResponse);
   rpc StopCuttlefish(StopCuttlefishRequest) returns (StopCuttlefishResponse);
   rpc GetCuttlefishStatus(GetCuttlefishStatusRequest) returns (GetCuttlefishStatusResponse);

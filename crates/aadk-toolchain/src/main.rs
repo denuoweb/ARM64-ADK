@@ -15,9 +15,11 @@ use aadk_proto::aadk::v1::{
     InstallToolchainResponse, InstalledToolchain, JobCompleted, JobEvent, JobFailed, JobLogAppended,
     JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListAvailableRequest,
     ListAvailableResponse, ListInstalledRequest, ListInstalledResponse, ListProvidersRequest,
-    ListProvidersResponse, LogChunk, PageInfo, PublishJobEventRequest, SetActiveToolchainSetRequest,
+    ListProvidersResponse, ListToolchainSetsRequest, ListToolchainSetsResponse, LogChunk, PageInfo,
+    PublishJobEventRequest, SetActiveToolchainSetRequest,
     SetActiveToolchainSetResponse, StartJobRequest, Timestamp, ToolchainArtifact, ToolchainKind,
-    ToolchainProvider, ToolchainSet, ToolchainVersion, VerifyToolchainRequest, VerifyToolchainResponse,
+    ToolchainProvider, ToolchainSet, ToolchainVersion, VerifyToolchainRequest,
+    VerifyToolchainResponse,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -45,10 +47,12 @@ const NDK_AARCH64_LINUX_MUSL_URL: &str =
 const NDK_AARCH64_LINUX_MUSL_SHA256: &str =
     "1eae8941df23773f8dc70cdbf019d755f82332f0956f8062072b676f89094bc2";
 const NDK_AARCH64_LINUX_MUSL_SIZE: u64 = 196_684_092;
+const DEFAULT_PAGE_SIZE: usize = 25;
 
 #[derive(Default)]
 struct State {
-    active_set: Option<ToolchainSet>,
+    active_set_id: Option<String>,
+    toolchain_sets: Vec<ToolchainSet>,
     installed: Vec<InstalledToolchain>,
 }
 
@@ -71,6 +75,8 @@ struct Provenance {
 #[serde(default)]
 struct PersistedState {
     installed: Vec<PersistedToolchain>,
+    toolchain_sets: Vec<PersistedToolchainSet>,
+    active_set_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -88,6 +94,15 @@ struct PersistedToolchain {
     installed_at_unix_millis: i64,
     source_url: String,
     sha256: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedToolchainSet {
+    toolchain_set_id: String,
+    sdk_toolchain_id: Option<String>,
+    ndk_toolchain_id: Option<String>,
+    display_name: String,
 }
 
 impl PersistedToolchain {
@@ -138,6 +153,42 @@ impl PersistedToolchain {
             installed_at: Some(Timestamp { unix_millis: self.installed_at_unix_millis }),
             source_url: self.source_url,
             sha256: self.sha256,
+        }
+    }
+}
+
+impl PersistedToolchainSet {
+    fn from_proto(set: &ToolchainSet) -> Option<Self> {
+        let set_id = set
+            .toolchain_set_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())?
+            .to_string();
+        Some(Self {
+            toolchain_set_id: set_id,
+            sdk_toolchain_id: set
+                .sdk_toolchain_id
+                .as_ref()
+                .map(|id| id.value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            ndk_toolchain_id: set
+                .ndk_toolchain_id
+                .as_ref()
+                .map(|id| id.value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            display_name: set.display_name.clone(),
+        })
+    }
+
+    fn into_proto(self) -> ToolchainSet {
+        ToolchainSet {
+            toolchain_set_id: Some(Id {
+                value: self.toolchain_set_id,
+            }),
+            sdk_toolchain_id: self.sdk_toolchain_id.map(|value| Id { value }),
+            ndk_toolchain_id: self.ndk_toolchain_id.map(|value| Id { value }),
+            display_name: self.display_name,
         }
     }
 }
@@ -579,16 +630,59 @@ fn load_state() -> State {
         }
     };
 
-    let installed = parsed.installed.into_iter().map(PersistedToolchain::into_installed).collect();
+    let installed = parsed
+        .installed
+        .into_iter()
+        .map(PersistedToolchain::into_installed)
+        .collect();
+    let toolchain_sets = parsed
+        .toolchain_sets
+        .into_iter()
+        .filter_map(|set| {
+            if set.toolchain_set_id.trim().is_empty() {
+                warn!("Skipping toolchain set with empty id in persisted state");
+                None
+            } else {
+                Some(set.into_proto())
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut active_set_id = parsed.active_set_id.filter(|id| !id.trim().is_empty());
+    if let Some(active_id) = active_set_id.as_ref() {
+        let exists = toolchain_sets.iter().any(|set| {
+            set.toolchain_set_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                == Some(active_id.as_str())
+        });
+        if !exists {
+            warn!(
+                "Active toolchain set id '{}' missing from persisted state; clearing",
+                active_id
+            );
+            active_set_id = None;
+        }
+    }
     State {
-        active_set: None,
+        active_set_id,
+        toolchain_sets,
         installed,
     }
 }
 
 fn save_state(state: &State) -> io::Result<()> {
     let persist = PersistedState {
-        installed: state.installed.iter().map(PersistedToolchain::from_installed).collect(),
+        installed: state
+            .installed
+            .iter()
+            .map(PersistedToolchain::from_installed)
+            .collect(),
+        toolchain_sets: state
+            .toolchain_sets
+            .iter()
+            .filter_map(PersistedToolchainSet::from_proto)
+            .collect(),
+        active_set_id: state.active_set_id.clone(),
     };
     let payload = serde_json::to_vec_pretty(&persist)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -606,6 +700,40 @@ fn save_state_best_effort(state: &State) {
     if let Err(e) = save_state(state) {
         warn!("Failed to persist toolchain state: {}", e);
     }
+}
+
+fn normalize_id(id: Option<Id>) -> Option<String> {
+    id.map(|value| value.value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn installed_toolchain_matches(
+    installed: &[InstalledToolchain],
+    id: &str,
+    expected: ToolchainKind,
+) -> bool {
+    installed.iter().any(|item| {
+        let item_id = item.toolchain_id.as_ref().map(|i| i.value.as_str());
+        let matches_id = item_id == Some(id);
+        if !matches_id {
+            return false;
+        }
+        let kind = item
+            .provider
+            .as_ref()
+            .and_then(|provider| ToolchainKind::try_from(provider.kind).ok())
+            .unwrap_or(ToolchainKind::Unspecified);
+        matches!(
+            (expected, kind),
+            (ToolchainKind::Sdk, ToolchainKind::Sdk)
+                | (ToolchainKind::Ndk, ToolchainKind::Ndk)
+                | (_, ToolchainKind::Unspecified)
+        )
+    })
+}
+
+fn toolchain_set_id(set: &ToolchainSet) -> Option<&str> {
+    set.toolchain_set_id.as_ref().map(|id| id.value.as_str())
 }
 
 fn download_dir() -> PathBuf {
@@ -1207,6 +1335,42 @@ impl ToolchainService for Svc {
         Ok(Response::new(ListInstalledResponse { items }))
     }
 
+    async fn list_toolchain_sets(
+        &self,
+        request: Request<ListToolchainSetsRequest>,
+    ) -> Result<Response<ListToolchainSetsResponse>, Status> {
+        let req = request.into_inner();
+        let page = req.page.unwrap_or_default();
+        let page_size = if page.page_size == 0 {
+            DEFAULT_PAGE_SIZE
+        } else {
+            page.page_size as usize
+        };
+        let start = if page.page_token.trim().is_empty() {
+            0
+        } else {
+            page.page_token
+                .parse::<usize>()
+                .map_err(|_| Status::invalid_argument("invalid page_token"))?
+        };
+
+        let st = self.state.lock().await;
+        let total = st.toolchain_sets.len();
+        if start >= total && total != 0 {
+            return Err(Status::invalid_argument("page_token out of range"));
+        }
+        let end = (start + page_size).min(total);
+        let sets = st.toolchain_sets[start..end].to_vec();
+        let next_token = if end < total { end.to_string() } else { String::new() };
+
+        Ok(Response::new(ListToolchainSetsResponse {
+            sets,
+            page_info: Some(PageInfo {
+                next_page_token: next_token,
+            }),
+        }))
+    }
+
     async fn install_toolchain(
         &self,
         _request: Request<InstallToolchainRequest>,
@@ -1498,12 +1662,46 @@ impl ToolchainService for Svc {
         request: Request<CreateToolchainSetRequest>,
     ) -> Result<Response<CreateToolchainSetResponse>, Status> {
         let req = request.into_inner();
-        let set = ToolchainSet {
-            toolchain_set_id: Some(Id { value: format!("set-{}", Uuid::new_v4()) }),
-            sdk_toolchain_id: req.sdk_toolchain_id,
-            ndk_toolchain_id: req.ndk_toolchain_id,
-            display_name: if req.display_name.is_empty() { "SDK+NDK".into() } else { req.display_name },
+        let sdk_id = normalize_id(req.sdk_toolchain_id);
+        let ndk_id = normalize_id(req.ndk_toolchain_id);
+        if sdk_id.is_none() && ndk_id.is_none() {
+            return Err(Status::invalid_argument(
+                "sdk_toolchain_id or ndk_toolchain_id is required",
+            ));
+        }
+
+        let mut st = self.state.lock().await;
+        if let Some(ref sdk_id) = sdk_id {
+            if !installed_toolchain_matches(&st.installed, sdk_id, ToolchainKind::Sdk) {
+                return Err(Status::not_found(format!(
+                    "sdk toolchain not installed: {sdk_id}"
+                )));
+            }
+        }
+        if let Some(ref ndk_id) = ndk_id {
+            if !installed_toolchain_matches(&st.installed, ndk_id, ToolchainKind::Ndk) {
+                return Err(Status::not_found(format!(
+                    "ndk toolchain not installed: {ndk_id}"
+                )));
+            }
+        }
+
+        let display_name = if req.display_name.trim().is_empty() {
+            "SDK+NDK".into()
+        } else {
+            req.display_name.trim().to_string()
         };
+
+        let set = ToolchainSet {
+            toolchain_set_id: Some(Id {
+                value: format!("set-{}", Uuid::new_v4()),
+            }),
+            sdk_toolchain_id: sdk_id.map(|value| Id { value }),
+            ndk_toolchain_id: ndk_id.map(|value| Id { value }),
+            display_name,
+        };
+        st.toolchain_sets.push(set.clone());
+        save_state_best_effort(&st);
 
         Ok(Response::new(CreateToolchainSetResponse { set: Some(set) }))
     }
@@ -1514,12 +1712,18 @@ impl ToolchainService for Svc {
     ) -> Result<Response<SetActiveToolchainSetResponse>, Status> {
         let req = request.into_inner();
         let mut st = self.state.lock().await;
-        st.active_set = Some(ToolchainSet {
-            toolchain_set_id: req.toolchain_set_id,
-            sdk_toolchain_id: None,
-            ndk_toolchain_id: None,
-            display_name: "Active toolchain set".into(),
+        let set_id = normalize_id(req.toolchain_set_id)
+            .ok_or_else(|| Status::invalid_argument("toolchain_set_id is required"))?;
+        let exists = st.toolchain_sets.iter().any(|set| {
+            toolchain_set_id(set) == Some(set_id.as_str())
         });
+        if !exists {
+            return Err(Status::not_found(format!(
+                "toolchain_set_id not found: {set_id}"
+            )));
+        }
+        st.active_set_id = Some(set_id);
+        save_state_best_effort(&st);
         Ok(Response::new(SetActiveToolchainSetResponse { ok: true }))
     }
 
@@ -1528,8 +1732,13 @@ impl ToolchainService for Svc {
         _request: Request<GetActiveToolchainSetRequest>,
     ) -> Result<Response<GetActiveToolchainSetResponse>, Status> {
         let st = self.state.lock().await;
+        let active_set = st
+            .active_set_id
+            .as_ref()
+            .and_then(|id| st.toolchain_sets.iter().find(|set| toolchain_set_id(set) == Some(id.as_str())))
+            .cloned();
         Ok(Response::new(GetActiveToolchainSetResponse {
-            set: st.active_set.clone(),
+            set: active_set,
         }))
     }
 }

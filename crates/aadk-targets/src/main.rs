@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -15,7 +16,8 @@ use aadk_proto::aadk::v1::{
     InstallCuttlefishRequest, InstallCuttlefishResponse, JobCompleted, JobEvent, JobFailed,
     JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
     LaunchRequest, LaunchResponse, ListTargetsRequest, ListTargetsResponse, LogChunk, LogcatEvent,
-    PublishJobEventRequest, SetDefaultTargetRequest, SetDefaultTargetResponse, StartCuttlefishRequest,
+    PublishJobEventRequest, ResolveCuttlefishBuildRequest, ResolveCuttlefishBuildResponse,
+    SetDefaultTargetRequest, SetDefaultTargetResponse, StartCuttlefishRequest,
     StartCuttlefishResponse, StartJobRequest, StopAppRequest, StopAppResponse, StopCuttlefishRequest,
     StopCuttlefishResponse, StreamLogcatRequest, Target, TargetKind, Timestamp,
 };
@@ -28,16 +30,100 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+const STATE_FILE_NAME: &str = "targets.json";
 
 #[derive(Default)]
 struct State {
     default_target: Option<Target>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedState {
+    default_target: Option<PersistedTarget>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedTarget {
+    target_id: String,
+    kind: i32,
+    display_name: String,
+    provider: String,
+    address: String,
+    api_level: String,
+    state: String,
+    details: Vec<PersistedDetail>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedDetail {
+    key: String,
+    value: String,
+}
+
+#[derive(Clone)]
 struct Svc {
     state: Arc<Mutex<State>>,
+}
+
+impl Default for Svc {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(load_state())),
+        }
+    }
+}
+
+impl PersistedTarget {
+    fn from_proto(target: &Target) -> Option<Self> {
+        let target_id = target
+            .target_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())?
+            .to_string();
+        Some(Self {
+            target_id,
+            kind: target.kind,
+            display_name: target.display_name.clone(),
+            provider: target.provider.clone(),
+            address: target.address.clone(),
+            api_level: target.api_level.clone(),
+            state: target.state.clone(),
+            details: target
+                .details
+                .iter()
+                .map(|detail| PersistedDetail {
+                    key: detail.key.clone(),
+                    value: detail.value.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn into_proto(self) -> Target {
+        Target {
+            target_id: Some(Id { value: self.target_id }),
+            kind: self.kind,
+            display_name: self.display_name,
+            provider: self.provider,
+            address: self.address,
+            api_level: self.api_level,
+            state: self.state,
+            details: self
+                .details
+                .into_iter()
+                .map(|detail| KeyValue {
+                    key: detail.key,
+                    value: detail.value,
+                })
+                .collect(),
+        }
+    }
 }
 
 fn now_ts() -> Timestamp {
@@ -46,6 +132,59 @@ fn now_ts() -> Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     Timestamp { unix_millis: ms }
+}
+
+fn state_file_path() -> PathBuf {
+    data_dir().join("state").join(STATE_FILE_NAME)
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec_pretty(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_state() -> State {
+    let path = state_file_path();
+    match fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<PersistedState>(&data) {
+            Ok(parsed) => State {
+                default_target: parsed.default_target.map(PersistedTarget::into_proto),
+            },
+            Err(err) => {
+                warn!("Failed to parse {}: {}", path.display(), err);
+                State::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!("Failed to read {}: {}", path.display(), err);
+            }
+            State::default()
+        }
+    }
+}
+
+fn save_state(state: &State) -> io::Result<()> {
+    let persist = PersistedState {
+        default_target: state
+            .default_target
+            .as_ref()
+            .and_then(PersistedTarget::from_proto),
+    };
+    write_json_atomic(&state_file_path(), &persist)
+}
+
+fn save_state_best_effort(state: &State) {
+    if let Err(err) = save_state(state) {
+        warn!("Failed to persist target state: {}", err);
+    }
 }
 
 #[derive(Debug)]
@@ -552,6 +691,59 @@ async fn fetch_branch_grid(branch: &str) -> Result<CiBranchGrid, String> {
 struct CuttlefishBuildInfo {
     build_id: String,
     product: String,
+}
+
+#[derive(Clone, Debug)]
+struct CuttlefishInstallOptions {
+    force: bool,
+    branch: Option<String>,
+    target: Option<String>,
+    build_id: Option<String>,
+}
+
+struct CuttlefishRequestConfig {
+    branch: String,
+    target: String,
+    build_id_override: Option<String>,
+    has_branch_override: bool,
+    has_target_override: bool,
+}
+
+fn normalize_override(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_cuttlefish_request_config(
+    page_size: Option<usize>,
+    branch_override: Option<String>,
+    target_override: Option<String>,
+    build_id_override: Option<String>,
+) -> CuttlefishRequestConfig {
+    let env_branch_override =
+        cuttlefish_env_for_page_size("AADK_CUTTLEFISH_BRANCH", page_size).is_some();
+    let env_target_override =
+        cuttlefish_env_for_page_size("AADK_CUTTLEFISH_TARGET", page_size).is_some();
+
+    let branch_override = normalize_override(branch_override);
+    let target_override = normalize_override(target_override);
+    let build_id_override = normalize_override(build_id_override).or_else(cuttlefish_build_id_override);
+
+    let branch = branch_override
+        .clone()
+        .unwrap_or_else(|| cuttlefish_branch(page_size));
+    let target = target_override
+        .clone()
+        .unwrap_or_else(|| cuttlefish_target(page_size));
+
+    CuttlefishRequestConfig {
+        branch,
+        target,
+        build_id_override,
+        has_branch_override: branch_override.is_some() || env_branch_override,
+        has_target_override: target_override.is_some() || env_target_override,
+    }
 }
 
 async fn resolve_build_info(
@@ -2367,7 +2559,7 @@ async fn run_cuttlefish_stop_job(job_id: String) {
     let _ = publish_completed(&mut job_client, &job_id, "Cuttlefish stopped", outputs).await;
 }
 
-async fn run_cuttlefish_install_job(job_id: String, force: bool) {
+async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOptions) {
     let mut job_client = match connect_job().await {
         Ok(client) => client,
         Err(err) => {
@@ -2403,7 +2595,7 @@ async fn run_cuttlefish_install_job(job_id: String, force: bool) {
 
     let sudo_prefix = sudo_prefix();
 
-    if install_host && (!host_installed || force) {
+    if install_host && (!host_installed || options.force) {
         let install_cmd = if let Some(cmd) = read_env_trimmed("AADK_CUTTLEFISH_INSTALL_CMD") {
             cmd
         } else {
@@ -2489,14 +2681,18 @@ async fn run_cuttlefish_install_job(job_id: String, force: bool) {
         }
     }
 
-    if install_images && (!images_ready || force) {
-        let branch = cuttlefish_branch(page_size);
-        let target = cuttlefish_target(page_size);
-        let branch_override =
-            cuttlefish_env_for_page_size("AADK_CUTTLEFISH_BRANCH", page_size).is_some();
-        let target_override =
-            cuttlefish_env_for_page_size("AADK_CUTTLEFISH_TARGET", page_size).is_some();
-        let build_id_override = cuttlefish_build_id_override();
+    if install_images && (!images_ready || options.force) {
+        let config = resolve_cuttlefish_request_config(
+            page_size,
+            options.branch.clone(),
+            options.target.clone(),
+            options.build_id.clone(),
+        );
+        let branch = config.branch;
+        let target = config.target;
+        let branch_override = config.has_branch_override;
+        let target_override = config.has_target_override;
+        let build_id_override = config.build_id_override;
 
         let mut candidates = vec![(branch.clone(), target.clone())];
         if build_id_override.is_none() && !branch_override && !target_override {
@@ -2735,7 +2931,7 @@ async fn run_cuttlefish_install_job(job_id: String, force: bool) {
     }
 
     let mut outputs = Vec::new();
-    outputs.push(KeyValue { key: "force".into(), value: force.to_string() });
+    outputs.push(KeyValue { key: "force".into(), value: options.force.to_string() });
     outputs.push(KeyValue { key: "home_dir".into(), value: home_dir.display().to_string() });
     outputs.push(KeyValue { key: "images_dir".into(), value: images_dir.display().to_string() });
     outputs.push(KeyValue { key: "host_dir".into(), value: host_dir.display().to_string() });
@@ -2825,21 +3021,56 @@ impl TargetService for Svc {
         let chosen = targets
             .into_iter()
             .find(|t| t.target_id.as_ref().map(|i| i.value.as_str()) == Some(target_id.as_str()));
+        let Some(chosen) = chosen else {
+            return Ok(Response::new(SetDefaultTargetResponse { ok: false }));
+        };
 
         let mut st = self.state.lock().await;
-        st.default_target = chosen;
-        Ok(Response::new(SetDefaultTargetResponse {
-            ok: st.default_target.is_some(),
-        }))
+        st.default_target = Some(chosen);
+        if let Err(err) = save_state(&st) {
+            return Err(Status::internal(format!(
+                "failed to persist default target: {err}"
+            )));
+        }
+        Ok(Response::new(SetDefaultTargetResponse { ok: true }))
     }
 
     async fn get_default_target(
         &self,
         _request: Request<GetDefaultTargetRequest>,
     ) -> Result<Response<GetDefaultTargetResponse>, Status> {
-        let st = self.state.lock().await;
+        let stored = { self.state.lock().await.default_target.clone() };
+        let Some(stored) = stored else {
+            return Ok(Response::new(GetDefaultTargetResponse { target: None }));
+        };
+
+        let stored_id = stored
+            .target_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if let Some(target_id) = stored_id {
+            if let Ok(targets) = fetch_targets(true).await {
+                if let Some(found) = targets.into_iter().find(|target| {
+                    target
+                        .target_id
+                        .as_ref()
+                        .map(|id| id.value.as_str())
+                        == Some(target_id.as_str())
+                }) {
+                    let mut st = self.state.lock().await;
+                    st.default_target = Some(found.clone());
+                    save_state_best_effort(&st);
+                    return Ok(Response::new(GetDefaultTargetResponse {
+                        target: Some(found),
+                    }));
+                }
+            }
+        }
+
         Ok(Response::new(GetDefaultTargetResponse {
-            target: st.default_target.clone(),
+            target: Some(stored),
         }))
     }
 
@@ -2939,24 +3170,92 @@ impl TargetService for Svc {
     ) -> Result<Response<InstallCuttlefishResponse>, Status> {
         let req = request.into_inner();
         let force = req.force;
+        let branch = req.branch.trim().to_string();
+        let target = req.target.trim().to_string();
+        let build_id = req.build_id.trim().to_string();
+
+        let branch_override = if branch.is_empty() { None } else { Some(branch) };
+        let target_override = if target.is_empty() { None } else { Some(target) };
+        let build_id_override = if build_id.is_empty() { None } else { Some(build_id) };
 
         let mut job_client = connect_job().await?;
+        let mut params = vec![KeyValue {
+            key: "force".into(),
+            value: force.to_string(),
+        }];
+        if let Some(ref branch) = branch_override {
+            params.push(KeyValue {
+                key: "branch".into(),
+                value: branch.clone(),
+            });
+        }
+        if let Some(ref target) = target_override {
+            params.push(KeyValue {
+                key: "target".into(),
+                value: target.clone(),
+            });
+        }
+        if let Some(ref build_id) = build_id_override {
+            params.push(KeyValue {
+                key: "build_id".into(),
+                value: build_id.clone(),
+            });
+        }
+
         let job_id = start_job(
             &mut job_client,
             "targets.cuttlefish.install",
-            vec![KeyValue {
-                key: "force".into(),
-                value: force.to_string(),
-            }],
+            params,
             None,
             None,
         )
         .await?;
 
-        tokio::spawn(run_cuttlefish_install_job(job_id.clone(), force));
+        tokio::spawn(run_cuttlefish_install_job(
+            job_id.clone(),
+            CuttlefishInstallOptions {
+                force,
+                branch: branch_override,
+                target: target_override,
+                build_id: build_id_override,
+            },
+        ));
 
         Ok(Response::new(InstallCuttlefishResponse {
             job_id: Some(Id { value: job_id }),
+        }))
+    }
+
+    async fn resolve_cuttlefish_build(
+        &self,
+        request: Request<ResolveCuttlefishBuildRequest>,
+    ) -> Result<Response<ResolveCuttlefishBuildResponse>, Status> {
+        let req = request.into_inner();
+        let page_size = host_page_size();
+        let config = resolve_cuttlefish_request_config(
+            page_size,
+            Some(req.branch),
+            Some(req.target),
+            Some(req.build_id),
+        );
+
+        if config.branch.trim().is_empty() || config.target.trim().is_empty() {
+            return Err(Status::invalid_argument("branch and target are required"));
+        }
+
+        let info = resolve_build_info(
+            &config.branch,
+            &config.target,
+            config.build_id_override.clone(),
+        )
+        .await
+        .map_err(|err| Status::internal(format!("resolve build failed: {err}")))?;
+
+        Ok(Response::new(ResolveCuttlefishBuildResponse {
+            branch: config.branch,
+            target: config.target,
+            build_id: info.build_id,
+            product: info.product,
         }))
     }
 
