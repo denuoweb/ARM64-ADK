@@ -342,6 +342,13 @@ fn cuttlefish_page_size_check_enabled() -> bool {
     }
 }
 
+fn cuttlefish_kvm_check_enabled() -> bool {
+    match std::env::var("AADK_CUTTLEFISH_KVM_CHECK") {
+        Ok(val) => !(val == "0" || val.eq_ignore_ascii_case("false")),
+        Err(_) => true,
+    }
+}
+
 fn cuttlefish_connect_enabled() -> bool {
     match std::env::var("AADK_CUTTLEFISH_CONNECT") {
         Ok(val) => !(val == "0" || val.eq_ignore_ascii_case("false")),
@@ -367,6 +374,10 @@ fn cuttlefish_launch_bin() -> String {
 
 fn cuttlefish_stop_bin() -> String {
     std::env::var("AADK_STOP_CVD_BIN").unwrap_or_else(|_| "stop_cvd".into())
+}
+
+fn cuttlefish_gpu_mode() -> Option<String> {
+    read_env_trimmed("AADK_CUTTLEFISH_GPU_MODE")
 }
 
 fn find_command(cmd: &str) -> Option<PathBuf> {
@@ -401,6 +412,37 @@ fn host_page_size() -> Option<usize> {
         Some(size as usize)
     } else {
         None
+    }
+}
+
+#[derive(Debug)]
+struct KvmStatus {
+    present: bool,
+    accessible: bool,
+    detail: Option<String>,
+}
+
+fn kvm_status() -> KvmStatus {
+    let path = Path::new("/dev/kvm");
+    if !path.exists() {
+        return KvmStatus {
+            present: false,
+            accessible: false,
+            detail: Some("missing /dev/kvm".into()),
+        };
+    }
+
+    match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(_) => KvmStatus {
+            present: true,
+            accessible: true,
+            detail: None,
+        },
+        Err(err) => KvmStatus {
+            present: true,
+            accessible: false,
+            detail: Some(err.to_string()),
+        },
     }
 }
 
@@ -476,10 +518,7 @@ fn cuttlefish_branch(page_size: Option<usize>) -> String {
     if page_size.unwrap_or(0) > 4096 {
         return "main-16k-with-phones".into();
     }
-    match std::env::consts::ARCH {
-        "aarch64" => "aosp-main-throttled".into(),
-        _ => "aosp-main".into(),
-    }
+    "aosp-android-latest-release".into()
 }
 
 fn cuttlefish_target(page_size: Option<usize>) -> String {
@@ -493,23 +532,25 @@ fn cuttlefish_target(page_size: Option<usize>) -> String {
         };
     }
     match std::env::consts::ARCH {
-        "aarch64" => "aosp_cf_arm64_only_phone-trunk_staging-userdebug".into(),
-        _ => "aosp_cf_x86_64_phone-trunk_staging-userdebug".into(),
+        "aarch64" => "aosp_cf_arm64_only_phone-userdebug".into(),
+        "riscv64" => "aosp_cf_riscv64_phone-userdebug".into(),
+        _ => "aosp_cf_x86_64_only_phone-userdebug".into(),
     }
 }
 
-fn cuttlefish_fallback_branch_target(page_size: Option<usize>) -> Option<(String, String)> {
-    if page_size.unwrap_or(0) <= 4096 {
-        return None;
-    }
+fn cuttlefish_fallback_branch_target(_page_size: Option<usize>) -> Option<(String, String)> {
     match std::env::consts::ARCH {
         "aarch64" => Some((
             "aosp-main-throttled".into(),
             "aosp_cf_arm64_only_phone-trunk_staging-userdebug".into(),
         )),
+        "riscv64" => Some((
+            "aosp-main".into(),
+            "aosp_cf_riscv64_phone-trunk_staging-userdebug".into(),
+        )),
         _ => Some((
-            "aosp-main-throttled".into(),
-            "aosp_cf_x86_64_auto-trunk_staging-userdebug".into(),
+            "aosp-main".into(),
+            "aosp_cf_x86_64_phone-trunk_staging-userdebug".into(),
         )),
     }
 }
@@ -1001,6 +1042,7 @@ fn cuttlefish_home_env_prefix(home: &Path) -> String {
 
 async fn cuttlefish_status() -> Result<CuttlefishStatus, CuttlefishStatusError> {
     let page_size = host_page_size();
+    let home_dir = cuttlefish_home_dir(page_size);
     let cvd_path = cuttlefish_cvd_path();
     let launch_path = cuttlefish_launch_path(page_size);
     if cvd_path.is_none() && launch_path.is_none() {
@@ -1018,7 +1060,8 @@ async fn cuttlefish_status() -> Result<CuttlefishStatus, CuttlefishStatusError> 
     let mut cmd = Command::new(&cvd_path);
     cmd.arg("status")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env("HOME", &home_dir);
     if host_dir.is_dir() {
         cmd.current_dir(&host_dir);
     }
@@ -1274,6 +1317,13 @@ async fn maybe_cuttlefish_target(
     if let Some(size) = page_size {
         details.push(KeyValue { key: "host_page_size".into(), value: size.to_string() });
     }
+    let kvm = kvm_status();
+    details.push(KeyValue { key: "kvm_present".into(), value: kvm.present.to_string() });
+    details.push(KeyValue { key: "kvm_access".into(), value: kvm.accessible.to_string() });
+    details.push(KeyValue { key: "kvm_check_enabled".into(), value: cuttlefish_kvm_check_enabled().to_string() });
+    if let Some(detail) = kvm.detail {
+        details.push(KeyValue { key: "kvm_detail".into(), value: detail });
+    }
     details.push(KeyValue { key: "cuttlefish_running".into(), value: status_running.to_string() });
     details.push(KeyValue { key: "cuttlefish_connect_enabled".into(), value: connect_enabled.to_string() });
     details.push(KeyValue { key: "cuttlefish_home".into(), value: cuttlefish_home_dir(page_size).display().to_string() });
@@ -1281,6 +1331,9 @@ async fn maybe_cuttlefish_target(
     details.push(KeyValue { key: "cuttlefish_host_dir".into(), value: cuttlefish_host_dir(page_size).display().to_string() });
     details.push(KeyValue { key: "cuttlefish_branch".into(), value: cuttlefish_branch(page_size) });
     details.push(KeyValue { key: "cuttlefish_target".into(), value: cuttlefish_target(page_size) });
+    if let Some(mode) = cuttlefish_gpu_mode() {
+        details.push(KeyValue { key: "cuttlefish_gpu_mode".into(), value: mode });
+    }
     if let Some(build_id) = cuttlefish_build_id_override() {
         details.push(KeyValue { key: "cuttlefish_build_id".into(), value: build_id });
     }
@@ -1905,6 +1958,31 @@ async fn run_shell_command_inner(
     Ok((output.status.success(), code, stdout, stderr))
 }
 
+async fn current_user_groups() -> Option<Vec<String>> {
+    let (ok, _, stdout, _) = run_shell_command_raw("id -Gn").await.ok()?;
+    if !ok {
+        return None;
+    }
+    let groups: Vec<String> = stdout
+        .split_whitespace()
+        .map(|group| group.trim().to_string())
+        .filter(|group| !group.is_empty())
+        .collect();
+    if groups.is_empty() {
+        None
+    } else {
+        Some(groups)
+    }
+}
+
+fn missing_groups(groups: &[String], required: &[&str]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|required| !groups.iter().any(|group| group == *required))
+        .map(|group| group.to_string())
+        .collect()
+}
+
 fn tail_lines(contents: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = contents.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
@@ -1938,6 +2016,13 @@ async fn collect_cuttlefish_diagnostics() -> String {
     out.push_str(&format!("cuttlefish_home: {}\n", cuttlefish_home_dir(page_size).display()));
     out.push_str(&format!("cuttlefish_images_dir: {}\n", cuttlefish_images_dir(page_size).display()));
     out.push_str(&format!("cuttlefish_host_dir: {}\n\n", cuttlefish_host_dir(page_size).display()));
+    let kvm = kvm_status();
+    out.push_str(&format!("kvm_present: {}\n", kvm.present));
+    out.push_str(&format!("kvm_access: {}\n", kvm.accessible));
+    if let Some(detail) = kvm.detail {
+        out.push_str(&format!("kvm_detail: {}\n", detail.trim()));
+    }
+    out.push('\n');
 
     if let Some(cvd_path) = cuttlefish_cvd_path() {
         let cmd = format!("{} status", cvd_path.display());
@@ -1958,6 +2043,16 @@ async fn collect_cuttlefish_diagnostics() -> String {
 
     let adb_cmd = format!("{} devices -l", adb_path().display());
     if let Some(section) = run_diag_command("adb devices", &adb_cmd).await {
+        out.push_str(&section);
+        out.push_str("\n\n");
+    }
+
+    if let Some(section) = run_diag_command("kvm device", "ls -l /dev/kvm").await {
+        out.push_str(&section);
+        out.push_str("\n\n");
+    }
+
+    if let Some(section) = run_diag_command("groups", "id -nG").await {
         out.push_str(&section);
         out.push_str("\n\n");
     }
@@ -2080,6 +2175,12 @@ fn should_recover_bluetooth(log: &str) -> bool {
             || lower.contains("dependencies not ready"))
 }
 
+fn args_has_flag(args: &str, flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    args.split_whitespace()
+        .any(|part| part == flag || part.starts_with(&prefix))
+}
+
 fn append_arg_once(mut command: String, arg: &str) -> String {
     if command.contains(arg) {
         return command;
@@ -2094,6 +2195,8 @@ fn append_arg_once(mut command: String, arg: &str) -> String {
 async fn cuttlefish_preflight(
     job_client: &mut JobServiceClient<Channel>,
     job_id: &str,
+    require_kvm: bool,
+    require_images: bool,
 ) -> Result<CuttlefishRuntime, ErrorDetail> {
     let page_size = host_page_size();
     let home_dir = cuttlefish_home_dir(page_size);
@@ -2102,17 +2205,74 @@ async fn cuttlefish_preflight(
 
     if let Some(size) = page_size {
         let _ = publish_log(job_client, job_id, &format!("Host page size: {size}\n")).await;
-        if cuttlefish_page_size_check_enabled() && size > 4096 && !cuttlefish_images_ready(&images_dir) {
-            return Err(job_error_detail(
-                ErrorCode::Unavailable,
-                "missing 16K Cuttlefish images",
-                format!("page_size={size}; run Install Cuttlefish or set AADK_CUTTLEFISH_IMAGES_DIR_16K"),
-                job_id,
-            ));
+        if require_images && size > 4096 {
+            if cuttlefish_page_size_check_enabled() {
+                if !cuttlefish_images_ready(&images_dir) {
+                    return Err(job_error_detail(
+                        ErrorCode::Unavailable,
+                        "missing 16K Cuttlefish images",
+                        format!(
+                            "page_size={size}; run Install Cuttlefish or set AADK_CUTTLEFISH_IMAGES_DIR_16K"
+                        ),
+                        job_id,
+                    ));
+                }
+            } else {
+                let _ = publish_log(
+                    job_client,
+                    job_id,
+                    "Skipping 16K image check (AADK_CUTTLEFISH_PAGE_SIZE_CHECK=0)\n",
+                )
+                .await;
+            }
         }
     }
 
-    if !cuttlefish_images_ready(&images_dir) {
+    if require_kvm {
+        if cuttlefish_kvm_check_enabled() {
+            let status = kvm_status();
+            let _ = publish_log(
+                job_client,
+                job_id,
+                &format!(
+                    "KVM check: present={} accessible={}\n",
+                    status.present, status.accessible
+                ),
+            )
+            .await;
+            if !status.present {
+                return Err(job_error_detail(
+                    ErrorCode::Unavailable,
+                    "KVM not available",
+                    "missing /dev/kvm; enable virtualization or nested virtualization".into(),
+                    job_id,
+                ));
+            }
+            if !status.accessible {
+                let detail = status
+                    .detail
+                    .unwrap_or_else(|| "failed to open /dev/kvm".into());
+                return Err(job_error_detail(
+                    ErrorCode::PermissionDenied,
+                    "KVM access denied",
+                    format!(
+                        "{}; add the user to the kvm group and re-login",
+                        detail.trim()
+                    ),
+                    job_id,
+                ));
+            }
+        } else {
+            let _ = publish_log(
+                job_client,
+                job_id,
+                "Skipping KVM check (AADK_CUTTLEFISH_KVM_CHECK=0)\n",
+            )
+            .await;
+        }
+    }
+
+    if require_images && !cuttlefish_images_ready(&images_dir) {
         return Err(job_error_detail(
             ErrorCode::NotFound,
             "Cuttlefish images not found",
@@ -2152,6 +2312,15 @@ fn cuttlefish_start_command(
 
     let start_args = read_env_trimmed("AADK_CUTTLEFISH_START_ARGS");
     let mut extra_args = start_args.unwrap_or_default();
+    if let Some(mode) = cuttlefish_gpu_mode() {
+        if !args_has_flag(&extra_args, "--gpu_mode") {
+            if !extra_args.is_empty() {
+                extra_args.push(' ');
+            }
+            extra_args.push_str("--gpu_mode=");
+            extra_args.push_str(&mode);
+        }
+    }
     let include_usage_stats = !extra_args.contains("report_anonymous_usage_stats");
     if std::env::consts::ARCH == "aarch64" && !extra_args.contains("enable_host_bluetooth") {
         if !extra_args.is_empty() {
@@ -2162,7 +2331,7 @@ fn cuttlefish_start_command(
     if let Some(launch_path) = cuttlefish_launch_path(runtime.page_size) {
         let mut command = format!(
             "{}{} --daemon",
-            cuttlefish_home_env_prefix(&runtime.host_dir),
+            cuttlefish_home_env_prefix(&runtime.home_dir),
             shell_escape(&launch_path.display().to_string())
         );
         command.push_str(&format!(
@@ -2184,7 +2353,8 @@ fn cuttlefish_start_command(
 
     if let Some(cvd_path) = cuttlefish_cvd_path() {
         let mut command = format!(
-            "{} create --host_path={} --product_path={}",
+            "{}{} create --host_path={} --product_path={}",
+            cuttlefish_home_env_prefix(&runtime.home_dir),
             shell_escape(&cvd_path.display().to_string()),
             shell_escape(&runtime.host_dir.display().to_string()),
             shell_escape(&runtime.images_dir.display().to_string())
@@ -2221,13 +2391,17 @@ fn cuttlefish_stop_command(
     if let Some(stop_path) = cuttlefish_stop_path(runtime.page_size) {
         return Ok(format!(
             "{}{}",
-            cuttlefish_home_env_prefix(&runtime.host_dir),
+            cuttlefish_home_env_prefix(&runtime.home_dir),
             shell_escape(&stop_path.display().to_string())
         ));
     }
 
     if let Some(cvd_path) = cuttlefish_cvd_path() {
-        return Ok(format!("{} stop", shell_escape(&cvd_path.display().to_string())));
+        return Ok(format!(
+            "{}{} stop",
+            cuttlefish_home_env_prefix(&runtime.home_dir),
+            shell_escape(&cvd_path.display().to_string())
+        ));
     }
 
     Err(job_error_detail(
@@ -2300,7 +2474,7 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
         }
     }
 
-    let runtime = match cuttlefish_preflight(&mut job_client, &job_id).await {
+    let runtime = match cuttlefish_preflight(&mut job_client, &job_id, true, true).await {
         Ok(runtime) => runtime,
         Err(detail) => {
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
@@ -2487,6 +2661,9 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
     outputs.push(KeyValue { key: "home_dir".into(), value: runtime.home_dir.display().to_string() });
     outputs.push(KeyValue { key: "images_dir".into(), value: runtime.images_dir.display().to_string() });
     outputs.push(KeyValue { key: "host_dir".into(), value: runtime.host_dir.display().to_string() });
+    if let Some(mode) = cuttlefish_gpu_mode() {
+        outputs.push(KeyValue { key: "gpu_mode".into(), value: mode });
+    }
     if !start_cmd.is_empty() {
         outputs.push(KeyValue { key: "start_command".into(), value: start_cmd });
     }
@@ -2507,7 +2684,7 @@ async fn run_cuttlefish_stop_job(job_id: String) {
     let _ = publish_log(&mut job_client, &job_id, "Stopping Cuttlefish\n").await;
     let _ = publish_progress(&mut job_client, &job_id, 10, "stopping", vec![]).await;
 
-    let runtime = match cuttlefish_preflight(&mut job_client, &job_id).await {
+    let runtime = match cuttlefish_preflight(&mut job_client, &job_id, false, false).await {
         Ok(runtime) => runtime,
         Err(detail) => {
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
@@ -2579,6 +2756,47 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
 
     let host_installed = cuttlefish_cvd_path().is_some() || cuttlefish_launch_path(page_size).is_some();
     let images_ready = cuttlefish_images_ready(&images_dir);
+    let kvm_status = kvm_status();
+
+    if cuttlefish_kvm_check_enabled() {
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            &format!(
+                "KVM check: present={} accessible={}\n",
+                kvm_status.present, kvm_status.accessible
+            ),
+        )
+        .await;
+        if !kvm_status.present {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "KVM device not found (/dev/kvm). Cuttlefish will not run until virtualization is enabled.\n",
+            )
+            .await;
+        } else if !kvm_status.accessible {
+            let detail = kvm_status
+                .detail
+                .as_deref()
+                .unwrap_or("failed to open /dev/kvm");
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                &format!(
+                    "KVM access denied: {detail}. Add the user to the kvm group and re-login.\n"
+                ),
+            )
+            .await;
+        }
+    } else {
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Skipping KVM check (AADK_CUTTLEFISH_KVM_CHECK=0)\n",
+        )
+        .await;
+    }
 
     let install_host = match std::env::var("AADK_CUTTLEFISH_INSTALL_HOST") {
         Ok(val) => !(val == "0" || val.eq_ignore_ascii_case("false")),
@@ -2670,15 +2888,78 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         let _ = publish_log(&mut job_client, &job_id, "Host tools already installed; skipping host install\n").await;
     }
 
-    if add_groups {
-        if let (Some(prefix), Ok(user)) = (sudo_prefix.as_ref(), std::env::var("USER")) {
-            if !user.trim().is_empty() {
-                let group_cmd = format!("{prefix}usermod -aG kvm,cvdnetwork,render {user}");
-                let _ = publish_log(&mut job_client, &job_id, "Adding user to kvm/cvdnetwork/render groups\n").await;
-                let _ = run_shell_command(&group_cmd).await;
-                let _ = publish_log(&mut job_client, &job_id, "Re-login may be required for group changes to take effect\n").await;
+    let required_groups = ["kvm", "cvdnetwork", "render"];
+    let mut missing = Vec::new();
+    match current_user_groups().await {
+        Some(groups) => {
+            missing = missing_groups(&groups, &required_groups);
+            if missing.is_empty() {
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    "User already in kvm/cvdnetwork/render groups\n",
+                )
+                .await;
+            } else {
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    &format!("Missing groups: {}\n", missing.join(",")),
+                )
+                .await;
             }
         }
+        None => {
+            missing = required_groups.iter().map(|g| g.to_string()).collect();
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "Unable to determine user groups; assuming group setup is needed\n",
+            )
+            .await;
+        }
+    }
+
+    if add_groups {
+        if missing.is_empty() {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "Group setup not required; skipping usermod\n",
+            )
+            .await;
+        } else if let (Some(prefix), Ok(user)) = (sudo_prefix.as_ref(), std::env::var("USER")) {
+            if !user.trim().is_empty() {
+                let group_cmd = format!("{prefix}usermod -aG kvm,cvdnetwork,render {user}");
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    "Adding user to kvm/cvdnetwork/render groups\n",
+                )
+                .await;
+                let _ = run_shell_command(&group_cmd).await;
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    "Re-login or reboot may be required for group changes to take effect\n",
+                )
+                .await;
+            }
+        } else {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "Skipping group setup; sudo unavailable\n",
+            )
+            .await;
+        }
+    } else if !missing.is_empty() {
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Group setup disabled (AADK_CUTTLEFISH_ADD_GROUPS=0)\n",
+        )
+        .await;
     }
 
     if install_images && (!images_ready || options.force) {
@@ -2937,6 +3218,11 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
     outputs.push(KeyValue { key: "host_dir".into(), value: host_dir.display().to_string() });
     outputs.push(KeyValue { key: "install_host".into(), value: install_host.to_string() });
     outputs.push(KeyValue { key: "install_images".into(), value: install_images.to_string() });
+    outputs.push(KeyValue { key: "kvm_present".into(), value: kvm_status.present.to_string() });
+    outputs.push(KeyValue { key: "kvm_access".into(), value: kvm_status.accessible.to_string() });
+    if let Some(detail) = kvm_status.detail {
+        outputs.push(KeyValue { key: "kvm_detail".into(), value: detail });
+    }
 
     let _ = publish_completed(&mut job_client, &job_id, "Cuttlefish installed", outputs).await;
 }

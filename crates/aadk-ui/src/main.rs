@@ -1105,7 +1105,7 @@ fn page_targets(
 
     let page_docs = page.clone();
     docs.connect_clicked(move |_| {
-        let url = "https://source.android.com/docs/setup/create/cuttlefish";
+        let url = "https://source.android.com/docs/devices/cuttlefish/get-started";
         match gtk::gio::AppInfo::launch_default_for_uri(
             url,
             None::<&gtk::gio::AppLaunchContext>,
