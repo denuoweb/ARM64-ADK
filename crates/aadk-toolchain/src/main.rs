@@ -1518,7 +1518,7 @@ impl ToolchainService for Svc {
             toolchain_set_id: req.toolchain_set_id,
             sdk_toolchain_id: None,
             ndk_toolchain_id: None,
-            display_name: "Active toolchain set (stub)".into(),
+            display_name: "Active toolchain set".into(),
         });
         Ok(Response::new(SetActiveToolchainSetResponse { ok: true }))
     }

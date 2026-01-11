@@ -325,7 +325,7 @@ const SDK_VERSION: &str = "36.0.0";
 const NDK_VERSION: &str = "r29";
 
 fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Toolchains — ToolchainService (stubbed data)");
+    let page = make_page("Toolchains — ToolchainService");
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -433,7 +433,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
 }
 
 fn page_projects(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Projects — ProjectService (stubbed data)");
+    let page = make_page("Projects — ProjectService");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list = gtk::Button::with_label("List Templates");
     row.append(&list);
@@ -725,7 +725,7 @@ fn page_console(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCo
 }
 
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Evidence — ObserveService (support bundle export stub)");
+    let page = make_page("Evidence — ObserveService (support bundle export)");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let export = gtk::Button::with_label("Export Support Bundle");
     row.append(&export);
@@ -1151,7 +1151,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
-            ui.send(AppEvent::Log { page: "evidence", line: format!("Support bundle job: {job_id}\nOutput path (stub): {}\n", resp.output_path) }).ok();
+            ui.send(AppEvent::Log { page: "evidence", line: format!("Support bundle job: {job_id}\nOutput path: {}\n", resp.output_path) }).ok();
         }
 
         UiCommand::BuildRun { cfg, project_ref, variant, clean_first, gradle_args } => {
