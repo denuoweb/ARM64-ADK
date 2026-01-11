@@ -1,27 +1,46 @@
-# AADK Full Scaffold (GUI-first, multi-service skeleton)
+# AADK Full Scaffold
 
-This is a **full scaffold** for an ARM64-friendly Android DevKit architecture:
-- **GTK4 GUI** (thin client)
-- **Multiple gRPC services** (Job, Toolchain, Project, Build, Targets, Observe)
-- **Protobuf contracts** under `proto/aadk/v1/`
+GUI-first, multi-service gRPC scaffold for an Android DevKit style workflow. The GTK UI and CLI
+are thin clients; all real work lives in the service crates. JobService is the event bus that
+streams job state/progress/logs to clients.
 
-This scaffold is intentionally **minimal but complete**:
-- The services return **real structured responses** for listing operations.
-- **JobService** is fully implemented with:
-  - `tokio::sync::broadcast::Sender<JobEvent>` per job
-  - bounded replay `history: VecDeque<JobEvent>`
-  - `include_history` replay + live streaming
-  - cancellation via `watch`
-- Toolchain install/verify, build execution, and target operations run real workflows and publish job/log events.
-- ProjectService scaffolds from templates, persists recents, and writes per-project metadata.
-- ObserveService persists run history and exports support/evidence bundles via JobService (log capture is
-  still placeholder).
+## Architecture at a glance
+- GTK4 UI and CLI call gRPC services; they do not implement business logic.
+- JobService stores job records, replays history, and streams live events.
+- Toolchain/Build/Targets/Observe services create jobs and publish events to JobService.
+- ProjectService is the source of truth for project metadata and template scaffolding.
 
-The goal is to give you a correct spine to extend into:
-- toolchain installation (android-ndk-custom, android-sdk-custom)
-- gradle builds
-- adb target install/launch/logcat
-- evidence/support bundles
+## Source map (main entry points)
+- JobService: `crates/aadk-core/src/main.rs`
+- ToolchainService: `crates/aadk-toolchain/src/main.rs`
+- ProjectService: `crates/aadk-project/src/main.rs`
+- BuildService: `crates/aadk-build/src/main.rs`
+- TargetService: `crates/aadk-targets/src/main.rs`
+- ObserveService: `crates/aadk-observe/src/main.rs`
+- GTK UI: `crates/aadk-ui/src/main.rs`
+- CLI: `crates/aadk-cli/src/main.rs`
+- Proto contracts: `proto/aadk/v1`
+- Rust gRPC types: `crates/aadk-proto`
+- Dev runner: `scripts/dev/run-all.sh`
+- Agent notes: `AGENTS.md` and `crates/*/AGENTS.md`
+
+## Runtime topology
+Default addresses (override via env):
+- Job/Core:     127.0.0.1:50051 (AADK_JOB_ADDR)
+- Toolchain:    127.0.0.1:50052 (AADK_TOOLCHAIN_ADDR)
+- Project:      127.0.0.1:50053 (AADK_PROJECT_ADDR)
+- Build:        127.0.0.1:50054 (AADK_BUILD_ADDR)
+- Targets:      127.0.0.1:50055 (AADK_TARGETS_ADDR)
+- Observe:      127.0.0.1:50056 (AADK_OBSERVE_ADDR)
+
+## Data and state locations
+- Toolchains: `~/.local/share/aadk/state/toolchains.json`
+- Toolchain downloads: `~/.local/share/aadk/downloads`
+- Toolchain installs: `~/.local/share/aadk/toolchains`
+- Projects: `~/.local/share/aadk/state/projects.json`
+- Project metadata: `<project>/.aadk/project.json`
+- Observe runs: `~/.local/share/aadk/state/observe.json`
+- Observe bundles: `~/.local/share/aadk/bundles`
 
 ## Quick start (Debian 13 aarch64)
 
@@ -54,15 +73,7 @@ Terminal A:
 ./scripts/dev/run-all.sh
 ```
 
-Default service addresses:
-- Job/Core:     127.0.0.1:50051
-- Toolchain:    127.0.0.1:50052
-- Project:      127.0.0.1:50053
-- Build:        127.0.0.1:50054
-- Targets:      127.0.0.1:50055
-- Observe:      127.0.0.1:50056
-
-Override any address with env vars, e.g.:
+Override any address with env vars:
 ```bash
 AADK_JOB_ADDR=127.0.0.1:60051 ./scripts/dev/run-all.sh
 ```
@@ -73,19 +84,11 @@ Terminal B:
 cargo run -p aadk-ui
 ```
 
-If you see a GTK warning about the accessibility bus on minimal installs, either install `at-spi2-core`
-or suppress it for local dev:
+If you see a GTK warning about the accessibility bus on minimal installs, either install
+`at-spi2-core` or suppress it for local dev:
 ```bash
 GTK_A11Y=none cargo run -p aadk-ui
 ```
-
-In the GUI:
-- **Home**: start a demo job + stream events
-- **Toolchains**: list providers and install/verify SDK/NDK
-- **Projects**: list templates, create/open projects, and list recents
-- **Targets**: list targets from ADB + Cuttlefish and stream logcat
-- **Console**: run Gradle builds and stream output
-- **Evidence**: list runs, export support bundles, and export evidence bundles (job streaming)
 
 ### 6) Optional: CLI sanity checks
 ```bash
@@ -96,32 +99,65 @@ cargo run -p aadk-cli -- observe list-runs
 cargo run -p aadk-cli -- observe export-support
 ```
 
+## What is implemented today
+
+### JobService (aadk-core)
+- In-memory job registry with bounded history and broadcast streaming.
+- `include_history` replay followed by live event streaming.
+- Demo job runner in-process; other services use JobService for tracking and event streaming.
+
+### ToolchainService (aadk-toolchain)
+- Lists providers, installs SDK/NDK toolchains, verifies installs, publishes job events.
+- Supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
+
+### ProjectService (aadk-project)
+- Template registry backed by JSON (`AADK_PROJECT_TEMPLATES` or default registry).
+- Create/open project, scaffold files on disk, store metadata and recents.
+
+### BuildService (aadk-build)
+- Resolves project paths via ProjectService or `AADK_PROJECT_ROOT`.
+- Runs Gradle (wrapper or system Gradle) and streams logs.
+- Scans build outputs for APK artifacts and computes sha256 per artifact.
+
+### TargetService (aadk-targets)
+- Enumerates ADB devices, supports Cuttlefish start/stop/status/install.
+- Install APK, launch/stop app, stream logcat; publishes job events.
+
+### ObserveService (aadk-observe)
+- Persists run history and paginated listing.
+- Exports support/evidence bundles as JobService jobs with progress/log streaming.
+- Bundle log capture is currently a placeholder file.
+
+### GTK UI (aadk-ui)
+- Home: demo job and streaming.
+- Toolchains: list/install/verify.
+- Projects: list templates, create/open, list recents.
+- Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
+- Console: run Gradle builds and stream logs.
+- Evidence: list runs, export support/evidence bundles and stream job events.
+
+### CLI (aadk-cli)
+- Job demo start/cancel.
+- Toolchain list-providers.
+- Targets list/start/stop/status/install Cuttlefish.
+- Projects list-templates/list-recent/create/open.
+- Observe list-runs/export-support/export-evidence.
+
 ## Extending from here (recommended order)
 1. Replace demo-only job dispatch in `aadk-core` with real worker routing + cancellation.
 2. Harden BuildService (authoritative project resolution, artifact persistence, Gradle wrapper checks).
 3. Expand ToolchainService providers/versions and host support.
 4. Add TargetService provider abstraction and default target persistence.
-5. Enrich ObserveService metadata collection and retention/cleanup.
+5. Enrich ObserveService metadata capture and retention/cleanup.
 
 ## Development notes
-- gRPC currently uses TCP loopback for simplicity.
-  Switching to **Unix domain sockets** is a straightforward follow-on.
-- The UI uses a background tokio runtime thread to avoid blocking the GTK main thread.
-- Log display uses a **bounded buffer** and can be replaced with a fully virtualized widget later.
-- ToolchainService downloads real SDK/NDK archives, verifies sha256, caches under `~/.local/share/aadk/downloads`,
-  and installs under `~/.local/share/aadk/toolchains`.
-- ProjectService stores recents under `~/.local/share/aadk/state/projects.json` and writes metadata to
-  `<project>/.aadk/project.json`. Template registry comes from `AADK_PROJECT_TEMPLATES` or
-  `crates/aadk-project/templates/registry.json`.
-- ObserveService stores runs under `~/.local/share/aadk/state/observe.json` and writes bundles to
-  `~/.local/share/aadk/bundles`.
-- For offline dev, set `AADK_TOOLCHAIN_FIXTURES_DIR=/path/to/fixtures` to use local archives (`.tar.xz` or `.tar.zst`).
-- Host selection uses Rust's `std::env::consts` values (`aarch64`) to choose the correct archive.
-- Toolchain install/verify publishes progress via JobService, so `aadk-core` must be running for UI job streams.
+- gRPC uses TCP loopback for simplicity; Unix domain sockets are a straightforward follow-on.
+- UI uses a background tokio runtime to keep the GTK main thread responsive.
+- Toolchain install/verify publishes progress via JobService; run `aadk-core` to see UI streams.
 
 ## Cuttlefish target provider
 TargetService can surface a local Cuttlefish instance as a `provider=cuttlefish` target. It:
-- uses `cvd status` when available to detect running state + adb serial
+- uses `cvd status` when available to detect running state and adb serial
 - optionally issues `adb connect` to the configured serial
 - reports state from adb (`device`, `offline`) or Cuttlefish (`running`, `stopped`, `error`)
 - annotates details with adb state, API level, build/branch/paths, and raw status output
@@ -145,14 +181,12 @@ Configuration (env vars):
 - `AADK_CUTTLEFISH_INSTALL_HOST=0` to skip host package installation
 - `AADK_CUTTLEFISH_INSTALL_IMAGES=0` to skip image downloads
 - `AADK_CUTTLEFISH_ADD_GROUPS=0` to skip adding the user to kvm/cvdnetwork/render
-- `AADK_CUTTLEFISH_BRANCH=<branch>` (or `_16K`/`_4K`) to override the AOSP branch used for image fetch (default: `main-16k-with-phones` on 16K hosts, `aosp-main-throttled` on ARM)
-- `AADK_CUTTLEFISH_TARGET=<target>` (or `_16K`/`_4K`) to override the AOSP target used for image fetch (default: `aosp_cf_arm64`/`aosp_cf_x86_64` on 16K hosts)
+- `AADK_CUTTLEFISH_BRANCH=<branch>` (or `_16K`/`_4K`) to override the AOSP branch used for image fetch
+- `AADK_CUTTLEFISH_TARGET=<target>` (or `_16K`/`_4K`) to override the AOSP target used for image fetch
 - `AADK_CUTTLEFISH_BUILD_ID=<id>` to pin a specific AOSP build id
 - `AADK_ADB_PATH` or `ANDROID_SDK_ROOT` to locate `adb`
 
 Notes:
 - The UI and CLI pass `include_offline=true`, so a stopped Cuttlefish instance still appears.
-- Start/stop/status actions are exposed in the UI and CLI (Targets → Start/Stop/Status Cuttlefish).
-- Install Cuttlefish installs host prerequisites from the Android Cuttlefish Artifact Registry (apt) and resolves images (plus the CI host package) from `ci.android.com` public builds.
-- On >4K page-size kernels, the default branch switches to `main-16k-with-phones` and the default target switches to `aosp_cf_arm64`/`aosp_cf_x86_64`.
-- WebRTC viewer defaults to `https://localhost:8443`.
+- Start/stop/status actions are exposed in the UI and CLI (Targets -> Start/Stop/Status Cuttlefish).
+- Install Cuttlefish uses public artifacts from `ci.android.com`.
