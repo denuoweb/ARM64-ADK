@@ -13,7 +13,9 @@ This scaffold is intentionally **minimal but complete**:
   - `include_history` replay + live streaming
   - cancellation via `watch`
 - Toolchain install/verify, build execution, and target operations run real workflows and publish job/log events.
-- Project creation/open and Observe bundle export are still minimal placeholders.
+- ProjectService scaffolds from templates, persists recents, and writes per-project metadata.
+- ObserveService persists run history and exports support/evidence bundles via JobService (log capture is
+  still placeholder).
 
 The goal is to give you a correct spine to extend into:
 - toolchain installation (android-ndk-custom, android-sdk-custom)
@@ -80,22 +82,26 @@ GTK_A11Y=none cargo run -p aadk-ui
 In the GUI:
 - **Home**: start a demo job + stream events
 - **Toolchains**: list providers and install/verify SDK/NDK
+- **Projects**: list templates, create/open projects, and list recents
 - **Targets**: list targets from ADB + Cuttlefish and stream logcat
 - **Console**: run Gradle builds and stream output
-- **Evidence**: export support bundle (placeholder output path)
+- **Evidence**: list runs, export support bundles, and export evidence bundles (job streaming)
 
 ### 6) Optional: CLI sanity checks
 ```bash
 cargo run -p aadk-cli -- job start-demo
 cargo run -p aadk-cli -- toolchain list-providers
 cargo run -p aadk-cli -- targets list
+cargo run -p aadk-cli -- observe list-runs
+cargo run -p aadk-cli -- observe export-support
 ```
 
 ## Extending from here (recommended order)
-1. Implement project scaffolding + persistence in `aadk-project` (create/open templates on disk)
-2. Implement run history + evidence/support bundle generation in `aadk-observe`
-3. Add orchestration workflows in `aadk-core` (doctor.run, evidence.run)
-4. Add packaging, CI, and a perf harness
+1. Replace demo-only job dispatch in `aadk-core` with real worker routing + cancellation.
+2. Harden BuildService (authoritative project resolution, artifact persistence, Gradle wrapper checks).
+3. Expand ToolchainService providers/versions and host support.
+4. Add TargetService provider abstraction and default target persistence.
+5. Enrich ObserveService metadata collection and retention/cleanup.
 
 ## Development notes
 - gRPC currently uses TCP loopback for simplicity.
@@ -104,6 +110,11 @@ cargo run -p aadk-cli -- targets list
 - Log display uses a **bounded buffer** and can be replaced with a fully virtualized widget later.
 - ToolchainService downloads real SDK/NDK archives, verifies sha256, caches under `~/.local/share/aadk/downloads`,
   and installs under `~/.local/share/aadk/toolchains`.
+- ProjectService stores recents under `~/.local/share/aadk/state/projects.json` and writes metadata to
+  `<project>/.aadk/project.json`. Template registry comes from `AADK_PROJECT_TEMPLATES` or
+  `crates/aadk-project/templates/registry.json`.
+- ObserveService stores runs under `~/.local/share/aadk/state/observe.json` and writes bundles to
+  `~/.local/share/aadk/bundles`.
 - For offline dev, set `AADK_TOOLCHAIN_FIXTURES_DIR=/path/to/fixtures` to use local archives (`.tar.xz` or `.tar.zst`).
 - Host selection uses Rust's `std::env::consts` values (`aarch64`) to choose the correct archive.
 - Toolchain install/verify publishes progress via JobService, so `aadk-core` must be running for UI job streams.
