@@ -37,7 +37,7 @@ Default addresses (override with env vars):
 - UI/CLI call gRPC services; they do not implement business logic.
 - JobService is the event bus. Toolchain/Build/Targets publish job events; UI streams events.
 - BuildService resolves project paths via ProjectService (recent list) or AADK_PROJECT_ROOT.
-- TargetService shells out to adb and optionally Cuttlefish tooling.
+- TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight and launch args).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
 - ObserveService persists run history and uses JobService for bundle work; richer run metadata and
   retention are still TODO.

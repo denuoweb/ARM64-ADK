@@ -16,6 +16,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - UiCommand enum defines all async work; a background worker executes these commands and emits
   AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
+- The Cuttlefish docs button opens https://source.android.com/docs/devices/cuttlefish/get-started.
 
 ## Service coverage
 - Home: starts demo job and streams events from JobService.

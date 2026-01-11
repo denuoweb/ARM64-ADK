@@ -23,6 +23,9 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - Cuttlefish install can accept per-request branch/target/build_id overrides; build resolution is
   exposed via ResolveCuttlefishBuild.
 - Cuttlefish operations run external commands and report state via JobService events.
+- Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
+- Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.
+- GPU mode can be set via AADK_CUTTLEFISH_GPU_MODE and is appended to launch arguments when starting Cuttlefish.
 
 ## Data flow and dependencies
 - Requires JobService to publish job state/log/progress for install/launch/stop/cuttlefish jobs.
@@ -42,6 +45,8 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_CUTTLEFISH_CONNECT=0 to skip adb connect
 - AADK_CUTTLEFISH_WEBRTC_URL=https://localhost:8443
 - AADK_CUTTLEFISH_PAGE_SIZE_CHECK=0 to skip kernel page-size checks
+- AADK_CUTTLEFISH_KVM_CHECK=0 to skip KVM availability/access checks
+- AADK_CUTTLEFISH_GPU_MODE=gfxstream|drm_virgl to configure GPU acceleration mode
 - AADK_CUTTLEFISH_HOME=/path (or _16K/_4K variants)
 - AADK_CUTTLEFISH_IMAGES_DIR=/path (or _16K/_4K variants)
 - AADK_CUTTLEFISH_HOST_DIR=/path (or _16K/_4K variants)

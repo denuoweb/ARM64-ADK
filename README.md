@@ -192,6 +192,20 @@ TargetService can surface a local Cuttlefish instance as a `provider=cuttlefish`
 - reports state from adb (`device`, `offline`) or Cuttlefish (`running`, `stopped`, `error`)
 - annotates details with adb state, API level, build/branch/paths, and raw status output
 
+Prerequisites (per Android Cuttlefish docs):
+- KVM virtualization is required. Check `/dev/kvm` (or `find /dev -name kvm` on ARM64); enable nested virtualization on cloud hosts.
+- Ensure the user is in `kvm`, `cvdnetwork`, and `render` groups; re-login or reboot after group changes.
+- Host tools and images should come from the same build id (Install Cuttlefish enforces this).
+
+Defaults (when not overridden):
+- Branch: `aosp-android-latest-release` for 4K hosts; `main-16k-with-phones` for 16K.
+- Targets: `aosp_cf_arm64_only_phone-userdebug` (ARM64), `aosp_cf_x86_64_only_phone-userdebug` (x86_64), or `aosp_cf_riscv64_phone-userdebug` (riscv64). 16K defaults to `aosp_cf_arm64` / `aosp_cf_x86_64`.
+
+GPU acceleration:
+- Android 11+ guests use accelerated graphics when the host supports it; otherwise SwiftShader is used.
+- Host requirements: EGL driver with `GL_KHR_surfaceless_context`, OpenGL ES, and Vulkan support.
+- Use `AADK_CUTTLEFISH_GPU_MODE=gfxstream` (OpenGL+Vulkan passthrough) or `AADK_CUTTLEFISH_GPU_MODE=drm_virgl` (OpenGL only) to set `--gpu_mode=...` when starting.
+
 Configuration (env vars):
 - `AADK_CUTTLEFISH_ENABLE=0` to disable detection
 - `AADK_CVD_BIN=/path/to/cvd` to override the `cvd` command
@@ -201,6 +215,8 @@ Configuration (env vars):
 - `AADK_CUTTLEFISH_CONNECT=0` to skip `adb connect`
 - `AADK_CUTTLEFISH_WEBRTC_URL=https://localhost:8443` to override the WebRTC viewer URL
 - `AADK_CUTTLEFISH_PAGE_SIZE_CHECK=0` to skip the kernel page-size preflight check
+- `AADK_CUTTLEFISH_KVM_CHECK=0` to skip the KVM availability/access check
+- `AADK_CUTTLEFISH_GPU_MODE=gfxstream|drm_virgl` to set the GPU acceleration mode
 - `AADK_CUTTLEFISH_HOME=/path` (or `_16K`/`_4K`) to set the base Cuttlefish home directory
 - `AADK_CUTTLEFISH_IMAGES_DIR=/path` (or `_16K`/`_4K`) to override the images directory
 - `AADK_CUTTLEFISH_HOST_DIR=/path` (or `_16K`/`_4K`) to override the host tools directory
@@ -219,8 +235,8 @@ Configuration (env vars):
 ### Pinning Cuttlefish builds
 To pin images to a known build, set `AADK_CUTTLEFISH_BUILD_ID` (optionally with branch/target):
 ```bash
-AADK_CUTTLEFISH_BRANCH=aosp-main \
-AADK_CUTTLEFISH_TARGET=aosp_cf_arm64_only_phone-trunk_staging-userdebug \
+AADK_CUTTLEFISH_BRANCH=aosp-android-latest-release \
+AADK_CUTTLEFISH_TARGET=aosp_cf_arm64_only_phone-userdebug \
 AADK_CUTTLEFISH_BUILD_ID=12345678 \
 ./scripts/dev/run-all.sh
 ```
