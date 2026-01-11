@@ -1,0 +1,16 @@
+{
+  "templates": [
+    {
+      "template_id": "tmpl-sample-prog",
+      "name": "SampleProg",
+      "description": "Sample Android Gradle project shipped in this repo.",
+      "path": "../../../SampleProg",
+      "defaults": [
+        { "key": "minSdk", "value": "24" },
+        { "key": "compileSdk", "value": "35" }
+      ],
+      "exclude_dirs": [".gradle", "build", ".idea", ".git", "target", "out"],
+      "exclude_files": ["local.properties", ".DS_Store"]
+    }
+  ]
+}

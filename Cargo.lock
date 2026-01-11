@@ -60,6 +60,8 @@ version = "0.1.0"
 dependencies = [
  "aadk-proto",
  "prost",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
