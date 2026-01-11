@@ -3,13 +3,15 @@ use std::io::Write;
 use aadk_proto::aadk::v1::{
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
+    observe_service_client::ObserveServiceClient,
     project_service_client::ProjectServiceClient,
     toolchain_service_client::ToolchainServiceClient,
     target_service_client::TargetServiceClient,
-    CancelJobRequest, CreateProjectRequest, GetCuttlefishStatusRequest, Id,
-    InstallCuttlefishRequest, JobState, ListProvidersRequest, ListRecentProjectsRequest,
-    ListTargetsRequest, ListTemplatesRequest, OpenProjectRequest, Pagination,
-    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
+    CancelJobRequest, CreateProjectRequest, ExportEvidenceBundleRequest, ExportSupportBundleRequest,
+    GetCuttlefishStatusRequest, Id, InstallCuttlefishRequest, JobState, ListProvidersRequest,
+    ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
+    OpenProjectRequest, Pagination, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
+    StreamJobEventsRequest,
 };
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -43,6 +45,11 @@ enum Cmd {
     Project {
         #[command(subcommand)]
         cmd: ProjectCmd,
+    },
+    /// Observe-related commands (ObserveService)
+    Observe {
+        #[command(subcommand)]
+        cmd: ObserveCmd,
     },
 }
 
@@ -138,6 +145,44 @@ enum ProjectCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ObserveCmd {
+    /// List recorded runs
+    ListRuns {
+        #[arg(long, default_value_t = default_observe_addr())]
+        addr: String,
+        #[arg(long, default_value_t = 25)]
+        page_size: u32,
+        #[arg(long, default_value = "")]
+        page_token: String,
+    },
+    /// Export a support bundle and stream job events
+    ExportSupport {
+        #[arg(long, default_value_t = default_observe_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        #[arg(long, default_value_t = true)]
+        include_logs: bool,
+        #[arg(long, default_value_t = true)]
+        include_config: bool,
+        #[arg(long, default_value_t = true)]
+        include_toolchain_provenance: bool,
+        #[arg(long, default_value_t = true)]
+        include_recent_runs: bool,
+        #[arg(long, default_value_t = 10)]
+        recent_runs_limit: u32,
+    },
+    /// Export an evidence bundle for a run id
+    ExportEvidence {
+        #[arg(long, default_value_t = default_observe_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        run_id: String,
+    },
+}
+
 fn default_job_addr() -> String {
     std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into())
 }
@@ -149,6 +194,9 @@ fn default_targets_addr() -> String {
 }
 fn default_project_addr() -> String {
     std::env::var("AADK_PROJECT_ADDR").unwrap_or_else(|_| "127.0.0.1:50053".into())
+}
+fn default_observe_addr() -> String {
+    std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".into())
 }
 
 #[tokio::main]
@@ -294,6 +342,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}\t{}\t{}", id, project.name, project.path);
                 } else {
                     println!("no project returned");
+                }
+            }
+        },
+
+        Cmd::Observe { cmd } => match cmd {
+            ObserveCmd::ListRuns { addr, page_size, page_token } => {
+                let mut client = ObserveServiceClient::new(connect(&addr).await?);
+                let resp = client.list_runs(ListRunsRequest {
+                    page: Some(Pagination {
+                        page_size,
+                        page_token,
+                    }),
+                }).await?.into_inner();
+                for run in resp.runs {
+                    let run_id = run.run_id.map(|i| i.value).unwrap_or_default();
+                    let started = run.started_at.map(|t| t.unix_millis).unwrap_or(0);
+                    let finished = run.finished_at.map(|t| t.unix_millis).unwrap_or(0);
+                    println!(
+                        "{}\tresult={}\tstarted={}\tfinished={}\tjobs={}",
+                        run_id,
+                        run.result,
+                        started,
+                        finished,
+                        run.job_ids.len()
+                    );
+                }
+                if let Some(page_info) = resp.page_info {
+                    if !page_info.next_page_token.is_empty() {
+                        println!("next_page_token={}", page_info.next_page_token);
+                    }
+                }
+            }
+            ObserveCmd::ExportSupport {
+                addr,
+                job_addr,
+                include_logs,
+                include_config,
+                include_toolchain_provenance,
+                include_recent_runs,
+                recent_runs_limit,
+            } => {
+                let mut client = ObserveServiceClient::new(connect(&addr).await?);
+                let resp = client.export_support_bundle(ExportSupportBundleRequest {
+                    include_logs,
+                    include_config,
+                    include_toolchain_provenance,
+                    include_recent_runs,
+                    recent_runs_limit,
+                }).await?.into_inner();
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}\noutput_path={}", resp.output_path);
+                if !job_id.is_empty() {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
+                }
+            }
+            ObserveCmd::ExportEvidence { addr, job_addr, run_id } => {
+                let mut client = ObserveServiceClient::new(connect(&addr).await?);
+                let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
+                    run_id: Some(Id { value: run_id }),
+                }).await?.into_inner();
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}\noutput_path={}", resp.output_path);
+                if !job_id.is_empty() {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
                 }
             }
         },

@@ -9,10 +9,10 @@ use aadk_proto::aadk::v1::{
     target_service_client::TargetServiceClient,
     toolchain_service_client::ToolchainServiceClient,
     BuildRequest, BuildVariant, CancelJobRequest, CreateProjectRequest, ExportSupportBundleRequest,
-    GetCuttlefishStatusRequest, Id, InstallApkRequest, InstallCuttlefishRequest,
+    ExportEvidenceBundleRequest, GetCuttlefishStatusRequest, Id, InstallApkRequest, InstallCuttlefishRequest,
     InstallToolchainRequest, KeyValue, LaunchRequest, ListAvailableRequest, ListInstalledRequest,
     ListProvidersRequest, ListRecentProjectsRequest, ListTargetsRequest, ListTemplatesRequest,
-    OpenProjectRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
+    ListRunsRequest, OpenProjectRequest, Pagination, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
     StreamJobEventsRequest, StreamLogcatRequest, ToolchainKind, VerifyToolchainRequest,
 };
 use futures_util::StreamExt;
@@ -70,7 +70,16 @@ enum UiCommand {
     TargetsInstallApk { cfg: AppConfig, target_id: String, apk_path: String },
     TargetsLaunchApp { cfg: AppConfig, target_id: String, application_id: String, activity: String },
     TargetsStreamLogcat { cfg: AppConfig, target_id: String, filter: String },
-    ObserveExportSupport { cfg: AppConfig },
+    ObserveListRuns { cfg: AppConfig },
+    ObserveExportSupport {
+        cfg: AppConfig,
+        include_logs: bool,
+        include_config: bool,
+        include_toolchain_provenance: bool,
+        include_recent_runs: bool,
+        recent_runs_limit: u32,
+    },
+    ObserveExportEvidence { cfg: AppConfig, run_id: String },
     BuildRun {
         cfg: AppConfig,
         project_ref: String,
@@ -953,15 +962,108 @@ fn page_console(
 }
 
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Evidence — ObserveService (support bundle export)");
+    let page = make_page("Evidence — ObserveService (runs + bundle export)");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let export = gtk::Button::with_label("Export Support Bundle");
-    row.append(&export);
-    page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
-    export.connect_clicked(move |_| {
-        let cfg = cfg.lock().unwrap().clone();
-        cmd_tx.send(UiCommand::ObserveExportSupport { cfg }).ok();
+    let list_runs = gtk::Button::with_label("List Runs");
+    let export_support = gtk::Button::with_label("Export Support Bundle");
+    let export_evidence = gtk::Button::with_label("Export Evidence Bundle");
+    row.append(&list_runs);
+    row.append(&export_support);
+    row.append(&export_evidence);
+    page.container
+        .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+
+    let form = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let run_id_entry = gtk::Entry::builder()
+        .placeholder_text("Run id for evidence bundle")
+        .hexpand(true)
+        .build();
+    let recent_limit_entry = gtk::Entry::builder()
+        .text("10")
+        .hexpand(true)
+        .build();
+
+    let include_logs = gtk::CheckButton::with_label("Include logs");
+    include_logs.set_active(true);
+    let include_config = gtk::CheckButton::with_label("Include config");
+    include_config.set_active(true);
+    let include_toolchain = gtk::CheckButton::with_label("Include toolchain provenance");
+    include_toolchain.set_active(true);
+    let include_recent = gtk::CheckButton::with_label("Include recent runs");
+    include_recent.set_active(true);
+
+    let label_run_id = gtk::Label::builder()
+        .label("Evidence run id")
+        .xalign(0.0)
+        .build();
+    let label_limit = gtk::Label::builder()
+        .label("Recent runs limit")
+        .xalign(0.0)
+        .build();
+
+    form.attach(&label_run_id, 0, 0, 1, 1);
+    form.attach(&run_id_entry, 1, 0, 1, 1);
+    form.attach(&label_limit, 0, 1, 1, 1);
+    form.attach(&recent_limit_entry, 1, 1, 1, 1);
+
+    let checkbox_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    checkbox_row.append(&include_logs);
+    checkbox_row.append(&include_config);
+    checkbox_row.append(&include_toolchain);
+    checkbox_row.append(&include_recent);
+    form.attach(&checkbox_row, 1, 2, 1, 1);
+
+    page.container.insert_child_after(&form, Some(&row));
+
+    let cfg_list = cfg.clone();
+    let cmd_tx_list = cmd_tx.clone();
+    list_runs.connect_clicked(move |_| {
+        let cfg = cfg_list.lock().unwrap().clone();
+        cmd_tx_list.send(UiCommand::ObserveListRuns { cfg }).ok();
     });
+
+    let cfg_support = cfg.clone();
+    let cmd_tx_support = cmd_tx.clone();
+    let include_logs_support = include_logs.clone();
+    let include_config_support = include_config.clone();
+    let include_toolchain_support = include_toolchain.clone();
+    let include_recent_support = include_recent.clone();
+    let recent_limit_support = recent_limit_entry.clone();
+    export_support.connect_clicked(move |_| {
+        let cfg = cfg_support.lock().unwrap().clone();
+        let limit = recent_limit_support
+            .text()
+            .parse::<u32>()
+            .unwrap_or(10);
+        cmd_tx_support
+            .send(UiCommand::ObserveExportSupport {
+                cfg,
+                include_logs: include_logs_support.is_active(),
+                include_config: include_config_support.is_active(),
+                include_toolchain_provenance: include_toolchain_support.is_active(),
+                include_recent_runs: include_recent_support.is_active(),
+                recent_runs_limit: limit,
+            })
+            .ok();
+    });
+
+    let cfg_evidence = cfg.clone();
+    let cmd_tx_evidence = cmd_tx.clone();
+    let run_id_evidence = run_id_entry.clone();
+    export_evidence.connect_clicked(move |_| {
+        let cfg = cfg_evidence.lock().unwrap().clone();
+        cmd_tx_evidence
+            .send(UiCommand::ObserveExportEvidence {
+                cfg,
+                run_id: run_id_evidence.text().to_string(),
+            })
+            .ok();
+    });
+
     page
 }
 
@@ -1488,19 +1590,109 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ObserveExportSupport { cfg } => {
+        UiCommand::ObserveListRuns { cfg } => {
+            ui.send(AppEvent::Log { page: "evidence", line: format!("Listing runs via {}\n", cfg.observe_addr) }).ok();
+            let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
+            let resp = client.list_runs(ListRunsRequest {
+                page: Some(Pagination {
+                    page_size: 25,
+                    page_token: String::new(),
+                }),
+            }).await?.into_inner();
+
+            if resp.runs.is_empty() {
+                ui.send(AppEvent::Log { page: "evidence", line: "No runs recorded.\n".into() }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "evidence", line: "Runs:\n".into() }).ok();
+                for run in resp.runs {
+                    let run_id = run.run_id.as_ref().map(|i| i.value.as_str()).unwrap_or("");
+                    let started = run.started_at.as_ref().map(|t| t.unix_millis).unwrap_or(0);
+                    let finished = run.finished_at.as_ref().map(|t| t.unix_millis).unwrap_or(0);
+                    ui.send(AppEvent::Log {
+                        page: "evidence",
+                        line: format!(
+                            "- {} result={} started={} finished={} jobs={}\n",
+                            run_id,
+                            run.result,
+                            started,
+                            finished,
+                            run.job_ids.len()
+                        ),
+                    }).ok();
+                }
+            }
+
+            if let Some(page_info) = resp.page_info {
+                if !page_info.next_page_token.trim().is_empty() {
+                    ui.send(AppEvent::Log { page: "evidence", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                }
+            }
+        }
+
+        UiCommand::ObserveExportSupport {
+            cfg,
+            include_logs,
+            include_config,
+            include_toolchain_provenance,
+            include_recent_runs,
+            recent_runs_limit,
+        } => {
             ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_support_bundle(ExportSupportBundleRequest {
-                include_logs: true,
-                include_config: true,
-                include_toolchain_provenance: true,
-                include_recent_runs: true,
-                recent_runs_limit: 10,
+                include_logs,
+                include_config,
+                include_toolchain_provenance,
+                include_recent_runs,
+                recent_runs_limit,
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
-            ui.send(AppEvent::Log { page: "evidence", line: format!("Support bundle job: {job_id}\nOutput path: {}\n", resp.output_path) }).ok();
+            ui.send(AppEvent::Log {
+                page: "evidence",
+                line: format!("Support bundle job: {job_id}\nOutput path: {}\n", resp.output_path),
+            }).ok();
+
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "evidence", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "evidence", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
+        }
+
+        UiCommand::ObserveExportEvidence { cfg, run_id } => {
+            let run_id = run_id.trim().to_string();
+            if run_id.is_empty() {
+                ui.send(AppEvent::Log { page: "evidence", line: "Run id is required for evidence export.\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
+            let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
+            let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
+                run_id: Some(Id { value: run_id.clone() }),
+            }).await?.into_inner();
+
+            let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+            ui.send(AppEvent::Log {
+                page: "evidence",
+                line: format!("Evidence bundle job: {job_id}\nOutput path: {}\n", resp.output_path),
+            }).ok();
+
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "evidence", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "evidence", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
         }
 
         UiCommand::BuildRun { cfg, project_ref, variant, clean_first, gradle_args } => {
