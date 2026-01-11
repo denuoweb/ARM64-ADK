@@ -6,6 +6,11 @@ It is intentionally minimal but complete enough to extend. The GTK4 UI and CLI a
 the service crates contain the real workflows. The project is designed around a JobService that
 streams events to clients while long-running jobs execute in other services.
 
+## Maintenance
+Keep this file and the per-service AGENTS.md files in sync with code changes. When Codex changes
+files, commits, or pushes, update the relevant AGENTS.md entries and adjust TODO lists to remove
+completed items or move them into the implementation notes.
+
 ## Repository map
 - crates/aadk-core: JobService (event streaming and job registry)
 - crates/aadk-toolchain: ToolchainService (SDK/NDK provider, install, verify)
@@ -34,13 +39,15 @@ Default addresses (override with env vars):
 - BuildService resolves project paths via ProjectService (recent list) or AADK_PROJECT_ROOT.
 - TargetService shells out to adb and optionally Cuttlefish tooling.
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
-- ObserveService is currently a placeholder; it should eventually use JobService and persist run history.
+- ObserveService persists run history and uses JobService for bundle work; richer run metadata and
+  retention are still TODO.
 
 ## Shared data and locations
 - Toolchain state: ~/.local/share/aadk/state/toolchains.json
 - Toolchain downloads: ~/.local/share/aadk/downloads
 - Toolchain installs: ~/.local/share/aadk/toolchains
-- Observe bundle outputs currently under /tmp (placeholder behavior)
+- Observe state: ~/.local/share/aadk/state/observe.json
+- Observe bundle outputs: ~/.local/share/aadk/bundles
 
 ## Per-service AGENT files
 - crates/aadk-project/AGENTS.md
@@ -72,10 +79,7 @@ Default addresses (override with env vars):
 - P2: Expand progress/metrics payloads per job type. main.rs (line 100)
 
 ### ObserveService (aadk-observe)
-- P0: Implement real run storage + pagination for list_runs. main.rs (line 17)
-- P0: Generate real support/evidence bundles (zip actual files). main.rs (line 24) main.rs (line 35)
-- P0: Execute bundle work through JobService with progress/log streaming. main.rs (line 24)
-- P1: Capture run metadata (project/target/timestamps) for filtering. main.rs (line 17)
+- P1: Capture run metadata (project/target/toolchain ids) for filtering. main.rs (line 17)
 - P2: Add retention/cleanup for bundles and temp dirs. main.rs (line 24)
 
 ### BuildService (aadk-build)
@@ -104,5 +108,4 @@ Default addresses (override with env vars):
 - P0: Replace demo-job UI/CLI with real job type selection/status views. main.rs (line 790) main.rs (line 41)
 - P1: Add project recent list + job history viewer. main.rs (line 157)
 - P1: Add toolchain set management UI/CLI commands. main.rs (line 829) main.rs (line 55)
-- P1: Add observe run list + bundle export UI/CLI. main.rs (line 70) main.rs (line 21)
 - P2: Persist UI config (service addresses) and export logs. main.rs (line 34)

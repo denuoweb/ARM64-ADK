@@ -4,6 +4,9 @@
 This directory defines the gRPC/Protobuf contracts for all services. These .proto files are the
 source of truth for the Rust gRPC clients/servers and any future non-Rust clients.
 
+## Maintenance
+Update this file whenever proto contracts change or when commits touching this directory are made.
+
 ## Files and ownership
 - common.proto: shared primitives (Id, Timestamp, KeyValue, PageInfo)
 - errors.proto: ErrorCode and ErrorDetail

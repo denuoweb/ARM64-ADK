@@ -4,6 +4,9 @@
 BuildService runs Gradle builds, streams job progress/logs to JobService, and returns build
 artifacts. It is designed to be thin orchestration around existing Gradle projects.
 
+## Maintenance
+Update this file whenever BuildService behavior changes or when commits touching this crate are made.
+
 ## gRPC contract
 - proto/aadk/v1/build.proto
 - RPCs: Build, ListArtifacts

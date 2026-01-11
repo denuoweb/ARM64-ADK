@@ -5,6 +5,9 @@ JobService is the central event bus for long-running work. Other services create
 progress/log events, and clients stream these events. This crate defines the job registry, event
 history, and cancellation mechanism.
 
+## Maintenance
+Update this file whenever JobService behavior changes or when commits touching this crate are made.
+
 ## gRPC contract
 - proto/aadk/v1/job.proto
 - RPCs: StartJob, GetJob, CancelJob, StreamJobEvents, PublishJobEvent

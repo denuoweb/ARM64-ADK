@@ -5,6 +5,9 @@ ProjectService is responsible for project templates, project creation/opening, a
 projects list. It should be the source of truth for project metadata that BuildService and UI/CLI
 consume. It currently provides minimal placeholder responses and does not scaffold files on disk.
 
+## Maintenance
+Update this file whenever ProjectService behavior changes or when commits touching this crate are made.
+
 ## gRPC contract
 - proto/aadk/v1/project.proto
 - RPCs: ListTemplates, CreateProject, OpenProject, ListRecentProjects, SetProjectConfig

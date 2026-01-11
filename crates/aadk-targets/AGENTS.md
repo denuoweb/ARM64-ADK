@@ -5,6 +5,9 @@ TargetService enumerates devices/emulators via adb, exposes optional Cuttlefish 
 installs APKs, launches/stops apps, and streams logcat. It publishes progress/logs to JobService
 for long-running actions (install/start/stop/launch/logcat/cuttlefish actions).
 
+## Maintenance
+Update this file whenever TargetService behavior changes or when commits touching this crate are made.
+
 ## gRPC contract
 - proto/aadk/v1/target.proto
 - RPCs: ListTargets, SetDefaultTarget, GetDefaultTarget, InstallApk, Launch, StopApp,

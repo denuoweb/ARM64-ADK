@@ -5,6 +5,9 @@ The GTK4 UI is a thin client for the gRPC services. It provides pages for Home (
 Toolchains, Projects, Targets, Console (build), and Evidence. It uses a background tokio runtime
 thread to keep the GTK main thread responsive.
 
+## Maintenance
+Update this file whenever UI behavior changes or when commits touching this crate are made.
+
 ## Key implementation details
 - Implementation lives in crates/aadk-ui/src/main.rs.
 - AppConfig holds service addresses and pulls defaults from env:
@@ -20,7 +23,7 @@ thread to keep the GTK main thread responsive.
 - Projects: list templates only.
 - Targets: list targets, install/start/stop Cuttlefish, logcat, install APK, launch app.
 - Console: run builds via BuildService, stream job events.
-- Evidence: export support bundles (currently placeholder behavior).
+- Evidence: list runs, export support bundles, export evidence bundles, stream job events.
 
 ## Environment / config
 - All service addresses can be overridden via env vars listed above.
@@ -32,5 +35,4 @@ thread to keep the GTK main thread responsive.
 - P0: Replace demo-job UI/CLI with real job type selection/status views. main.rs (line 790) main.rs (line 41)
 - P1: Add project recent list + job history viewer. main.rs (line 157)
 - P1: Add toolchain set management UI/CLI commands. main.rs (line 829) main.rs (line 55)
-- P1: Add observe run list + bundle export UI/CLI. main.rs (line 70) main.rs (line 21)
 - P2: Persist UI config (service addresses) and export logs. main.rs (line 34)

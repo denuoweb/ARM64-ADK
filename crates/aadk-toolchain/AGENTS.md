@@ -5,6 +5,9 @@ ToolchainService exposes SDK/NDK provider metadata, installs toolchains, verifie
 tracks installed toolchains, and manages toolchain sets. It publishes job progress to JobService
 for long-running actions.
 
+## Maintenance
+Update this file whenever ToolchainService behavior changes or when commits touching this crate are made.
+
 ## gRPC contract
 - proto/aadk/v1/toolchain.proto
 - RPCs: ListProviders, ListAvailable, ListInstalled, InstallToolchain, VerifyToolchain,
