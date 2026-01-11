@@ -42,6 +42,17 @@ Default addresses (override via env):
 - Observe runs: `~/.local/share/aadk/state/observe.json`
 - Observe bundles: `~/.local/share/aadk/bundles`
 
+## Third-party inventory (downloaded on demand)
+This repo does not bundle third-party toolchains; services download or invoke them when requested.
+- Android SDK/NDK custom archives (pinned in ToolchainService):
+  - SDK: `https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz`
+  - NDK: `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz`
+  - These repos are MIT licensed; review upstream Android SDK/NDK terms if you plan to redistribute.
+- Cuttlefish host packages from `https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts`.
+- Cuttlefish images from `ci.android.com` / `android-ci.googleusercontent.com`.
+- Gradle via `gradlew` or system `gradle`.
+- adb/platform-tools from the Android SDK or Cuttlefish host tools.
+
 ## Quick start (Debian 13 aarch64)
 
 ### 1) System dependencies
@@ -94,9 +105,11 @@ GTK_A11Y=none cargo run -p aadk-ui
 ```bash
 cargo run -p aadk-cli -- job start-demo
 cargo run -p aadk-cli -- toolchain list-providers
+cargo run -p aadk-cli -- toolchain list-sets
 cargo run -p aadk-cli -- targets list
 cargo run -p aadk-cli -- observe list-runs
 cargo run -p aadk-cli -- observe export-support
+cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ```
 
 ## What is implemented today
@@ -130,17 +143,17 @@ cargo run -p aadk-cli -- observe export-support
 
 ### GTK UI (aadk-ui)
 - Home: demo job and streaming.
-- Toolchains: list/install/verify.
-- Projects: list templates, create/open, list recents.
+- Toolchains: list/install/verify, list toolchain sets.
+- Projects: list templates, create/open, list recents, set config, use active defaults.
 - Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
 - Console: run Gradle builds and stream logs.
 - Evidence: list runs, export support/evidence bundles and stream job events.
 
 ### CLI (aadk-cli)
 - Job demo start/cancel.
-- Toolchain list-providers.
+- Toolchain list-providers/list-sets.
 - Targets list/start/stop/status/install Cuttlefish.
-- Projects list-templates/list-recent/create/open.
+- Projects list-templates/list-recent/create/open/use-active-defaults.
 - Observe list-runs/export-support/export-evidence.
 
 ## Extending from here (recommended order)
@@ -202,6 +215,17 @@ Configuration (env vars):
 - `AADK_CUTTLEFISH_TARGET=<target>` (or `_16K`/`_4K`) to override the AOSP target used for image fetch
 - `AADK_CUTTLEFISH_BUILD_ID=<id>` to pin a specific AOSP build id
 - `AADK_ADB_PATH` or `ANDROID_SDK_ROOT` to locate `adb`
+
+### Pinning Cuttlefish builds
+To pin images to a known build, set `AADK_CUTTLEFISH_BUILD_ID` (optionally with branch/target):
+```bash
+AADK_CUTTLEFISH_BRANCH=aosp-main \
+AADK_CUTTLEFISH_TARGET=aosp_cf_arm64_only_phone-trunk_staging-userdebug \
+AADK_CUTTLEFISH_BUILD_ID=12345678 \
+./scripts/dev/run-all.sh
+```
+The GTK UI also exposes branch/target/build id fields plus a "Resolve Build ID" button so you can
+confirm the resolved build before running Install Cuttlefish.
 
 Notes:
 - The UI and CLI pass `include_offline=true`, so a stopped Cuttlefish instance still appears.
