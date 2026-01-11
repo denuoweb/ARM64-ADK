@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "aadk-proto",
  "prost",
+ "sha2",
  "tokio",
  "tonic",
  "tracing",

@@ -7,6 +7,7 @@ use std::{
     process::Stdio,
     time::Instant,
 };
+use std::io::Read;
 
 use aadk_proto::aadk::v1::{
     build_service_server::{BuildService, BuildServiceServer},
@@ -16,8 +17,9 @@ use aadk_proto::aadk::v1::{
     Artifact, BuildRequest, BuildResponse, BuildVariant, ErrorCode, ErrorDetail, Id, JobCompleted,
     JobEvent, JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged,
     KeyValue, ListArtifactsRequest, ListArtifactsResponse, ListRecentProjectsRequest, LogChunk,
-    PublishJobEventRequest, StartJobRequest,
+    Pagination, PublishJobEventRequest, StartJobRequest,
 };
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
@@ -28,6 +30,7 @@ use tracing::{info, warn};
 
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 const RECENT_LOG_LIMIT: usize = 200;
+const PROJECT_PAGE_SIZE: u32 = 50;
 
 #[derive(Clone, Default)]
 struct Svc;
@@ -233,24 +236,58 @@ fn expand_user(path: &str) -> PathBuf {
 
 async fn lookup_project_path(project_id: &str) -> Result<Option<PathBuf>, Status> {
     let mut client = connect_project().await?;
-    let resp = client
-        .list_recent_projects(ListRecentProjectsRequest { page: None })
-        .await
-        .map_err(|e| Status::unavailable(format!("list recent projects failed: {e}")))?
-        .into_inner();
+    let mut page_token = String::new();
 
-    for project in resp.projects {
-        let matches = project
-            .project_id
-            .as_ref()
-            .map(|id| id.value.as_str())
-            == Some(project_id);
-        if matches {
-            return Ok(Some(PathBuf::from(project.path)));
+    loop {
+        let resp = client
+            .list_recent_projects(ListRecentProjectsRequest {
+                page: Some(Pagination {
+                    page_size: PROJECT_PAGE_SIZE,
+                    page_token: page_token.clone(),
+                }),
+            })
+            .await
+            .map_err(|e| Status::unavailable(format!("list recent projects failed: {e}")))?
+            .into_inner();
+
+        for project in resp.projects {
+            let matches = project
+                .project_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                == Some(project_id);
+            if matches {
+                return Ok(Some(PathBuf::from(project.path)));
+            }
+        }
+
+        page_token = resp
+            .page_info
+            .map(|info| info.next_page_token)
+            .unwrap_or_default();
+        if page_token.trim().is_empty() {
+            break;
         }
     }
 
     Ok(None)
+}
+
+fn looks_like_path(value: &str) -> bool {
+    if value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+    {
+        return true;
+    }
+    if value.contains(std::path::MAIN_SEPARATOR) {
+        return true;
+    }
+    if cfg!(windows) && value.contains('\\') {
+        return true;
+    }
+    false
 }
 
 async fn resolve_project_path(project_id: &str) -> Result<PathBuf, Status> {
@@ -259,23 +296,33 @@ async fn resolve_project_path(project_id: &str) -> Result<PathBuf, Status> {
         return Err(Status::invalid_argument("project_id is required"));
     }
 
-    let direct = expand_user(trimmed);
-    if direct.is_dir() {
-        return Ok(direct);
-    }
-
-    if let Ok(root) = std::env::var("AADK_PROJECT_ROOT") {
-        let candidate = PathBuf::from(root).join(trimmed);
-        if candidate.is_dir() {
-            return Ok(candidate);
+    if looks_like_path(trimmed) {
+        let direct = expand_user(trimmed);
+        if direct.is_dir() {
+            return Ok(direct);
         }
+        return Err(Status::not_found(format!(
+            "project path not found: {trimmed}"
+        )));
     }
 
     match lookup_project_path(trimmed).await? {
         Some(path) => Ok(path),
-        None => Err(Status::not_found(format!(
-            "project not found: {trimmed}"
-        ))),
+        None => {
+            if let Ok(root) = std::env::var("AADK_PROJECT_ROOT") {
+                let candidate = PathBuf::from(root).join(trimmed);
+                if candidate.is_dir() {
+                    warn!(
+                        "project_id {} not in ProjectService; using AADK_PROJECT_ROOT fallback",
+                        trimmed
+                    );
+                    return Ok(candidate);
+                }
+            }
+            Err(Status::not_found(format!(
+                "project not found: {trimmed}"
+            )))
+        }
     }
 }
 
@@ -459,6 +506,37 @@ fn collect_apk_paths(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+fn sha256_file(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(nibble_to_hex(b >> 4));
+        out.push(nibble_to_hex(b & 0x0f));
+    }
+    out
+}
+
+fn nibble_to_hex(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        _ => '0',
+    }
+}
+
 fn variant_dir(variant: BuildVariant) -> Option<&'static str> {
     match variant {
         BuildVariant::Debug => Some("debug"),
@@ -499,6 +577,13 @@ fn collect_artifacts(project_path: &Path, variant: BuildVariant) -> Vec<Artifact
                 .unwrap_or("app.apk")
                 .to_string();
             let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let sha256 = match sha256_file(&path) {
+                Ok(value) => value,
+                Err(err) => {
+                    warn!("failed to hash {}: {}", path.display(), err);
+                    String::new()
+                }
+            };
             let mut metadata = Vec::new();
             if let Some(module) = module.clone() {
                 metadata.push(KeyValue {
@@ -517,7 +602,7 @@ fn collect_artifacts(project_path: &Path, variant: BuildVariant) -> Vec<Artifact
                 name,
                 path: path.to_string_lossy().to_string(),
                 size_bytes,
-                sha256: "".into(),
+                sha256,
                 metadata,
             });
         }
@@ -557,8 +642,10 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
         Err(err) => {
             let code = match err.code() {
                 tonic::Code::NotFound => ErrorCode::NotFound,
+                tonic::Code::InvalidArgument => ErrorCode::InvalidArgument,
                 tonic::Code::Unavailable => ErrorCode::Unavailable,
-                _ => ErrorCode::InvalidArgument,
+                tonic::Code::FailedPrecondition => ErrorCode::InvalidArgument,
+                _ => ErrorCode::Internal,
             };
             let detail = job_error_detail(
                 code,
