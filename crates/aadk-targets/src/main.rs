@@ -364,6 +364,10 @@ fn cuttlefish_web_url() -> String {
     std::env::var("AADK_CUTTLEFISH_WEBRTC_URL").unwrap_or_else(|_| "https://localhost:8443".into())
 }
 
+fn cuttlefish_env_url() -> String {
+    std::env::var("AADK_CUTTLEFISH_ENV_URL").unwrap_or_else(|_| "https://localhost:1443".into())
+}
+
 fn cuttlefish_cvd_bin() -> String {
     std::env::var("AADK_CVD_BIN").unwrap_or_else(|_| "cvd".into())
 }
@@ -1338,6 +1342,7 @@ async fn maybe_cuttlefish_target(
         details.push(KeyValue { key: "cuttlefish_build_id".into(), value: build_id });
     }
     details.push(KeyValue { key: "cuttlefish_webrtc_url".into(), value: cuttlefish_web_url() });
+    details.push(KeyValue { key: "cuttlefish_env_url".into(), value: cuttlefish_env_url() });
     for (key, value) in &status.details {
         details.push(KeyValue { key: format!("cuttlefish_{key}"), value: value.clone() });
     }
@@ -2321,6 +2326,13 @@ fn cuttlefish_start_command(
             extra_args.push_str(&mode);
         }
     }
+    if !args_has_flag(&extra_args, "--start_webrtc") {
+        if !extra_args.is_empty() {
+            extra_args.push(' ');
+        }
+        extra_args.push_str("--start_webrtc=");
+        extra_args.push_str(if show_full_ui { "true" } else { "false" });
+    }
     let include_usage_stats = !extra_args.contains("report_anonymous_usage_stats");
     if std::env::consts::ARCH == "aarch64" && !extra_args.contains("enable_host_bluetooth") {
         if !extra_args.is_empty() {
@@ -2338,9 +2350,6 @@ fn cuttlefish_start_command(
             " --system_image_dir={}",
             shell_escape(&runtime.images_dir.display().to_string())
         ));
-        if !show_full_ui {
-            command.push_str(" --start_webrtc=false");
-        }
         if include_usage_stats {
             command.push_str(" --report_anonymous_usage_stats=n");
         }
@@ -2359,9 +2368,6 @@ fn cuttlefish_start_command(
             shell_escape(&runtime.host_dir.display().to_string()),
             shell_escape(&runtime.images_dir.display().to_string())
         );
-        if !show_full_ui {
-            command.push_str(" --start_webrtc=false");
-        }
         if include_usage_stats {
             command.push_str(" --report_anonymous_usage_stats=n");
         }
@@ -2658,6 +2664,7 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
     outputs.push(KeyValue { key: "adb_serial".into(), value: adb_serial });
     outputs.push(KeyValue { key: "show_full_ui".into(), value: show_full_ui.to_string() });
     outputs.push(KeyValue { key: "webrtc_url".into(), value: cuttlefish_web_url() });
+    outputs.push(KeyValue { key: "env_url".into(), value: cuttlefish_env_url() });
     outputs.push(KeyValue { key: "home_dir".into(), value: runtime.home_dir.display().to_string() });
     outputs.push(KeyValue { key: "images_dir".into(), value: runtime.images_dir.display().to_string() });
     outputs.push(KeyValue { key: "host_dir".into(), value: runtime.host_dir.display().to_string() });

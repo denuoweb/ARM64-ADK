@@ -934,6 +934,7 @@ fn page_targets(
     let list = gtk::Button::with_label("List Targets");
     let status = gtk::Button::with_label("Cuttlefish Status");
     let web_ui = gtk::Button::with_label("Open Cuttlefish UI");
+    let env_ui = gtk::Button::with_label("Open Cuttlefish Env");
     let docs = gtk::Button::with_label("Open Cuttlefish Docs");
     let install = gtk::Button::with_label("Install Cuttlefish");
     let resolve_build = gtk::Button::with_label("Resolve Build ID");
@@ -943,6 +944,7 @@ fn page_targets(
     row.append(&list);
     row.append(&status);
     row.append(&web_ui);
+    row.append(&env_ui);
     row.append(&docs);
     row.append(&install);
     row.append(&resolve_build);
@@ -1100,6 +1102,19 @@ fn page_targets(
         ) {
             Ok(_) => page_web.append(&format!("Opened Cuttlefish UI: {url}\n")),
             Err(err) => page_web.append(&format!("Failed to open Cuttlefish UI: {err}\n")),
+        }
+    });
+
+    let page_env = page.clone();
+    env_ui.connect_clicked(move |_| {
+        let url = std::env::var("AADK_CUTTLEFISH_ENV_URL")
+            .unwrap_or_else(|_| "https://localhost:1443".into());
+        match gtk::gio::AppInfo::launch_default_for_uri(
+            &url,
+            None::<&gtk::gio::AppLaunchContext>,
+        ) {
+            Ok(_) => page_env.append(&format!("Opened Cuttlefish env control: {url}\n")),
+            Err(err) => page_env.append(&format!("Failed to open Cuttlefish env control: {err}\n")),
         }
     });
 
