@@ -206,6 +206,33 @@ GPU acceleration:
 - Host requirements: EGL driver with `GL_KHR_surfaceless_context`, OpenGL ES, and Vulkan support.
 - Use `AADK_CUTTLEFISH_GPU_MODE=gfxstream` (OpenGL+Vulkan passthrough) or `AADK_CUTTLEFISH_GPU_MODE=drm_virgl` (OpenGL only) to set `--gpu_mode=...` when starting.
 
+WebRTC streaming:
+- Launch with `--start_webrtc=true` (TargetService sets this automatically when "show full UI" is selected; override via `AADK_CUTTLEFISH_START_ARGS`).
+- Web UI is available at `https://localhost:8443` by default (`AADK_CUTTLEFISH_WEBRTC_URL` overrides).
+- Remote access requires firewall access for TCP 8443 and TCP/UDP 15550-15599.
+
+Environment control (REST/CLI):
+- REST endpoint: `https://localhost:1443` (`AADK_CUTTLEFISH_ENV_URL` overrides).
+- Example REST paths:
+  - `GET /devices/DEVICE_ID/services`
+  - `GET /devices/DEVICE_ID/services/SERVICE_NAME`
+  - `POST /devices/DEVICE_ID/services/SERVICE_NAME/METHOD_NAME` with JSON-formatted proto payload.
+- CLI equivalents: `cvd env ls`, `cvd env type SERVICE_NAME REQUEST_TYPE`, `cvd env call SERVICE_NAME METHOD_NAME '{...}'`.
+- Services: `GnssGrpcProxy`, `OpenwrtControlService`, `WmediumdService`, `CasimirControlService`.
+
+Wi-Fi:
+- Cuttlefish uses Wmediumd to simulate wireless medium.
+- Android 14+ uses `WmediumdService` (via env control REST/CLI); Android 13 or lower uses `wmediumd_control`.
+- OpenWRT AP: default device id is `cvd-1`; default WAN IP is `192.168.94.2` or `192.168.96.2` when no launch options are provided.
+- OpenWRT access: `ssh root@OPENWRT_WAN_IP_ADDRESS` or `https://localhost:1443/devices/DEVICE_ID/openwrt`.
+
+Bluetooth:
+- Rootcanal is controlled from the Web UI command console.
+- Commands: `list`, `add DEVICE_TYPE [ARGS]`, `del DEVICE_INDEX`, `add_phy PHY_TYPE`, `del_phy PHY_INDEX`,
+  `add_device_to_phy DEVICE_INDEX PHY_INDEX`, `del_device_from_phy DEVICE_INDEX PHY_INDEX`,
+  `add_remote HOSTNAME PORT PHY_TYPE`.
+- Device types: `beacon`, `scripted_beacon`, `keyboard`, `loopback`, `sniffer`.
+
 Configuration (env vars):
 - `AADK_CUTTLEFISH_ENABLE=0` to disable detection
 - `AADK_CVD_BIN=/path/to/cvd` to override the `cvd` command
@@ -214,6 +241,7 @@ Configuration (env vars):
 - `AADK_CUTTLEFISH_ADB_SERIAL=127.0.0.1:6520` to override the adb serial
 - `AADK_CUTTLEFISH_CONNECT=0` to skip `adb connect`
 - `AADK_CUTTLEFISH_WEBRTC_URL=https://localhost:8443` to override the WebRTC viewer URL
+- `AADK_CUTTLEFISH_ENV_URL=https://localhost:1443` to override the environment control endpoint
 - `AADK_CUTTLEFISH_PAGE_SIZE_CHECK=0` to skip the kernel page-size preflight check
 - `AADK_CUTTLEFISH_KVM_CHECK=0` to skip the KVM availability/access check
 - `AADK_CUTTLEFISH_GPU_MODE=gfxstream|drm_virgl` to set the GPU acceleration mode

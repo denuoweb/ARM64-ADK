@@ -26,6 +26,8 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
 - Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.
 - GPU mode can be set via AADK_CUTTLEFISH_GPU_MODE and is appended to launch arguments when starting Cuttlefish.
+- Start adds --start_webrtc based on show_full_ui unless already provided in AADK_CUTTLEFISH_START_ARGS.
+- Cuttlefish details and job outputs include WebRTC and environment control URLs.
 
 ## Data flow and dependencies
 - Requires JobService to publish job state/log/progress for install/launch/stop/cuttlefish jobs.
@@ -44,6 +46,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_CUTTLEFISH_ADB_SERIAL=127.0.0.1:6520
 - AADK_CUTTLEFISH_CONNECT=0 to skip adb connect
 - AADK_CUTTLEFISH_WEBRTC_URL=https://localhost:8443
+- AADK_CUTTLEFISH_ENV_URL=https://localhost:1443
 - AADK_CUTTLEFISH_PAGE_SIZE_CHECK=0 to skip kernel page-size checks
 - AADK_CUTTLEFISH_KVM_CHECK=0 to skip KVM availability/access checks
 - AADK_CUTTLEFISH_GPU_MODE=gfxstream|drm_virgl to configure GPU acceleration mode

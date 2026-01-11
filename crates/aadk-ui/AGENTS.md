@@ -17,6 +17,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
   AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
 - The Cuttlefish docs button opens https://source.android.com/docs/devices/cuttlefish/get-started.
+- The Targets page includes an "Open Cuttlefish Env" button using AADK_CUTTLEFISH_ENV_URL (default https://localhost:1443).
 
 ## Service coverage
 - Home: starts demo job and streams events from JobService.
