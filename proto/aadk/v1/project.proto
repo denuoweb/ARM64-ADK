@@ -1,0 +1,51 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+
+message Project {
+  Id project_id = 1;
+  string name = 2;
+  string path = 3;
+  Timestamp created_at = 4;
+  Timestamp last_opened_at = 5;
+  Id toolchain_set_id = 6;
+  Id default_target_id = 7;
+}
+
+message Template {
+  Id template_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated KeyValue defaults = 4;
+}
+
+message ListTemplatesRequest {}
+message ListTemplatesResponse { repeated Template templates = 1; }
+
+message CreateProjectRequest {
+  string name = 1;
+  string path = 2;
+  Id template_id = 3;
+  repeated KeyValue params = 4;
+  Id toolchain_set_id = 5;
+}
+
+message CreateProjectResponse { Id job_id = 1; Id project_id = 2; }
+
+message OpenProjectRequest { string path = 1; }
+message OpenProjectResponse { Project project = 1; }
+
+message ListRecentProjectsRequest { Pagination page = 1; }
+message ListRecentProjectsResponse { repeated Project projects = 1; PageInfo page_info = 2; }
+
+message SetProjectConfigRequest { Id project_id = 1; Id toolchain_set_id = 2; Id default_target_id = 3; }
+message SetProjectConfigResponse { bool ok = 1; }
+
+service ProjectService {
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc OpenProject(OpenProjectRequest) returns (OpenProjectResponse);
+  rpc ListRecentProjects(ListRecentProjectsRequest) returns (ListRecentProjectsResponse);
+  rpc SetProjectConfig(SetProjectConfigRequest) returns (SetProjectConfigResponse);
+}

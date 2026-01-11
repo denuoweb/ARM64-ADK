@@ -1,0 +1,97 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+import "aadk/v1/errors.proto";
+
+enum ToolchainKind {
+  TOOLCHAIN_KIND_UNSPECIFIED = 0;
+  TOOLCHAIN_KIND_SDK = 1;
+  TOOLCHAIN_KIND_NDK = 2;
+}
+
+message ToolchainProvider {
+  Id provider_id = 1;
+  string name = 2;
+  ToolchainKind kind = 3;
+  string description = 4;
+}
+
+message ToolchainVersion {
+  string version = 1;
+  string channel = 2;
+  string notes = 3;
+}
+
+message ToolchainArtifact {
+  string url = 1;
+  string sha256 = 2;
+  uint64 size_bytes = 3;
+}
+
+message AvailableToolchain {
+  ToolchainProvider provider = 1;
+  ToolchainVersion version = 2;
+  ToolchainArtifact artifact = 3;
+}
+
+message InstalledToolchain {
+  Id toolchain_id = 1;
+  ToolchainProvider provider = 2;
+  ToolchainVersion version = 3;
+  string install_path = 4;
+  bool verified = 5;
+  Timestamp installed_at = 6;
+  string source_url = 7;
+  string sha256 = 8;
+}
+
+message ToolchainSet {
+  Id toolchain_set_id = 1;
+  Id sdk_toolchain_id = 2;
+  Id ndk_toolchain_id = 3;
+  string display_name = 4;
+}
+
+message ListProvidersRequest {}
+message ListProvidersResponse { repeated ToolchainProvider providers = 1; }
+
+message ListAvailableRequest { Id provider_id = 1; Pagination page = 2; }
+message ListAvailableResponse { repeated AvailableToolchain items = 1; PageInfo page_info = 2; }
+
+message ListInstalledRequest { ToolchainKind kind = 1; }
+message ListInstalledResponse { repeated InstalledToolchain items = 1; }
+
+// Long-running actions return a job_id (JobService is the canonical event stream).
+message InstallToolchainRequest {
+  Id provider_id = 1;
+  string version = 2;
+  string install_root = 3;
+  bool verify_hash = 4;
+}
+message InstallToolchainResponse { Id job_id = 1; }
+
+message VerifyToolchainRequest { Id toolchain_id = 1; }
+message VerifyToolchainResponse { bool verified = 1; ErrorDetail error = 2; Id job_id = 3; }
+
+message CreateToolchainSetRequest { Id sdk_toolchain_id = 1; Id ndk_toolchain_id = 2; string display_name = 3; }
+message CreateToolchainSetResponse { ToolchainSet set = 1; }
+
+message SetActiveToolchainSetRequest { Id toolchain_set_id = 1; }
+message SetActiveToolchainSetResponse { bool ok = 1; }
+
+message GetActiveToolchainSetRequest {}
+message GetActiveToolchainSetResponse { ToolchainSet set = 1; }
+
+service ToolchainService {
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+  rpc ListAvailable(ListAvailableRequest) returns (ListAvailableResponse);
+  rpc ListInstalled(ListInstalledRequest) returns (ListInstalledResponse);
+
+  rpc InstallToolchain(InstallToolchainRequest) returns (InstallToolchainResponse);
+  rpc VerifyToolchain(VerifyToolchainRequest) returns (VerifyToolchainResponse);
+
+  rpc CreateToolchainSet(CreateToolchainSetRequest) returns (CreateToolchainSetResponse);
+  rpc SetActiveToolchainSet(SetActiveToolchainSetRequest) returns (SetActiveToolchainSetResponse);
+  rpc GetActiveToolchainSet(GetActiveToolchainSetRequest) returns (GetActiveToolchainSetResponse);
+}

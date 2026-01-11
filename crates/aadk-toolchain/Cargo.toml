@@ -1,0 +1,20 @@
+[package]
+name = "aadk-toolchain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aadk-proto = { path = "../aadk-proto" }
+
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time", "sync", "process", "fs", "io-util"] }
+tonic = "0.12"
+prost = "0.13"
+uuid = { version = "1.11", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = "0.1"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"

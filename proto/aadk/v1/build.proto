@@ -1,0 +1,35 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+
+enum BuildVariant {
+  BUILD_VARIANT_UNSPECIFIED = 0;
+  BUILD_VARIANT_DEBUG = 1;
+  BUILD_VARIANT_RELEASE = 2;
+}
+
+message BuildRequest {
+  Id project_id = 1;
+  BuildVariant variant = 2;
+  bool clean_first = 3;
+  repeated KeyValue gradle_args = 4;
+}
+
+message BuildResponse { Id job_id = 1; }
+
+message Artifact {
+  string name = 1;
+  string path = 2;
+  uint64 size_bytes = 3;
+  string sha256 = 4;
+  repeated KeyValue metadata = 5;
+}
+
+message ListArtifactsRequest { Id project_id = 1; BuildVariant variant = 2; }
+message ListArtifactsResponse { repeated Artifact artifacts = 1; }
+
+service BuildService {
+  rpc Build(BuildRequest) returns (BuildResponse);
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+}

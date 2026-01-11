@@ -1,0 +1,80 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+
+enum TargetKind {
+  TARGET_KIND_UNSPECIFIED = 0;
+  TARGET_KIND_DEVICE = 1;
+  TARGET_KIND_EMULATORLIKE = 2;
+  TARGET_KIND_REMOTE = 3;
+}
+
+message Target {
+  Id target_id = 1;
+  TargetKind kind = 2;
+  string display_name = 3;
+  string provider = 4;
+  string address = 5;
+  string api_level = 6;
+  string state = 7;
+  repeated KeyValue details = 8;
+}
+
+message ListTargetsRequest { bool include_offline = 1; }
+message ListTargetsResponse { repeated Target targets = 1; }
+
+message SetDefaultTargetRequest { Id target_id = 1; }
+message SetDefaultTargetResponse { bool ok = 1; }
+
+message GetDefaultTargetRequest {}
+message GetDefaultTargetResponse { Target target = 1; }
+
+message InstallApkRequest { Id target_id = 1; Id project_id = 2; string apk_path = 3; }
+message InstallApkResponse { Id job_id = 1; }
+
+message LaunchRequest { Id target_id = 1; string application_id = 2; string activity = 3; }
+message LaunchResponse { Id job_id = 1; }
+
+message StopAppRequest { Id target_id = 1; string application_id = 2; }
+message StopAppResponse { Id job_id = 1; }
+
+message InstallCuttlefishRequest { bool force = 1; }
+message InstallCuttlefishResponse { Id job_id = 1; }
+
+message StartCuttlefishRequest { bool show_full_ui = 1; }
+message StartCuttlefishResponse { Id job_id = 1; }
+
+message StopCuttlefishRequest {}
+message StopCuttlefishResponse { Id job_id = 1; }
+
+message GetCuttlefishStatusRequest {}
+message GetCuttlefishStatusResponse {
+  string state = 1;
+  string adb_serial = 2;
+  repeated KeyValue details = 3;
+}
+
+message StreamLogcatRequest { Id target_id = 1; string filter = 2; bool include_history = 3; }
+
+message LogcatEvent {
+  Timestamp at = 1;
+  Id target_id = 2;
+  bytes line = 3;
+}
+
+service TargetService {
+  rpc ListTargets(ListTargetsRequest) returns (ListTargetsResponse);
+  rpc SetDefaultTarget(SetDefaultTargetRequest) returns (SetDefaultTargetResponse);
+  rpc GetDefaultTarget(GetDefaultTargetRequest) returns (GetDefaultTargetResponse);
+
+  rpc InstallApk(InstallApkRequest) returns (InstallApkResponse);
+  rpc Launch(LaunchRequest) returns (LaunchResponse);
+  rpc StopApp(StopAppRequest) returns (StopAppResponse);
+  rpc InstallCuttlefish(InstallCuttlefishRequest) returns (InstallCuttlefishResponse);
+  rpc StartCuttlefish(StartCuttlefishRequest) returns (StartCuttlefishResponse);
+  rpc StopCuttlefish(StopCuttlefishRequest) returns (StopCuttlefishResponse);
+  rpc GetCuttlefishStatus(GetCuttlefishStatusRequest) returns (GetCuttlefishStatusResponse);
+
+  rpc StreamLogcat(StreamLogcatRequest) returns (stream LogcatEvent);
+}

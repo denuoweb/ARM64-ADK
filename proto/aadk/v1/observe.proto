@@ -1,0 +1,37 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+
+message RunRecord {
+  Id run_id = 1;
+  Id project_id = 2;
+  Id target_id = 3;
+  Id toolchain_set_id = 4;
+  Timestamp started_at = 5;
+  Timestamp finished_at = 6;
+  string result = 7;
+  repeated Id job_ids = 8;
+  repeated KeyValue summary = 9;
+}
+
+message ListRunsRequest { Pagination page = 1; }
+message ListRunsResponse { repeated RunRecord runs = 1; PageInfo page_info = 2; }
+
+message ExportSupportBundleRequest {
+  bool include_logs = 1;
+  bool include_config = 2;
+  bool include_toolchain_provenance = 3;
+  bool include_recent_runs = 4;
+  uint32 recent_runs_limit = 5;
+}
+message ExportSupportBundleResponse { Id job_id = 1; string output_path = 2; }
+
+message ExportEvidenceBundleRequest { Id run_id = 1; }
+message ExportEvidenceBundleResponse { Id job_id = 1; string output_path = 2; }
+
+service ObserveService {
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc ExportSupportBundle(ExportSupportBundleRequest) returns (ExportSupportBundleResponse);
+  rpc ExportEvidenceBundle(ExportEvidenceBundleRequest) returns (ExportEvidenceBundleResponse);
+}

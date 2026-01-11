@@ -1,0 +1,12 @@
+[package]
+name = "aadk-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aadk-proto = { path = "../aadk-proto" }
+
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros"] }
+tonic = "0.12"
+futures-util = "0.3"
+clap = { version = "4.5", features = ["derive"] }

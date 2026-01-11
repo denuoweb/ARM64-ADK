@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/aadk-proto",
+  "crates/aadk-core",
+  "crates/aadk-toolchain",
+  "crates/aadk-project",
+  "crates/aadk-build",
+  "crates/aadk-targets",
+  "crates/aadk-observe",
+  "crates/aadk-ui",
+  "crates/aadk-cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"

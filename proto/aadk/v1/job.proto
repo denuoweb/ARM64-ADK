@@ -1,0 +1,129 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+import "aadk/v1/errors.proto";
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_QUEUED = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCESS = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+message JobRef {
+  Id job_id = 1;
+}
+
+message Job {
+  Id job_id = 1;
+  string job_type = 2;
+  JobState state = 3;
+  Timestamp created_at = 4;
+  Timestamp started_at = 5;
+  Timestamp finished_at = 6;
+  string display_name = 7;
+  string correlation_id = 8;
+
+  // Optional linkage
+  Id project_id = 9;
+  Id target_id = 10;
+  Id toolchain_set_id = 11;
+}
+
+message JobProgress {
+  uint32 percent = 1;
+  string phase = 2;
+  repeated KeyValue metrics = 3;
+}
+
+message LogChunk {
+  string stream = 1;
+  bytes data = 2;
+  bool truncated = 3;
+}
+
+message JobEvent {
+  Timestamp at = 1;
+  Id job_id = 2;
+
+  oneof payload {
+    JobStateChanged state_changed = 10;
+    JobProgressUpdated progress = 11;
+    JobLogAppended log = 12;
+    JobCompleted completed = 13;
+    JobFailed failed = 14;
+  }
+}
+
+message JobStateChanged {
+  JobState new_state = 1;
+}
+
+message JobProgressUpdated {
+  JobProgress progress = 1;
+}
+
+message JobLogAppended {
+  LogChunk chunk = 1;
+}
+
+message JobCompleted {
+  string summary = 1;
+  repeated KeyValue outputs = 2;
+}
+
+message JobFailed {
+  ErrorDetail error = 1;
+}
+
+message StartJobRequest {
+  string job_type = 1;
+  repeated KeyValue params = 2;
+  Id project_id = 3;
+  Id target_id = 4;
+  Id toolchain_set_id = 5;
+}
+
+message StartJobResponse {
+  JobRef job = 1;
+}
+
+message GetJobRequest {
+  Id job_id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message CancelJobRequest {
+  Id job_id = 1;
+}
+
+message CancelJobResponse {
+  bool accepted = 1;
+}
+
+message StreamJobEventsRequest {
+  Id job_id = 1;
+  bool include_history = 2;
+}
+
+message PublishJobEventRequest {
+  JobEvent event = 1;
+}
+
+message PublishJobEventResponse {
+  bool accepted = 1;
+}
+
+service JobService {
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc StreamJobEvents(StreamJobEventsRequest) returns (stream JobEvent);
+  rpc PublishJobEvent(PublishJobEventRequest) returns (PublishJobEventResponse);
+}

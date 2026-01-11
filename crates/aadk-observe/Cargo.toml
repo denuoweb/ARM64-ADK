@@ -1,0 +1,16 @@
+[package]
+name = "aadk-observe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aadk-proto = { path = "../aadk-proto" }
+
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tonic = "0.12"
+prost = "0.13"
+uuid = { version = "1.11", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = "0.1"
+
