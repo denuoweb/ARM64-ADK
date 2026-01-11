@@ -155,6 +155,23 @@ cargo run -p aadk-cli -- observe export-support
 - UI uses a background tokio runtime to keep the GTK main thread responsive.
 - Toolchain install/verify publishes progress via JobService; run `aadk-core` to see UI streams.
 
+## Why AADK (ARM64 gap)
+AADK targets efficient, ARM64-first Android development tooling (not an IDE clone), because the
+official Android Studio stack does not cover ARM64 hosts today.
+
+Primary sources behind this gap:
+- Android Studio Linux docs: "Linux machines with ARM-based CPUs aren't supported," and the CPU
+  requirement lists "x86_64 CPU architecture." https://developer.android.com/studio/platform/install
+- Google issue tracker: "Android Studio is not available on Windows Arm." https://issuetracker.google.com/issues/351408627
+- Google issue tracker: "Emulator is not available on Windows/Linux arm64." https://issuetracker.google.com/issues/386749845
+- .NET Android workload supports Windows ARM64, but it is a .NET stack and not a full Android Studio
+  replacement. https://github.com/dotnet/android/blob/main/Documentation/guides/WindowsOnArm64.md
+
+Community ARM64 tooling references:
+- android-tools (platform tools like adb/fastboot) for aarch64 in Arch Linux ARM. https://archlinuxarm.org/packages/aarch64/android-tools
+- android-sdk-tools community repo building platform-tools/build-tools with aarch64 testing. https://github.com/Lzhiyong/android-sdk-tools
+- AndroidIDE tools repo (JDK + Android SDK tooling for AndroidIDE). https://github.com/AndroidIDEOfficial/androidide-tools
+
 ## Cuttlefish target provider
 TargetService can surface a local Cuttlefish instance as a `provider=cuttlefish` target. It:
 - uses `cvd status` when available to detect running state and adb serial
