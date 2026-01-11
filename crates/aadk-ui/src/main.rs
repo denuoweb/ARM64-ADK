@@ -8,12 +8,12 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     target_service_client::TargetServiceClient,
     toolchain_service_client::ToolchainServiceClient,
-    BuildRequest, BuildVariant, CancelJobRequest, ExportSupportBundleRequest,
+    BuildRequest, BuildVariant, CancelJobRequest, CreateProjectRequest, ExportSupportBundleRequest,
     GetCuttlefishStatusRequest, Id, InstallApkRequest, InstallCuttlefishRequest,
     InstallToolchainRequest, KeyValue, LaunchRequest, ListAvailableRequest, ListInstalledRequest,
-    ListProvidersRequest, ListTargetsRequest, ListTemplatesRequest, StartCuttlefishRequest,
-    StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest, StreamLogcatRequest,
-    ToolchainKind, VerifyToolchainRequest,
+    ListProvidersRequest, ListRecentProjectsRequest, ListTargetsRequest, ListTemplatesRequest,
+    OpenProjectRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
+    StreamJobEventsRequest, StreamLogcatRequest, ToolchainKind, VerifyToolchainRequest,
 };
 use futures_util::StreamExt;
 use gtk4 as gtk;
@@ -59,6 +59,9 @@ enum UiCommand {
     ToolchainListInstalled { cfg: AppConfig, kind: ToolchainKind },
     ToolchainVerifyInstalled { cfg: AppConfig },
     ProjectListTemplates { cfg: AppConfig },
+    ProjectListRecent { cfg: AppConfig },
+    ProjectCreate { cfg: AppConfig, name: String, path: String, template_id: String },
+    ProjectOpen { cfg: AppConfig, path: String },
     TargetsList { cfg: AppConfig },
     TargetsInstallCuttlefish { cfg: AppConfig, force: bool },
     TargetsStartCuttlefish { cfg: AppConfig, show_full_ui: bool },
@@ -82,6 +85,7 @@ enum AppEvent {
     Log { page: &'static str, line: String },
     SetCurrentJob { job_id: Option<String> },
     SetLastBuildApk { apk_path: String },
+    ProjectTemplates { templates: Vec<ProjectTemplateOption> },
 }
 
 fn main() {
@@ -146,15 +150,15 @@ fn build_ui(app: &gtk::Application) {
     // Pages
     let home = page_home(cfg.clone(), cmd_tx.clone());
     let toolchains = page_toolchains(cfg.clone(), cmd_tx.clone());
-    let projects = page_projects(cfg.clone(), cmd_tx.clone());
+    let projects = page_projects(cfg.clone(), cmd_tx.clone(), &window);
     let targets = page_targets(cfg.clone(), cmd_tx.clone(), &window);
     let evidence = page_evidence(cfg.clone(), cmd_tx.clone());
-    let console = page_console(cfg.clone(), cmd_tx.clone());
+    let console = page_console(cfg.clone(), cmd_tx.clone(), &window);
     let settings = page_settings(cfg.clone());
 
     stack.add_titled(&home.page.container, Some("home"), "Home");
     stack.add_titled(&toolchains.container, Some("toolchains"), "Toolchains");
-    stack.add_titled(&projects.container, Some("projects"), "Projects");
+    stack.add_titled(&projects.page.container, Some("projects"), "Projects");
     stack.add_titled(&targets.page.container, Some("targets"), "Targets");
     stack.add_titled(&console.container, Some("console"), "Console");
     stack.add_titled(&evidence.container, Some("evidence"), "Evidence");
@@ -188,6 +192,9 @@ fn build_ui(app: &gtk::Application) {
                     }
                     AppEvent::SetLastBuildApk { apk_path } => {
                         targets_for_events.set_apk_path(&apk_path);
+                    }
+                    AppEvent::ProjectTemplates { templates } => {
+                        projects_for_events.set_templates(&templates);
                     }
                 },
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -253,6 +260,18 @@ struct TargetsPage {
     apk_entry: gtk::Entry,
 }
 
+#[derive(Clone, Debug)]
+struct ProjectTemplateOption {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone)]
+struct ProjectsPage {
+    page: Page,
+    template_combo: gtk::ComboBoxText,
+}
+
 impl TargetsPage {
     fn append(&self, s: &str) {
         self.page.append(s);
@@ -262,6 +281,23 @@ impl TargetsPage {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             self.apk_entry.set_text(trimmed);
+        }
+    }
+}
+
+impl ProjectsPage {
+    fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    fn set_templates(&self, templates: &[ProjectTemplateOption]) {
+        self.template_combo.remove_all();
+        for tmpl in templates {
+            let label = format!("{} ({})", tmpl.name, tmpl.id);
+            self.template_combo.append(Some(tmpl.id.as_str()), &label);
+        }
+        if !templates.is_empty() {
+            self.template_combo.set_active(Some(0));
         }
     }
 }
@@ -432,17 +468,139 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     page
 }
 
-fn page_projects(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
+fn page_projects(
+    cfg: Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: mpsc::Sender<UiCommand>,
+    parent: &gtk::ApplicationWindow,
+) -> ProjectsPage {
     let page = make_page("Projects — ProjectService");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let list = gtk::Button::with_label("List Templates");
-    row.append(&list);
-    page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
-    list.connect_clicked(move |_| {
-        let cfg = cfg.lock().unwrap().clone();
-        cmd_tx.send(UiCommand::ProjectListTemplates { cfg }).ok();
+    let refresh_templates = gtk::Button::with_label("Refresh Templates");
+    let list_recent = gtk::Button::with_label("List Recent");
+    let open_btn = gtk::Button::with_label("Open Project");
+    let create_btn = gtk::Button::with_label("Create Project");
+    row.append(&refresh_templates);
+    row.append(&list_recent);
+    row.append(&open_btn);
+    row.append(&create_btn);
+    page.container
+        .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+
+    let form = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let template_combo = gtk::ComboBoxText::new();
+    template_combo.set_hexpand(true);
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text("Project name")
+        .hexpand(true)
+        .build();
+    let path_entry = gtk::Entry::builder()
+        .placeholder_text("Project path")
+        .hexpand(true)
+        .build();
+    let browse_btn = gtk::Button::with_label("Browse...");
+
+    let label_template = gtk::Label::builder().label("Template").xalign(0.0).build();
+    let label_name = gtk::Label::builder().label("Name").xalign(0.0).build();
+    let label_path = gtk::Label::builder().label("Path").xalign(0.0).build();
+
+    form.attach(&label_template, 0, 0, 1, 1);
+    form.attach(&template_combo, 1, 0, 1, 1);
+    form.attach(&label_name, 0, 1, 1, 1);
+    form.attach(&name_entry, 1, 1, 1, 1);
+    form.attach(&label_path, 0, 2, 1, 1);
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    path_row.append(&path_entry);
+    path_row.append(&browse_btn);
+    form.attach(&path_row, 1, 2, 1, 1);
+
+    page.container.insert_child_after(&form, Some(&row));
+
+    let cfg_refresh = cfg.clone();
+    let cmd_tx_refresh = cmd_tx.clone();
+    refresh_templates.connect_clicked(move |_| {
+        let cfg = cfg_refresh.lock().unwrap().clone();
+        cmd_tx_refresh.send(UiCommand::ProjectListTemplates { cfg }).ok();
     });
-    page
+
+    let cfg_recent = cfg.clone();
+    let cmd_tx_recent = cmd_tx.clone();
+    list_recent.connect_clicked(move |_| {
+        let cfg = cfg_recent.lock().unwrap().clone();
+        cmd_tx_recent.send(UiCommand::ProjectListRecent { cfg }).ok();
+    });
+
+    let cfg_open = cfg.clone();
+    let cmd_tx_open = cmd_tx.clone();
+    let path_entry_open = path_entry.clone();
+    open_btn.connect_clicked(move |_| {
+        let cfg = cfg_open.lock().unwrap().clone();
+        cmd_tx_open
+            .send(UiCommand::ProjectOpen {
+                cfg,
+                path: path_entry_open.text().to_string(),
+            })
+            .ok();
+    });
+
+    let cfg_create = cfg.clone();
+    let cmd_tx_create = cmd_tx.clone();
+    let path_entry_create = path_entry.clone();
+    let name_entry_create = name_entry.clone();
+    let template_combo_create = template_combo.clone();
+    create_btn.connect_clicked(move |_| {
+        let cfg = cfg_create.lock().unwrap().clone();
+        let template_id = template_combo_create
+            .active_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        cmd_tx_create
+            .send(UiCommand::ProjectCreate {
+                cfg,
+                name: name_entry_create.text().to_string(),
+                path: path_entry_create.text().to_string(),
+                template_id,
+            })
+            .ok();
+    });
+
+    let parent_window = parent.clone();
+    let path_entry_browse = path_entry.clone();
+    browse_btn.connect_clicked(move |_| {
+        let dialog = gtk::FileChooserNative::new(
+            Some("Select Project Folder"),
+            Some(&parent_window),
+            gtk::FileChooserAction::SelectFolder,
+            Some("Open"),
+            Some("Cancel"),
+        );
+
+        let current = path_entry_browse.text().to_string();
+        if !current.trim().is_empty() {
+            let folder = gtk::gio::File::for_path(current.trim());
+            let _ = dialog.set_current_folder(Some(&folder));
+        }
+
+        let path_entry_dialog = path_entry_browse.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(path) = file.path() {
+                        if let Some(path_str) = path.to_str() {
+                            path_entry_dialog.set_text(path_str);
+                        }
+                    }
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
+    });
+
+    ProjectsPage { page, template_combo }
 }
 
 fn page_targets(
@@ -454,12 +612,16 @@ fn page_targets(
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list = gtk::Button::with_label("List Targets");
     let status = gtk::Button::with_label("Cuttlefish Status");
+    let web_ui = gtk::Button::with_label("Open Cuttlefish UI");
+    let docs = gtk::Button::with_label("Open Cuttlefish Docs");
     let install = gtk::Button::with_label("Install Cuttlefish");
     let start = gtk::Button::with_label("Start Cuttlefish");
     let stop = gtk::Button::with_label("Stop Cuttlefish");
     let stream = gtk::Button::with_label("Stream Logcat (sample target)");
     row.append(&list);
     row.append(&status);
+    row.append(&web_ui);
+    row.append(&docs);
     row.append(&install);
     row.append(&start);
     row.append(&stop);
@@ -543,6 +705,31 @@ fn page_targets(
         cmd_tx_status
             .send(UiCommand::TargetsCuttlefishStatus { cfg })
             .ok();
+    });
+
+    let page_web = page.clone();
+    web_ui.connect_clicked(move |_| {
+        let url = std::env::var("AADK_CUTTLEFISH_WEBRTC_URL")
+            .unwrap_or_else(|_| "https://localhost:8443".into());
+        match gtk::gio::AppInfo::launch_default_for_uri(
+            &url,
+            None::<&gtk::gio::AppLaunchContext>,
+        ) {
+            Ok(_) => page_web.append(&format!("Opened Cuttlefish UI: {url}\n")),
+            Err(err) => page_web.append(&format!("Failed to open Cuttlefish UI: {err}\n")),
+        }
+    });
+
+    let page_docs = page.clone();
+    docs.connect_clicked(move |_| {
+        let url = "https://source.android.com/docs/setup/create/cuttlefish";
+        match gtk::gio::AppInfo::launch_default_for_uri(
+            url,
+            None::<&gtk::gio::AppLaunchContext>,
+        ) {
+            Ok(_) => page_docs.append(&format!("Opened Cuttlefish docs: {url}\n")),
+            Err(err) => page_docs.append(&format!("Failed to open Cuttlefish docs: {err}\n")),
+        }
     });
 
     let cfg_start = cfg.clone();
@@ -648,7 +835,11 @@ fn page_targets(
     TargetsPage { page, apk_entry }
 }
 
-fn page_console(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
+fn page_console(
+    cfg: Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: mpsc::Sender<UiCommand>,
+    parent: &gtk::ApplicationWindow,
+) -> Page {
     let page = make_page("Console — BuildService (Gradle)");
 
     let form = gtk::Grid::builder()
@@ -660,6 +851,7 @@ fn page_console(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCo
         .placeholder_text("Project path or id (recent id or AADK_PROJECT_ROOT)")
         .hexpand(true)
         .build();
+    let project_browse = gtk::Button::with_label("Browse...");
     let args_entry = gtk::Entry::builder()
         .placeholder_text("Gradle args, e.g. --stacktrace -Pfoo=bar")
         .hexpand(true)
@@ -677,7 +869,10 @@ fn page_console(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCo
     let label_args = gtk::Label::builder().label("Gradle args").xalign(0.0).build();
 
     form.attach(&label_project, 0, 0, 1, 1);
-    form.attach(&project_entry, 1, 0, 1, 1);
+    let project_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    project_row.append(&project_entry);
+    project_row.append(&project_browse);
+    form.attach(&project_row, 1, 0, 1, 1);
 
     form.attach(&label_variant, 0, 1, 1, 1);
     form.attach(&variant_combo, 1, 1, 1, 1);
@@ -694,6 +889,39 @@ fn page_console(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCo
     form.attach(&action_row, 1, 4, 1, 1);
 
     page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
+
+    let parent_window = parent.clone();
+    let project_entry_browse = project_entry.clone();
+    project_browse.connect_clicked(move |_| {
+        let dialog = gtk::FileChooserNative::new(
+            Some("Select Project Folder"),
+            Some(&parent_window),
+            gtk::FileChooserAction::SelectFolder,
+            Some("Open"),
+            Some("Cancel"),
+        );
+
+        let current = project_entry_browse.text().to_string();
+        if !current.trim().is_empty() {
+            let folder = gtk::gio::File::for_path(current.trim());
+            let _ = dialog.set_current_folder(Some(&folder));
+        }
+
+        let project_entry_dialog = project_entry_browse.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(path) = file.path() {
+                        if let Some(path_str) = path.to_str() {
+                            project_entry_dialog.set_text(path_str);
+                        }
+                    }
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
+    });
 
     let cfg_run = cfg.clone();
     let cmd_tx_run = cmd_tx.clone();
@@ -949,8 +1177,129 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             let resp = client.list_templates(ListTemplatesRequest {}).await?.into_inner();
 
             ui.send(AppEvent::Log { page: "projects", line: "Templates:\n".into() }).ok();
+            let mut options = Vec::new();
             for t in resp.templates {
-                ui.send(AppEvent::Log { page: "projects", line: format!("- {}: {}\n", t.name, t.description) }).ok();
+                let template_id = t.template_id.as_ref().map(|i| i.value.clone()).unwrap_or_default();
+                if template_id.is_empty() {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("- {} (missing template_id)\n", t.name) }).ok();
+                    continue;
+                }
+
+                let defaults = if t.defaults.is_empty() {
+                    "defaults: none".to_string()
+                } else {
+                    let pairs = t
+                        .defaults
+                        .iter()
+                        .map(|kv| format!("{}={}", kv.key, kv.value))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("defaults: {pairs}")
+                };
+
+                ui.send(AppEvent::Log { page: "projects", line: format!("- {} ({})\n  {}\n  {}\n", t.name, template_id, t.description, defaults) }).ok();
+                options.push(ProjectTemplateOption {
+                    id: template_id,
+                    name: t.name,
+                });
+            }
+            ui.send(AppEvent::ProjectTemplates { templates: options }).ok();
+        }
+
+        UiCommand::ProjectListRecent { cfg } => {
+            ui.send(AppEvent::Log { page: "projects", line: format!("Listing recent projects via {}\n", cfg.project_addr) }).ok();
+            let mut client = ProjectServiceClient::new(connect(&cfg.project_addr).await?);
+            let resp = client.list_recent_projects(ListRecentProjectsRequest { page: None }).await?.into_inner();
+
+            if resp.projects.is_empty() {
+                ui.send(AppEvent::Log { page: "projects", line: "No recent projects.\n".into() }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "projects", line: "Recent projects:\n".into() }).ok();
+                for project in resp.projects {
+                    let id = project.project_id.as_ref().map(|i| i.value.as_str()).unwrap_or("");
+                    ui.send(AppEvent::Log { page: "projects", line: format!("- {} ({})\n  path={}\n", project.name, id, project.path) }).ok();
+                }
+            }
+
+            if let Some(page_info) = resp.page_info {
+                if !page_info.next_page_token.trim().is_empty() {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                }
+            }
+        }
+
+        UiCommand::ProjectCreate { cfg, name, path, template_id } => {
+            let name = name.trim().to_string();
+            let path = path.trim().to_string();
+            let template_id = template_id.trim().to_string();
+
+            if name.is_empty() {
+                ui.send(AppEvent::Log { page: "projects", line: "Create project requires a name.\n".into() }).ok();
+                return Ok(());
+            }
+            if path.is_empty() {
+                ui.send(AppEvent::Log { page: "projects", line: "Create project requires a path.\n".into() }).ok();
+                return Ok(());
+            }
+            if template_id.is_empty() {
+                ui.send(AppEvent::Log { page: "projects", line: "Select a template before creating the project.\n".into() }).ok();
+                return Ok(());
+            }
+
+            ui.send(AppEvent::Log { page: "projects", line: format!("Creating project via {}\n", cfg.project_addr) }).ok();
+            let mut client = ProjectServiceClient::new(connect(&cfg.project_addr).await?);
+            let resp = match client.create_project(CreateProjectRequest {
+                name: name.clone(),
+                path: path.clone(),
+                template_id: Some(Id { value: template_id.clone() }),
+                params: vec![],
+                toolchain_set_id: None,
+            }).await {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("Create project failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+            let project_id = resp.project_id.map(|i| i.value).unwrap_or_default();
+            ui.send(AppEvent::Log { page: "projects", line: format!("Create queued: project_id={project_id} job_id={job_id}\n") }).ok();
+
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "projects", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "projects", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
+        }
+
+        UiCommand::ProjectOpen { cfg, path } => {
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                ui.send(AppEvent::Log { page: "projects", line: "Open project requires a path.\n".into() }).ok();
+                return Ok(());
+            }
+
+            ui.send(AppEvent::Log { page: "projects", line: format!("Opening project via {}\n", cfg.project_addr) }).ok();
+            let mut client = ProjectServiceClient::new(connect(&cfg.project_addr).await?);
+            let resp = match client.open_project(OpenProjectRequest { path: path.clone() }).await {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("Open project failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            if let Some(project) = resp.project {
+                let id = project.project_id.as_ref().map(|i| i.value.as_str()).unwrap_or("");
+                ui.send(AppEvent::Log { page: "projects", line: format!("Opened: {} ({})\n  path={}\n", project.name, id, project.path) }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "projects", line: "Open project returned no project.\n".into() }).ok();
             }
         }
 
