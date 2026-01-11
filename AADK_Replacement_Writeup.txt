@@ -1,5 +1,0 @@
-AADK Replacement Writeup
-
-AADK is a ground-up replacement for the Android SDK/Android Studio workflow to make Android development possible on Raspberry Pi 5 (ARM64). Android Studio only runs on x86, so on the RP5 we could not follow the standard assignment path of installing Studio, creating a project, and running an emulator. Instead, we built the toolchain from scratch to compile and run the app directly on the device, including using 16k kernels rather than the standard 4k kernels required for stable operation on this platform.
-
-The outcome is functionally equivalent for the assignment goals: we can create a Kotlin/Jetpack Compose project, build it, and run it on the target device. While the tooling differs from Android Studio, the required learning objectives (project setup, composables, layout hierarchy, and running the app) are still met. Given the hardware and OS constraints, AADK is the most practical and reliable replacement, and I am asking that it be accepted as an approved alternative for completing this assignment.
