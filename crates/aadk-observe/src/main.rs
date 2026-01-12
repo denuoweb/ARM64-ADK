@@ -6,6 +6,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use aadk_proto::aadk::v1::{
@@ -16,10 +17,10 @@ use aadk_proto::aadk::v1::{
     ExportSupportBundleResponse, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended,
     JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListRunsRequest,
     ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunRecord,
-    StartJobRequest, Timestamp, ErrorCode, ErrorDetail,
+    StartJobRequest, Timestamp, ErrorCode, ErrorDetail, StreamJobEventsRequest, GetJobRequest,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -28,6 +29,9 @@ use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 const STATE_FILE_NAME: &str = "observe.json";
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_RUNS: usize = 200;
+const DEFAULT_BUNDLE_RETENTION_DAYS: u64 = 30;
+const DEFAULT_BUNDLE_MAX: usize = 50;
+const DEFAULT_TMP_RETENTION_HOURS: u64 = 24;
 
 #[derive(Default)]
 struct State {
@@ -144,6 +148,111 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     Ok(())
 }
 
+fn read_env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn read_env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn cleanup_bundles_best_effort() {
+    if let Err(err) = cleanup_bundles() {
+        warn!("observe bundle cleanup failed: {}", err);
+    }
+}
+
+fn cleanup_bundles() -> io::Result<()> {
+    let dir = bundles_dir();
+    if !dir.exists() {
+        return Ok(());
+    }
+    let retention_days =
+        read_env_u64("AADK_OBSERVE_BUNDLE_RETENTION_DAYS", DEFAULT_BUNDLE_RETENTION_DAYS);
+    let max_bundles = read_env_usize("AADK_OBSERVE_BUNDLE_MAX", DEFAULT_BUNDLE_MAX);
+    let tmp_hours = read_env_u64("AADK_OBSERVE_TMP_RETENTION_HOURS", DEFAULT_TMP_RETENTION_HOURS);
+    let now = SystemTime::now();
+    let max_age = if retention_days == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(retention_days.saturating_mul(24 * 60 * 60)))
+    };
+    let tmp_age = if tmp_hours == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(tmp_hours.saturating_mul(60 * 60)))
+    };
+
+    let mut bundles = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if metadata.is_dir() {
+            if let Some(tmp_age) = tmp_age {
+                if name.starts_with("tmp") {
+                    if let Ok(modified) = metadata.modified() {
+                        if now
+                            .duration_since(modified)
+                            .unwrap_or_else(|_| Duration::from_secs(0))
+                            > tmp_age
+                        {
+                            let _ = fs::remove_dir_all(&path);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if metadata.is_file()
+            && path.extension().map(|ext| ext == "zip").unwrap_or(false)
+        {
+            let modified = metadata.modified().unwrap_or(now);
+            bundles.push((path, modified));
+        }
+    }
+
+    if let Some(max_age) = max_age {
+        for (path, modified) in &bundles {
+            if now
+                .duration_since(*modified)
+                .unwrap_or_else(|_| Duration::from_secs(0))
+                > max_age
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    if max_bundles != 0 {
+        let mut remaining = Vec::new();
+        for (path, modified) in bundles {
+            if path.exists() {
+                remaining.push((path, modified));
+            }
+        }
+        if remaining.len() > max_bundles {
+            remaining.sort_by_key(|(_, modified)| *modified);
+            let remove_count = remaining.len() - max_bundles;
+            for (path, _) in remaining.into_iter().take(remove_count) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn load_state() -> State {
     let path = state_file_path();
     match fs::read_to_string(&path) {
@@ -176,6 +285,11 @@ fn upsert_run(state: &mut State, run: RunRecordEntry) {
     if state.runs.len() > MAX_RUNS {
         state.runs.truncate(MAX_RUNS);
     }
+}
+
+fn normalize_id(id: Option<&Id>) -> Option<String> {
+    id.map(|value| value.value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl RunRecordEntry {
@@ -236,6 +350,7 @@ impl RunRecordEntry {
 
 impl Svc {
     fn new() -> Self {
+        cleanup_bundles_best_effort();
         Self {
             state: Arc::new(Mutex::new(load_state())),
         }
@@ -257,18 +372,90 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     Ok(JobServiceClient::new(channel))
 }
 
+async fn job_is_cancelled(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> bool {
+    let resp = client
+        .get_job(GetJobRequest {
+            job_id: Some(Id { value: job_id.to_string() }),
+        })
+        .await;
+    let job = match resp {
+        Ok(resp) => resp.into_inner().job,
+        Err(_) => return false,
+    };
+    match job.and_then(|job| JobState::try_from(job.state).ok()) {
+        Some(JobState::Cancelled) => true,
+        _ => false,
+    }
+}
+
+async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut client = match connect_job().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("cancel watcher: failed to connect job service: {err}");
+            return rx;
+        }
+    };
+    let mut stream = match client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id { value: job_id.clone() }),
+            include_history: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(err) => {
+            warn!("cancel watcher: stream failed for {job_id}: {err}");
+            return rx;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(evt)) => {
+                    if let Some(JobPayload::StateChanged(state)) = evt.payload {
+                        if JobState::try_from(state.new_state)
+                            .unwrap_or(JobState::Unspecified)
+                            == JobState::Cancelled
+                        {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    rx
+}
+
+fn cancel_requested(cancel_rx: &watch::Receiver<bool>) -> bool {
+    *cancel_rx.borrow()
+}
+
 async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
     params: Vec<KeyValue>,
+    project_id: Option<String>,
+    target_id: Option<String>,
+    toolchain_set_id: Option<String>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
             job_type: job_type.into(),
             params,
-            project_id: None,
-            target_id: None,
-            toolchain_set_id: None,
+            project_id: project_id.map(|value| Id { value }),
+            target_id: target_id.map(|value| Id { value }),
+            toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -592,6 +779,17 @@ async fn run_support_bundle_job(
     output_path: PathBuf,
     req: ExportSupportBundleRequest,
 ) -> Result<(), Status> {
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Support bundle cancelled before start\n").await;
+        let _ = update_run_state(state, &run_id, |entry| {
+            entry.result = "cancelled".into();
+            entry.finished_at = Some(now_millis());
+        })
+        .await;
+        return Ok(());
+    }
+
     publish_state(&mut job_client, &job_id, JobState::Running).await?;
     publish_log(
         &mut job_client,
@@ -608,6 +806,16 @@ async fn run_support_bundle_job(
         vec![],
     )
     .await?;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Support bundle cancelled\n").await;
+        let _ = update_run_state(state, &run_id, |entry| {
+            entry.result = "cancelled".into();
+            entry.finished_at = Some(now_millis());
+        })
+        .await;
+        return Ok(());
+    }
 
     let runs_snapshot = {
         let st = state.lock().await;
@@ -633,6 +841,16 @@ async fn run_support_bundle_job(
         }
     };
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Support bundle cancelled\n").await;
+        let _ = update_run_state(state, &run_id, |entry| {
+            entry.result = "cancelled".into();
+            entry.finished_at = Some(now_millis());
+        })
+        .await;
+        return Ok(());
+    }
+
     publish_progress(&mut job_client, &job_id, 60, "writing bundle", vec![]).await?;
 
     match write_zip_bundle(plan) {
@@ -647,6 +865,16 @@ async fn run_support_bundle_job(
             .await;
             return Err(Status::internal(format!("bundle write failed: {err}")));
         }
+    }
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Support bundle cancelled\n").await;
+        let _ = update_run_state(state, &run_id, |entry| {
+            entry.result = "cancelled".into();
+            entry.finished_at = Some(now_millis());
+        })
+        .await;
+        return Ok(());
     }
 
     let _ = update_run_state(state, &run_id, |entry| {
@@ -676,6 +904,7 @@ async fn run_support_bundle_job(
     )
     .await?;
 
+    cleanup_bundles_best_effort();
     Ok(())
 }
 
@@ -686,6 +915,12 @@ async fn run_evidence_bundle_job(
     job_id: String,
     output_path: PathBuf,
 ) -> Result<(), Status> {
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled before start\n").await;
+        return Ok(());
+    }
+
     publish_state(&mut job_client, &job_id, JobState::Running).await?;
     publish_log(
         &mut job_client,
@@ -695,6 +930,11 @@ async fn run_evidence_bundle_job(
     .await?;
 
     publish_progress(&mut job_client, &job_id, 25, "loading run", vec![]).await?;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled\n").await;
+        return Ok(());
+    }
 
     let run_snapshot = {
         let st = state.lock().await;
@@ -728,6 +968,11 @@ async fn run_evidence_bundle_job(
         }
     };
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled\n").await;
+        return Ok(());
+    }
+
     publish_progress(&mut job_client, &job_id, 70, "writing bundle", vec![]).await?;
 
     match write_zip_bundle(plan) {
@@ -737,6 +982,11 @@ async fn run_evidence_bundle_job(
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
             return Err(Status::internal(format!("bundle write failed: {err}")));
         }
+    }
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled\n").await;
+        return Ok(());
     }
 
     let _ = update_run_state(state, &run_id, |entry| {
@@ -764,6 +1014,7 @@ async fn run_evidence_bundle_job(
     )
     .await?;
 
+    cleanup_bundles_best_effort();
     Ok(())
 }
 
@@ -822,42 +1073,61 @@ impl ObserveService for Svc {
         request: Request<ExportSupportBundleRequest>,
     ) -> Result<Response<ExportSupportBundleResponse>, Status> {
         let req = request.into_inner();
+        let project_id = normalize_id(req.project_id.as_ref());
+        let target_id = normalize_id(req.target_id.as_ref());
+        let toolchain_set_id = normalize_id(req.toolchain_set_id.as_ref());
         let run_id = format!("run-{}", Uuid::new_v4());
         let output_path = bundles_dir().join(format!("support-{run_id}.zip"));
         let output_path_resp = output_path.to_string_lossy().to_string();
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "observe.support_bundle",
-            vec![
-                KeyValue {
-                    key: "include_logs".into(),
-                    value: req.include_logs.to_string(),
-                },
-                KeyValue {
-                    key: "include_config".into(),
-                    value: req.include_config.to_string(),
-                },
-                KeyValue {
-                    key: "include_toolchain_provenance".into(),
-                    value: req.include_toolchain_provenance.to_string(),
-                },
-                KeyValue {
-                    key: "include_recent_runs".into(),
-                    value: req.include_recent_runs.to_string(),
-                },
-                KeyValue {
-                    key: "recent_runs_limit".into(),
-                    value: req.recent_runs_limit.to_string(),
-                },
-            ],
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "observe.support_bundle",
+                vec![
+                    KeyValue {
+                        key: "include_logs".into(),
+                        value: req.include_logs.to_string(),
+                    },
+                    KeyValue {
+                        key: "include_config".into(),
+                        value: req.include_config.to_string(),
+                    },
+                    KeyValue {
+                        key: "include_toolchain_provenance".into(),
+                        value: req.include_toolchain_provenance.to_string(),
+                    },
+                    KeyValue {
+                        key: "include_recent_runs".into(),
+                        value: req.include_recent_runs.to_string(),
+                    },
+                    KeyValue {
+                        key: "recent_runs_limit".into(),
+                        value: req.recent_runs_limit.to_string(),
+                    },
+                ],
+                project_id.clone(),
+                target_id.clone(),
+                toolchain_set_id.clone(),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         {
             let mut st = self.state.lock().await;
             let mut run = RunRecordEntry::new(run_id.clone(), "running");
+            run.project_id = project_id.clone();
+            run.target_id = target_id.clone();
+            run.toolchain_set_id = toolchain_set_id.clone();
             run.job_ids.push(job_id.clone());
             run.summary.push(SummaryEntry {
                 key: "bundle_type".into(),
@@ -908,23 +1178,42 @@ impl ObserveService for Svc {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| Status::invalid_argument("run_id is required"))?;
 
-        {
+        let run_meta = {
             let st = self.state.lock().await;
-            if !st.runs.iter().any(|item| item.run_id == run_id) {
+            let entry = st.runs.iter().find(|item| item.run_id == run_id);
+            let Some(entry) = entry else {
                 return Err(Status::not_found("run_id not found"));
-            }
-        }
+            };
+            (
+                entry.project_id.clone(),
+                entry.target_id.clone(),
+                entry.toolchain_set_id.clone(),
+            )
+        };
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "observe.evidence_bundle",
-            vec![KeyValue {
-                key: "run_id".into(),
-                value: run_id.clone(),
-            }],
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "observe.evidence_bundle",
+                vec![KeyValue {
+                    key: "run_id".into(),
+                    value: run_id.clone(),
+                }],
+                run_meta.0.clone(),
+                run_meta.1.clone(),
+                run_meta.2.clone(),
+            )
+            .await?
+        } else {
+            job_id
+        };
         let output_path = bundles_dir().join(format!("evidence-{job_id}.zip"));
         let output_path_resp = output_path.to_string_lossy().to_string();
 
