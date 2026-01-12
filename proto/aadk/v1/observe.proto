@@ -24,10 +24,14 @@ message ExportSupportBundleRequest {
   bool include_toolchain_provenance = 3;
   bool include_recent_runs = 4;
   uint32 recent_runs_limit = 5;
+  Id job_id = 6;
+  Id project_id = 7;
+  Id target_id = 8;
+  Id toolchain_set_id = 9;
 }
 message ExportSupportBundleResponse { Id job_id = 1; string output_path = 2; }
 
-message ExportEvidenceBundleRequest { Id run_id = 1; }
+message ExportEvidenceBundleRequest { Id run_id = 1; Id job_id = 2; }
 message ExportEvidenceBundleResponse { Id job_id = 1; string output_path = 2; }
 
 service ObserveService {

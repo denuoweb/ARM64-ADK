@@ -396,13 +396,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             TargetsCmd::StartCuttlefish { addr, show_full_ui } => {
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui }).await?.into_inner();
+                let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui, job_id: None }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
             TargetsCmd::StopCuttlefish { addr } => {
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.stop_cuttlefish(StopCuttlefishRequest {}).await?.into_inner();
+                let resp = client.stop_cuttlefish(StopCuttlefishRequest { job_id: None }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
@@ -422,6 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         branch: "".into(),
                         target: "".into(),
                         build_id: "".into(),
+                        job_id: None,
                     })
                     .await?
                     .into_inner();
@@ -656,6 +657,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_toolchain_provenance,
                     include_recent_runs,
                     recent_runs_limit,
+                    job_id: None,
+                    project_id: None,
+                    target_id: None,
+                    toolchain_set_id: None,
                 }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
@@ -667,6 +672,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                     run_id: Some(Id { value: run_id }),
+                    job_id: None,
                 }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);

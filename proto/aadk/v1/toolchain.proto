@@ -71,10 +71,11 @@ message InstallToolchainRequest {
   string version = 2;
   string install_root = 3;
   bool verify_hash = 4;
+  Id job_id = 5;
 }
 message InstallToolchainResponse { Id job_id = 1; }
 
-message VerifyToolchainRequest { Id toolchain_id = 1; }
+message VerifyToolchainRequest { Id toolchain_id = 1; Id job_id = 2; }
 message VerifyToolchainResponse { bool verified = 1; ErrorDetail error = 2; Id job_id = 3; }
 
 message CreateToolchainSetRequest { Id sdk_toolchain_id = 1; Id ndk_toolchain_id = 2; string display_name = 3; }

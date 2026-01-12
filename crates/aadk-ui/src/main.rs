@@ -435,8 +435,8 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     let page = make_page("Home — JobService demo (broadcast + replay)");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
-    let start_btn = gtk::Button::with_label("Start Demo Job");
-    let cancel_btn = gtk::Button::with_label("Cancel Current Job");
+    let start_btn = gtk::Button::with_label("Start demo");
+    let cancel_btn = gtk::Button::with_label("Cancel job");
 
     row.append(&start_btn);
     row.append(&cancel_btn);
@@ -461,10 +461,10 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let list = gtk::Button::with_label("List Providers");
-    let list_sdk = gtk::Button::with_label("List Available SDK");
-    let list_ndk = gtk::Button::with_label("List Available NDK");
-    let list_sets = gtk::Button::with_label("List Toolchain Sets");
+    let list = gtk::Button::with_label("List providers");
+    let list_sdk = gtk::Button::with_label("List available SDKs");
+    let list_ndk = gtk::Button::with_label("List available NDKs");
+    let list_sets = gtk::Button::with_label("List sets");
     row1.append(&list);
     row1.append(&list_sdk);
     row1.append(&list_ndk);
@@ -490,10 +490,10 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     version_grid.attach(&ndk_version_entry, 1, 1, 1, 1);
 
     let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let install_sdk = gtk::Button::with_label("Install SDK (verify)");
-    let install_ndk = gtk::Button::with_label("Install NDK (verify)");
-    let list_installed = gtk::Button::with_label("List Installed");
-    let verify_installed = gtk::Button::with_label("Verify Installed");
+    let install_sdk = gtk::Button::with_label("Install SDK");
+    let install_ndk = gtk::Button::with_label("Install NDK");
+    let list_installed = gtk::Button::with_label("List installed");
+    let verify_installed = gtk::Button::with_label("Verify installed");
     row2.append(&install_sdk);
     row2.append(&install_ndk);
     row2.append(&list_installed);
@@ -515,13 +515,13 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
         .placeholder_text("Toolchain set display name")
         .hexpand(true)
         .build();
-    let create_set_btn = gtk::Button::with_label("Create Toolchain Set");
+    let create_set_btn = gtk::Button::with_label("Create set");
     let active_set_entry = gtk::Entry::builder()
         .placeholder_text("Active toolchain set id")
         .hexpand(true)
         .build();
-    let set_active_btn = gtk::Button::with_label("Set Active");
-    let get_active_btn = gtk::Button::with_label("Get Active");
+    let set_active_btn = gtk::Button::with_label("Set active");
+    let get_active_btn = gtk::Button::with_label("Get active");
 
     let label_sdk_set = gtk::Label::builder().label("SDK id").xalign(0.0).build();
     let label_ndk_set = gtk::Label::builder().label("NDK id").xalign(0.0).build();
@@ -693,11 +693,11 @@ fn page_projects(
 ) -> ProjectsPage {
     let page = make_page("Projects — ProjectService");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let refresh_templates = gtk::Button::with_label("Refresh Templates");
-    let refresh_defaults = gtk::Button::with_label("Refresh Defaults");
-    let list_recent = gtk::Button::with_label("List Recent");
-    let open_btn = gtk::Button::with_label("Open Project");
-    let create_btn = gtk::Button::with_label("Create Project");
+    let refresh_templates = gtk::Button::with_label("Refresh templates");
+    let refresh_defaults = gtk::Button::with_label("Refresh defaults");
+    let list_recent = gtk::Button::with_label("List recent");
+    let open_btn = gtk::Button::with_label("Open project");
+    let create_btn = gtk::Button::with_label("Create project");
     row.append(&refresh_templates);
     row.append(&refresh_defaults);
     row.append(&list_recent);
@@ -755,8 +755,8 @@ fn page_projects(
     default_target_combo.set_hexpand(true);
     default_target_combo.append(Some("none"), "None");
     default_target_combo.set_active(Some(0));
-    let config_btn = gtk::Button::with_label("Set Project Config");
-    let use_defaults_btn = gtk::Button::with_label("Use Active Defaults");
+    let config_btn = gtk::Button::with_label("Set config");
+    let use_defaults_btn = gtk::Button::with_label("Use active defaults");
 
     let label_project_id = gtk::Label::builder().label("Project id").xalign(0.0).build();
     let label_toolchain = gtk::Label::builder().label("Toolchain set").xalign(0.0).build();
@@ -931,27 +931,36 @@ fn page_targets(
 ) -> TargetsPage {
     let page = make_page("Targets — TargetService (ADB + Cuttlefish + live logcat stream)");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let list = gtk::Button::with_label("List Targets");
-    let status = gtk::Button::with_label("Cuttlefish Status");
-    let web_ui = gtk::Button::with_label("Open Cuttlefish UI");
-    let env_ui = gtk::Button::with_label("Open Cuttlefish Env");
-    let docs = gtk::Button::with_label("Open Cuttlefish Docs");
-    let install = gtk::Button::with_label("Install Cuttlefish");
-    let resolve_build = gtk::Button::with_label("Resolve Build ID");
-    let start = gtk::Button::with_label("Start Cuttlefish");
-    let stop = gtk::Button::with_label("Stop Cuttlefish");
-    let stream = gtk::Button::with_label("Stream Logcat (sample target)");
+    let list = gtk::Button::with_label("List targets");
+    let stream = gtk::Button::with_label("Stream logcat (sample)");
     row.append(&list);
-    row.append(&status);
-    row.append(&web_ui);
-    row.append(&env_ui);
-    row.append(&docs);
-    row.append(&install);
-    row.append(&resolve_build);
-    row.append(&start);
-    row.append(&stop);
     row.append(&stream);
     page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+
+    let status = gtk::Button::with_label("Status");
+    let web_ui = gtk::Button::with_label("Web UI");
+    let env_ui = gtk::Button::with_label("Env control");
+    let docs = gtk::Button::with_label("Docs");
+    let install = gtk::Button::with_label("Install");
+    let resolve_build = gtk::Button::with_label("Resolve build");
+    let start = gtk::Button::with_label("Start");
+    let stop = gtk::Button::with_label("Stop");
+
+    let cuttlefish_buttons = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .column_homogeneous(true)
+        .build();
+    let cuttlefish_header = gtk::Label::builder().label("Cuttlefish").xalign(0.0).build();
+    cuttlefish_buttons.attach(&cuttlefish_header, 0, 0, 4, 1);
+    cuttlefish_buttons.attach(&status, 0, 1, 1, 1);
+    cuttlefish_buttons.attach(&web_ui, 1, 1, 1, 1);
+    cuttlefish_buttons.attach(&env_ui, 2, 1, 1, 1);
+    cuttlefish_buttons.attach(&docs, 3, 1, 1, 1);
+    cuttlefish_buttons.attach(&install, 0, 2, 1, 1);
+    cuttlefish_buttons.attach(&resolve_build, 1, 2, 1, 1);
+    cuttlefish_buttons.attach(&start, 2, 2, 1, 1);
+    cuttlefish_buttons.attach(&stop, 3, 2, 1, 1);
 
     let default_target_serial = std::env::var("AADK_CUTTLEFISH_ADB_SERIAL")
         .unwrap_or_else(|_| "127.0.0.1:6520".into());
@@ -1033,19 +1042,20 @@ fn page_targets(
 
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let install_apk = gtk::Button::with_label("Install APK");
-    let launch_app = gtk::Button::with_label("Launch App");
+    let launch_app = gtk::Button::with_label("Launch app");
     action_row.append(&install_apk);
     action_row.append(&launch_app);
     form.attach(&action_row, 1, 4, 1, 1);
 
     let default_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let set_default_btn = gtk::Button::with_label("Set Default Target");
-    let get_default_btn = gtk::Button::with_label("Get Default Target");
+    let set_default_btn = gtk::Button::with_label("Set default");
+    let get_default_btn = gtk::Button::with_label("Get default");
     default_row.append(&set_default_btn);
     default_row.append(&get_default_btn);
     form.attach(&default_row, 1, 5, 1, 1);
 
-    page.container.insert_child_after(&cuttlefish_grid, Some(&row));
+    page.container.insert_child_after(&cuttlefish_buttons, Some(&row));
+    page.container.insert_child_after(&cuttlefish_grid, Some(&cuttlefish_buttons));
     page.container.insert_child_after(&form, Some(&cuttlefish_grid));
 
     let cfg_list = cfg.clone();
@@ -1281,7 +1291,7 @@ fn page_console(
         .build();
 
     let project_entry = gtk::Entry::builder()
-        .placeholder_text("Project path or id (recent id or AADK_PROJECT_ROOT)")
+        .placeholder_text("Project path or id (recent project id)")
         .hexpand(true)
         .build();
     let project_browse = gtk::Button::with_label("Browse...");
@@ -1295,7 +1305,7 @@ fn page_console(
 
     let clean_check = gtk::CheckButton::with_label("Clean first");
 
-    let run = gtk::Button::with_label("Run Build");
+    let run = gtk::Button::with_label("Build");
 
     let label_project = gtk::Label::builder().label("Project").xalign(0.0).build();
     let label_variant = gtk::Label::builder().label("Variant").xalign(0.0).build();
@@ -1388,9 +1398,9 @@ fn page_console(
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
     let page = make_page("Evidence — ObserveService (runs + bundle export)");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let list_runs = gtk::Button::with_label("List Runs");
-    let export_support = gtk::Button::with_label("Export Support Bundle");
-    let export_evidence = gtk::Button::with_label("Export Evidence Bundle");
+    let list_runs = gtk::Button::with_label("List runs");
+    let export_support = gtk::Button::with_label("Export support bundle");
+    let export_evidence = gtk::Button::with_label("Export evidence bundle");
     row.append(&list_runs);
     row.append(&export_support);
     row.append(&export_evidence);
@@ -1627,6 +1637,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 version,
                 install_root: "".into(),
                 verify_hash: verify,
+                job_id: None,
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -1700,6 +1711,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     };
                     let verify = client.verify_toolchain(VerifyToolchainRequest {
                         toolchain_id: Some(Id { value: id.clone() }),
+                        job_id: None,
                     }).await?.into_inner();
 
                     if verify.verified {
@@ -2200,6 +2212,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     branch: branch.trim().to_string(),
                     target: target.trim().to_string(),
                     build_id: build_id.trim().to_string(),
+                    job_id: None,
                 })
                 .await?
                 .into_inner();
@@ -2245,7 +2258,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
         UiCommand::TargetsStartCuttlefish { cfg, show_full_ui } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
             let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
-            let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui }).await?.into_inner();
+            let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui, job_id: None }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "targets", line: format!("Cuttlefish start job: {job_id}\n") }).ok();
@@ -2265,7 +2278,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
         UiCommand::TargetsStopCuttlefish { cfg } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
             let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
-            let resp = client.stop_cuttlefish(StopCuttlefishRequest {}).await?.into_inner();
+            let resp = client.stop_cuttlefish(StopCuttlefishRequest { job_id: None }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "targets", line: format!("Cuttlefish stop job: {job_id}\n") }).ok();
@@ -2310,6 +2323,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: Some(Id { value: target_id.clone() }),
                 project_id: None,
                 apk_path: apk_path.clone(),
+                job_id: None,
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -2352,6 +2366,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: Some(Id { value: target_id.clone() }),
                 application_id: application_id.clone(),
                 activity,
+                job_id: None,
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -2450,6 +2465,10 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 include_toolchain_provenance,
                 include_recent_runs,
                 recent_runs_limit,
+                job_id: None,
+                project_id: None,
+                target_id: None,
+                toolchain_set_id: None,
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -2480,6 +2499,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                 run_id: Some(Id { value: run_id.clone() }),
+                job_id: None,
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -2514,6 +2534,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 variant: variant as i32,
                 clean_first,
                 gradle_args,
+                job_id: None,
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {

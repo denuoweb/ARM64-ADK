@@ -17,6 +17,7 @@ Update this file whenever CLI behavior changes or when commits touching this cra
   - project list-templates / list-recent / create / open / set-config / use-active-defaults
   - observe list-runs / export-support / export-evidence
 - Each command connects directly to the target gRPC service using the default address env var.
+- Observe export commands include optional metadata fields (project/target/toolchain ids), currently unset.
 
 ## Environment / config
 - AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR (defaults to 127.0.0.1 ports).

@@ -30,13 +30,13 @@ message SetDefaultTargetResponse { bool ok = 1; }
 message GetDefaultTargetRequest {}
 message GetDefaultTargetResponse { Target target = 1; }
 
-message InstallApkRequest { Id target_id = 1; Id project_id = 2; string apk_path = 3; }
+message InstallApkRequest { Id target_id = 1; Id project_id = 2; string apk_path = 3; Id job_id = 4; }
 message InstallApkResponse { Id job_id = 1; }
 
-message LaunchRequest { Id target_id = 1; string application_id = 2; string activity = 3; }
+message LaunchRequest { Id target_id = 1; string application_id = 2; string activity = 3; Id job_id = 4; }
 message LaunchResponse { Id job_id = 1; }
 
-message StopAppRequest { Id target_id = 1; string application_id = 2; }
+message StopAppRequest { Id target_id = 1; string application_id = 2; Id job_id = 3; }
 message StopAppResponse { Id job_id = 1; }
 
 message InstallCuttlefishRequest {
@@ -44,6 +44,7 @@ message InstallCuttlefishRequest {
   string branch = 2;
   string target = 3;
   string build_id = 4;
+  Id job_id = 5;
 }
 message InstallCuttlefishResponse { Id job_id = 1; }
 
@@ -59,10 +60,10 @@ message ResolveCuttlefishBuildResponse {
   string product = 4;
 }
 
-message StartCuttlefishRequest { bool show_full_ui = 1; }
+message StartCuttlefishRequest { bool show_full_ui = 1; Id job_id = 2; }
 message StartCuttlefishResponse { Id job_id = 1; }
 
-message StopCuttlefishRequest {}
+message StopCuttlefishRequest { Id job_id = 1; }
 message StopCuttlefishResponse { Id job_id = 1; }
 
 message GetCuttlefishStatusRequest {}
