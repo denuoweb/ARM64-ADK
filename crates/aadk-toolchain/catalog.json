@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "provider_id": "provider-android-sdk-custom",
+      "name": "android-sdk-custom",
+      "kind": "SDK",
+      "description": "Pinned SDK provider (android-sdk-custom)",
+      "versions": [
+        {
+          "version": "36.0.0",
+          "channel": "stable",
+          "notes": "Pinned SDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz",
+              "sha256": "3a79b9cb06351ccb31d7e29100b3f11a3ba4bd491c839c9bbbaa7e174d60146a",
+              "size_bytes": 156067092
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "provider_id": "provider-android-ndk-custom",
+      "name": "android-ndk-custom",
+      "kind": "NDK",
+      "description": "Pinned NDK provider (android-ndk-custom)",
+      "versions": [
+        {
+          "version": "r29",
+          "channel": "stable",
+          "notes": "Pinned NDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz",
+              "sha256": "1eae8941df23773f8dc70cdbf019d755f82332f0956f8062072b676f89094bc2",
+              "size_bytes": 196684092
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

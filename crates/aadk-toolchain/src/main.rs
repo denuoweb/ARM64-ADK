@@ -3,6 +3,7 @@ use std::{
     io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
 };
 
@@ -19,34 +20,21 @@ use aadk_proto::aadk::v1::{
     PublishJobEventRequest, SetActiveToolchainSetRequest,
     SetActiveToolchainSetResponse, StartJobRequest, Timestamp, ToolchainArtifact, ToolchainKind,
     ToolchainProvider, ToolchainSet, ToolchainVersion, VerifyToolchainRequest,
-    VerifyToolchainResponse,
+    VerifyToolchainResponse, StreamJobEventsRequest, GetJobRequest,
 };
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::{Mutex, watch}};
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const PROVIDER_SDK_ID: &str = "provider-android-sdk-custom";
-const PROVIDER_NDK_ID: &str = "provider-android-ndk-custom";
 const FIXTURES_ENV_DIR: &str = "AADK_TOOLCHAIN_FIXTURES_DIR";
-const SDK_VERSION: &str = "36.0.0";
-const NDK_VERSION: &str = "r29";
-
-const SDK_AARCH64_LINUX_MUSL_URL: &str =
-    "https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz";
-const SDK_AARCH64_LINUX_MUSL_SHA256: &str =
-    "3a79b9cb06351ccb31d7e29100b3f11a3ba4bd491c839c9bbbaa7e174d60146a";
-const SDK_AARCH64_LINUX_MUSL_SIZE: u64 = 156_067_092;
-
-const NDK_AARCH64_LINUX_MUSL_URL: &str =
-    "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz";
-const NDK_AARCH64_LINUX_MUSL_SHA256: &str =
-    "1eae8941df23773f8dc70cdbf019d755f82332f0956f8062072b676f89094bc2";
-const NDK_AARCH64_LINUX_MUSL_SIZE: u64 = 196_684_092;
+const CATALOG_ENV: &str = "AADK_TOOLCHAIN_CATALOG";
+const HOST_OVERRIDE_ENV: &str = "AADK_TOOLCHAIN_HOST";
+const HOST_FALLBACK_ENV: &str = "AADK_TOOLCHAIN_HOST_FALLBACK";
 const DEFAULT_PAGE_SIZE: usize = 25;
 
 #[derive(Default)]
@@ -59,6 +47,7 @@ struct State {
 #[derive(Clone)]
 struct Svc {
     state: Arc<Mutex<State>>,
+    catalog: Arc<Catalog>,
 }
 
 struct Provenance {
@@ -69,6 +58,50 @@ struct Provenance {
     sha256: String,
     installed_at_unix_millis: i64,
     cached_path: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+struct Catalog {
+    schema_version: u32,
+    providers: Vec<CatalogProvider>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct CatalogProvider {
+    provider_id: String,
+    name: String,
+    kind: String,
+    description: String,
+    versions: Vec<CatalogVersion>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct CatalogVersion {
+    version: String,
+    channel: String,
+    notes: String,
+    artifacts: Vec<CatalogArtifact>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct CatalogArtifact {
+    host: String,
+    url: String,
+    sha256: String,
+    size_bytes: u64,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            providers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -198,6 +231,7 @@ impl Default for Svc {
         let state = load_state();
         Self {
             state: Arc::new(Mutex::new(state)),
+            catalog: Arc::new(load_catalog()),
         }
     }
 }
@@ -208,24 +242,6 @@ fn now_ts() -> Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     Timestamp { unix_millis: ms }
-}
-
-fn provider_sdk() -> ToolchainProvider {
-    ToolchainProvider {
-        provider_id: Some(Id { value: PROVIDER_SDK_ID.into() }),
-        name: "android-sdk-custom".into(),
-        kind: ToolchainKind::Sdk as i32,
-        description: "Pinned SDK provider (android-sdk-custom)".into(),
-    }
-}
-
-fn provider_ndk() -> ToolchainProvider {
-    ToolchainProvider {
-        provider_id: Some(Id { value: PROVIDER_NDK_ID.into() }),
-        name: "android-ndk-custom".into(),
-        kind: ToolchainKind::Ndk as i32,
-        description: "Pinned NDK provider (android-ndk-custom)".into(),
-    }
 }
 
 fn data_dir() -> PathBuf {
@@ -242,6 +258,31 @@ fn state_file_path() -> PathBuf {
 
 fn fixtures_dir() -> Option<PathBuf> {
     std::env::var(FIXTURES_ENV_DIR).ok().map(PathBuf::from)
+}
+
+fn default_catalog() -> Catalog {
+    let raw = include_str!("../catalog.json");
+    match serde_json::from_str::<Catalog>(raw) {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            warn!("Failed to parse default catalog: {err}");
+            Catalog::default()
+        }
+    }
+}
+
+fn load_catalog() -> Catalog {
+    if let Ok(path) = std::env::var(CATALOG_ENV) {
+        let path = PathBuf::from(path);
+        match fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<Catalog>(&raw) {
+                Ok(catalog) => return catalog,
+                Err(err) => warn!("Failed to parse catalog {}: {}", path.display(), err),
+            },
+            Err(err) => warn!("Failed to read catalog {}: {}", path.display(), err),
+        }
+    }
+    default_catalog()
 }
 
 fn fixture_artifact(dir: &Path, file_name: &str) -> ToolchainArtifact {
@@ -272,113 +313,188 @@ fn fixture_artifact(dir: &Path, file_name: &str) -> ToolchainArtifact {
     }
 }
 
-fn host_key() -> Option<&'static str> {
+fn fixture_filename(kind: ToolchainKind, version: &str) -> String {
+    match kind {
+        ToolchainKind::Sdk => format!("sdk-{version}.tar.zst"),
+        ToolchainKind::Ndk => format!("ndk-{version}.tar.zst"),
+        _ => format!("toolchain-{version}.tar.zst"),
+    }
+}
+
+fn fixture_artifact_for(dir: &Path, kind: ToolchainKind, version: &str) -> ToolchainArtifact {
+    let file = fixture_filename(kind, version);
+    fixture_artifact(dir, &file)
+}
+
+fn host_key() -> Option<String> {
+    if let Ok(override_key) = std::env::var(HOST_OVERRIDE_ENV) {
+        if !override_key.trim().is_empty() {
+            return Some(override_key);
+        }
+    }
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "aarch64") => Some("aarch64-linux-musl"),
+        ("linux", "aarch64") => Some("linux-aarch64".into()),
+        ("linux", "x86_64") => Some("linux-x86_64".into()),
+        ("macos", "aarch64") => Some("darwin-aarch64".into()),
+        ("macos", "x86_64") => Some("darwin-x86_64".into()),
+        ("windows", "x86_64") => Some("windows-x86_64".into()),
+        ("windows", "aarch64") => Some("windows-aarch64".into()),
         _ => None,
     }
 }
 
-fn provider_by_id(provider_id: &str) -> Option<ToolchainProvider> {
-    match provider_id {
-        PROVIDER_SDK_ID => Some(provider_sdk()),
-        PROVIDER_NDK_ID => Some(provider_ndk()),
-        _ => None,
-    }
-}
-
-fn available_from_fixtures(provider_id: &str, dir: &Path) -> Vec<AvailableToolchain> {
-    match provider_id {
-        PROVIDER_SDK_ID => vec![AvailableToolchain {
-            provider: Some(provider_sdk()),
-            version: Some(ToolchainVersion {
-                version: SDK_VERSION.into(),
-                channel: "stable".into(),
-                notes: "Fixture-based SDK artifact".into(),
-            }),
-            artifact: Some(fixture_artifact(dir, "sdk-36.0.0.tar.zst")),
-        }],
-        PROVIDER_NDK_ID => vec![AvailableToolchain {
-            provider: Some(provider_ndk()),
-            version: Some(ToolchainVersion {
-                version: NDK_VERSION.into(),
-                channel: "stable".into(),
-                notes: "Fixture-based NDK artifact".into(),
-            }),
-            artifact: Some(fixture_artifact(dir, "ndk-r29.tar.zst")),
-        }],
-        _ => vec![],
-    }
-}
-
-fn sdk_remote_artifact(host: &str) -> Option<ToolchainArtifact> {
+fn host_aliases(host: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
     match host {
-        "aarch64-linux-musl" => Some(ToolchainArtifact {
-            url: SDK_AARCH64_LINUX_MUSL_URL.into(),
-            sha256: SDK_AARCH64_LINUX_MUSL_SHA256.into(),
-            size_bytes: SDK_AARCH64_LINUX_MUSL_SIZE,
-        }),
-        _ => None,
+        "linux-aarch64" => aliases.push("aarch64-linux-musl".into()),
+        "linux-x86_64" => aliases.push("x86_64-linux-gnu".into()),
+        "darwin-aarch64" => aliases.push("macos-aarch64".into()),
+        "darwin-x86_64" => aliases.push("macos-x86_64".into()),
+        _ => {}
+    }
+    aliases
+}
+
+fn fallback_hosts() -> Vec<String> {
+    match std::env::var(HOST_FALLBACK_ENV) {
+        Ok(value) => value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        Err(_) => vec![],
     }
 }
 
-fn ndk_remote_artifact(host: &str) -> Option<ToolchainArtifact> {
-    match host {
-        "aarch64-linux-musl" => Some(ToolchainArtifact {
-            url: NDK_AARCH64_LINUX_MUSL_URL.into(),
-            sha256: NDK_AARCH64_LINUX_MUSL_SHA256.into(),
-            size_bytes: NDK_AARCH64_LINUX_MUSL_SIZE,
-        }),
-        _ => None,
+fn host_candidates(host: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    candidates.push(host.to_string());
+    candidates.extend(host_aliases(host));
+    candidates.extend(fallback_hosts());
+    candidates
+}
+
+fn parse_kind(kind: &str) -> ToolchainKind {
+    match kind.to_lowercase().as_str() {
+        "sdk" => ToolchainKind::Sdk,
+        "ndk" => ToolchainKind::Ndk,
+        _ => ToolchainKind::Unspecified,
     }
 }
 
-fn available_from_remote(provider_id: &str) -> Vec<AvailableToolchain> {
-    let Some(host) = host_key() else {
-        warn!("Host is not supported for remote toolchain artifacts.");
+fn provider_from_catalog(provider: &CatalogProvider) -> ToolchainProvider {
+    ToolchainProvider {
+        provider_id: Some(Id { value: provider.provider_id.clone() }),
+        name: provider.name.clone(),
+        kind: parse_kind(&provider.kind) as i32,
+        description: provider.description.clone(),
+    }
+}
+
+fn version_from_catalog(version: &CatalogVersion) -> ToolchainVersion {
+    ToolchainVersion {
+        version: version.version.clone(),
+        channel: version.channel.clone(),
+        notes: version.notes.clone(),
+    }
+}
+
+fn artifact_for_host(
+    version: &CatalogVersion,
+    host_candidates: &[String],
+) -> Option<ToolchainArtifact> {
+    for host in host_candidates {
+        if let Some(artifact) = version
+            .artifacts
+            .iter()
+            .find(|item| item.host == *host && !item.url.trim().is_empty())
+        {
+            return Some(ToolchainArtifact {
+                url: artifact.url.clone(),
+                sha256: artifact.sha256.clone(),
+                size_bytes: artifact.size_bytes,
+            });
+        }
+    }
+    if let Some(artifact) = version
+        .artifacts
+        .iter()
+        .find(|item| item.host == "any" && !item.url.trim().is_empty())
+    {
+        return Some(ToolchainArtifact {
+            url: artifact.url.clone(),
+            sha256: artifact.sha256.clone(),
+            size_bytes: artifact.size_bytes,
+        });
+    }
+    None
+}
+
+fn available_for_provider(
+    catalog: &Catalog,
+    provider_id: &str,
+    host: &str,
+    fixtures: Option<&Path>,
+) -> Vec<AvailableToolchain> {
+    let Some(provider) = catalog
+        .providers
+        .iter()
+        .find(|item| item.provider_id == provider_id)
+    else {
         return vec![];
     };
+    let provider_proto = provider_from_catalog(provider);
+    let kind = parse_kind(&provider.kind);
+    let candidates = host_candidates(host);
 
-    match provider_id {
-        PROVIDER_SDK_ID => sdk_remote_artifact(host)
-            .map(|artifact| AvailableToolchain {
-                provider: Some(provider_sdk()),
-                version: Some(ToolchainVersion {
-                    version: SDK_VERSION.into(),
-                    channel: "stable".into(),
-                    notes: format!("Remote SDK artifact for host {host}"),
-                }),
+    provider
+        .versions
+        .iter()
+        .filter_map(|version| {
+            let artifact = if let Some(dir) = fixtures {
+                Some(fixture_artifact_for(dir, kind, &version.version))
+            } else {
+                artifact_for_host(version, &candidates)
+            }?;
+            Some(AvailableToolchain {
+                provider: Some(provider_proto.clone()),
+                version: Some(version_from_catalog(version)),
                 artifact: Some(artifact),
             })
-            .into_iter()
-            .collect(),
-        PROVIDER_NDK_ID => ndk_remote_artifact(host)
-            .map(|artifact| AvailableToolchain {
-                provider: Some(provider_ndk()),
-                version: Some(ToolchainVersion {
-                    version: NDK_VERSION.into(),
-                    channel: "stable".into(),
-                    notes: format!("Remote NDK artifact for host {host}"),
-                }),
-                artifact: Some(artifact),
-            })
-            .into_iter()
-            .collect(),
-        _ => vec![],
-    }
+        })
+        .collect()
 }
 
-fn available_for_provider(provider_id: &str) -> Vec<AvailableToolchain> {
-    if let Some(dir) = fixtures_dir() {
-        return available_from_fixtures(provider_id, &dir);
-    }
-    available_from_remote(provider_id)
-}
-
-fn find_available(provider_id: &str, version: &str) -> Option<AvailableToolchain> {
-    available_for_provider(provider_id)
+fn find_available(
+    catalog: &Catalog,
+    provider_id: &str,
+    version: &str,
+    host: &str,
+    fixtures: Option<&Path>,
+) -> Option<AvailableToolchain> {
+    available_for_provider(catalog, provider_id, host, fixtures)
         .into_iter()
         .find(|item| item.version.as_ref().map(|v| v.version.as_str()) == Some(version))
+}
+
+fn catalog_version_hosts(
+    catalog: &Catalog,
+    provider_id: &str,
+    version: &str,
+) -> Option<Vec<String>> {
+    let provider = catalog
+        .providers
+        .iter()
+        .find(|item| item.provider_id == provider_id)?;
+    let entry = provider.versions.iter().find(|item| item.version == version)?;
+    let mut hosts = entry
+        .artifacts
+        .iter()
+        .map(|item| item.host.clone())
+        .collect::<Vec<_>>();
+    hosts.sort();
+    hosts.dedup();
+    Some(hosts)
 }
 
 fn default_install_root() -> PathBuf {
@@ -408,6 +524,71 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
         .await
         .map_err(|e| Status::unavailable(format!("job service unavailable: {e}")))?;
     Ok(JobServiceClient::new(channel))
+}
+
+async fn job_is_cancelled(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> bool {
+    let resp = client
+        .get_job(GetJobRequest {
+            job_id: Some(Id { value: job_id.to_string() }),
+        })
+        .await;
+    let job = match resp {
+        Ok(resp) => resp.into_inner().job,
+        Err(_) => return false,
+    };
+    match job.and_then(|job| JobState::try_from(job.state).ok()) {
+        Some(JobState::Cancelled) => true,
+        _ => false,
+    }
+}
+
+async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut client = match connect_job().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("cancel watcher: failed to connect job service: {err}");
+            return rx;
+        }
+    };
+    let mut stream = match client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id { value: job_id.clone() }),
+            include_history: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(err) => {
+            warn!("cancel watcher: stream failed for {job_id}: {err}");
+            return rx;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(evt)) => {
+                    if let Some(JobPayload::StateChanged(state)) = evt.payload {
+                        if JobState::try_from(state.new_state)
+                            .unwrap_or(JobState::Unspecified)
+                            == JobState::Cancelled
+                        {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    rx
 }
 
 async fn start_job(
@@ -595,6 +776,10 @@ fn nibble_to_hex(n: u8) -> char {
     }
 }
 
+fn cancel_requested(cancel_rx: Option<&watch::Receiver<bool>>) -> bool {
+    cancel_rx.map(|rx| *rx.borrow()).unwrap_or(false)
+}
+
 fn write_provenance(dir: &Path, prov: &Provenance) -> io::Result<()> {
     let mut contents = format!(
         "provider_id={}\nprovider_name={}\nversion={}\nsource_url={}\nsha256={}\ninstalled_at_unix_millis={}\n",
@@ -761,7 +946,13 @@ fn is_remote_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-async fn download_artifact(url: &str, dest: &Path, verify_hash: bool, expected_sha: &str) -> Result<(), Status> {
+async fn download_artifact(
+    url: &str,
+    dest: &Path,
+    verify_hash: bool,
+    expected_sha: &str,
+    cancel_rx: Option<&watch::Receiver<bool>>,
+) -> Result<(), Status> {
     if verify_hash && expected_sha.is_empty() {
         return Err(Status::failed_precondition(
             "sha256 missing for artifact; cannot verify",
@@ -795,6 +986,10 @@ async fn download_artifact(url: &str, dest: &Path, verify_hash: bool, expected_s
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
+        if cancel_requested(cancel_rx) {
+            let _ = fs::remove_file(&tmp);
+            return Err(Status::cancelled("download cancelled"));
+        }
         let chunk = chunk.map_err(|e| Status::unavailable(format!("download read failed: {e}")))?;
         if let Some(h) = hasher.as_mut() {
             h.update(&chunk);
@@ -825,6 +1020,7 @@ async fn download_artifact(url: &str, dest: &Path, verify_hash: bool, expected_s
 async fn ensure_artifact_local(
     artifact: &ToolchainArtifact,
     verify_hash: bool,
+    cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> Result<PathBuf, Status> {
     if artifact.url.is_empty() {
         return Err(Status::invalid_argument("artifact url is missing"));
@@ -858,7 +1054,14 @@ async fn ensure_artifact_local(
         }
 
         info!("Downloading artifact {}", artifact.url);
-        download_artifact(&artifact.url, &cache_path, verify_hash, &artifact.sha256).await?;
+        download_artifact(
+            &artifact.url,
+            &cache_path,
+            verify_hash,
+            &artifact.sha256,
+            cancel_rx,
+        )
+        .await?;
         info!("Saved artifact {}", cache_path.display());
         return Ok(cache_path);
     }
@@ -888,7 +1091,11 @@ async fn ensure_artifact_local(
     Ok(path)
 }
 
-async fn extract_archive(archive: &Path, dest: &Path) -> Result<(), Status> {
+async fn extract_archive(
+    archive: &Path,
+    dest: &Path,
+    cancel_rx: Option<&watch::Receiver<bool>>,
+) -> Result<(), Status> {
     let archive_str = archive.to_string_lossy();
     let mut cmd = Command::new("tar");
 
@@ -913,17 +1120,62 @@ async fn extract_archive(archive: &Path, dest: &Path) -> Result<(), Status> {
         dest.display()
     );
 
-    let output = cmd
-        .output()
-        .await
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
         .map_err(|e| Status::internal(format!("failed to run tar: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout {
+            let _ = out.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stderr {
+            let _ = out.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    let mut cancel_rx = cancel_rx.cloned();
+    let status = if let Some(cancel_rx) = cancel_rx.as_mut() {
+        loop {
+            tokio::select! {
+                status = child.wait() => break status,
+                _ = cancel_rx.changed() => {
+                    if cancel_requested(Some(cancel_rx)) {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Err(Status::cancelled("extract cancelled"));
+                    }
+                }
+            }
+        }
+    } else {
+        child.wait().await
+    }
+    .map_err(|e| Status::internal(format!("failed to run tar: {e}")))?;
+
+    let stdout = match stdout_task.await {
+        Ok(buf) => buf,
+        Err(_) => Vec::new(),
+    };
+    let stderr = match stderr_task.await {
+        Ok(buf) => buf,
+        Err(_) => Vec::new(),
+    };
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        let stdout = String::from_utf8_lossy(&stdout);
         return Err(Status::internal(format!(
             "tar failed: {}\n{}\n{}",
-            output.status,
+            status,
             stdout.trim(),
             stderr.trim()
         )));
@@ -1053,8 +1305,16 @@ impl Svc {
         version: String,
         install_root: String,
         verify_hash: bool,
+        host: String,
+        fixtures: Option<PathBuf>,
     ) -> Result<(), Status> {
         let mut job_client = connect_job().await?;
+        let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+
+        if job_is_cancelled(&mut job_client, &job_id).await {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled before start\n").await;
+            return Ok(());
+        }
 
         if let Err(err) = publish_state(&mut job_client, &job_id, JobState::Running).await {
             warn!("Failed to publish job state: {}", err);
@@ -1063,9 +1323,31 @@ impl Svc {
             warn!("Failed to publish job log: {}", err);
         }
 
-        let available = match find_available(&provider_id, &version) {
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+            return Ok(());
+        }
+
+        let available = match find_available(&self.catalog, &provider_id, &version, &host, fixtures.as_deref()) {
             Some(item) => item,
             None => {
+                if fixtures.is_none() {
+                    if let Some(hosts) = catalog_version_hosts(&self.catalog, &provider_id, &version) {
+                        let detail = if hosts.is_empty() {
+                            format!("host={host} (no artifacts listed)")
+                        } else {
+                            format!("host={host} available_hosts={}", hosts.join(","))
+                        };
+                        let err_detail = job_error_detail(
+                            ErrorCode::ToolchainIncompatibleHost,
+                            "host not supported for requested toolchain",
+                            detail,
+                            &job_id,
+                        );
+                        let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                        return Ok(());
+                    }
+                }
                 let err_detail = job_error_detail(
                     ErrorCode::ToolchainInstallFailed,
                     "requested toolchain version not found",
@@ -1077,7 +1359,12 @@ impl Svc {
             }
         };
 
-        let provider = match available.provider.clone().or_else(|| provider_by_id(&provider_id)) {
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+            return Ok(());
+        }
+
+        let provider = match available.provider.clone() {
             Some(p) => p,
             None => {
                 let err_detail = job_error_detail(
@@ -1090,6 +1377,11 @@ impl Svc {
                 return Ok(());
             }
         };
+
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+            return Ok(());
+        }
 
         let artifact = available
             .artifact
@@ -1133,8 +1425,12 @@ impl Svc {
         )
         .await;
 
-        let archive_path = match ensure_artifact_local(&artifact, verify_hash).await {
+        let archive_path = match ensure_artifact_local(&artifact, verify_hash, Some(&cancel_rx)).await {
             Ok(path) => path,
+            Err(err) if err.code() == tonic::Code::Cancelled => {
+                let _ = publish_log(&mut job_client, &job_id, "Install cancelled during download\n").await;
+                return Ok(());
+            }
             Err(err) => {
                 let err_detail = job_error_detail(
                     ErrorCode::ToolchainInstallFailed,
@@ -1146,6 +1442,11 @@ impl Svc {
                 return Ok(());
             }
         };
+
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+            return Ok(());
+        }
 
         let _ = publish_progress(
             &mut job_client,
@@ -1199,7 +1500,12 @@ impl Svc {
         }
 
         let _ = publish_progress(&mut job_client, &job_id, 65, "extracting", vec![]).await;
-        if let Err(err) = extract_archive(&archive_path, &temp_dir).await {
+        if let Err(err) = extract_archive(&archive_path, &temp_dir, Some(&cancel_rx)).await {
+            if err.code() == tonic::Code::Cancelled {
+                let _ = publish_log(&mut job_client, &job_id, "Install cancelled during extract\n").await;
+                let _ = fs::remove_dir_all(&temp_dir);
+                return Ok(());
+            }
             let _ = fs::remove_dir_all(&temp_dir);
             let err_detail = job_error_detail(
                 ErrorCode::ToolchainInstallFailed,
@@ -1208,6 +1514,12 @@ impl Svc {
                 &job_id,
             );
             let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+            let _ = fs::remove_dir_all(&temp_dir);
             return Ok(());
         }
 
@@ -1292,8 +1604,14 @@ impl ToolchainService for Svc {
         &self,
         _request: Request<ListProvidersRequest>,
     ) -> Result<Response<ListProvidersResponse>, Status> {
+        let providers = self
+            .catalog
+            .providers
+            .iter()
+            .map(provider_from_catalog)
+            .collect::<Vec<_>>();
         Ok(Response::new(ListProvidersResponse {
-            providers: vec![provider_sdk(), provider_ndk()],
+            providers,
         }))
     }
 
@@ -1303,9 +1621,23 @@ impl ToolchainService for Svc {
     ) -> Result<Response<ListAvailableResponse>, Status> {
         let req = request.into_inner();
         let pid = req.provider_id.and_then(|i| Some(i.value)).unwrap_or_default();
-
+        let fixtures = fixtures_dir();
+        let host = host_key().unwrap_or_else(|| "unknown".into());
+        if fixtures.is_none() && host == "unknown" {
+            return Err(Status::failed_precondition(
+                "unsupported host for available toolchains",
+            ));
+        }
+        if !self
+            .catalog
+            .providers
+            .iter()
+            .any(|provider| provider.provider_id == pid)
+        {
+            return Err(Status::not_found(format!("provider_id not found: {pid}")));
+        }
         Ok(Response::new(ListAvailableResponse {
-            items: available_for_provider(&pid),
+            items: available_for_provider(&self.catalog, &pid, &host, fixtures.as_deref()),
             page_info: Some(PageInfo { next_page_token: "".into() }),
         }))
     }
@@ -1386,24 +1718,48 @@ impl ToolchainService for Svc {
             req.version
         };
 
-        if fixtures_dir().is_none() && host_key().is_none() {
-            let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-            return Err(Status::failed_precondition(format!(
-                "unsupported host for remote toolchain artifacts: {host}"
+        if !self
+            .catalog
+            .providers
+            .iter()
+            .any(|provider| provider.provider_id == provider_id)
+        {
+            return Err(Status::not_found(format!(
+                "provider_id not found: {provider_id}"
             )));
         }
 
+        let fixtures = fixtures_dir();
+        let host = host_key();
+        if fixtures.is_none() && host.is_none() {
+            let host_raw = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+            return Err(Status::failed_precondition(format!(
+                "unsupported host for toolchain artifacts: {host_raw}"
+            )));
+        }
+        let host = host.unwrap_or_else(|| "unknown".into());
+
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "toolchain.install",
-            vec![
-                KeyValue { key: "provider_id".into(), value: provider_id.clone() },
-                KeyValue { key: "version".into(), value: version.clone() },
-                KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
-            ],
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "toolchain.install",
+                vec![
+                    KeyValue { key: "provider_id".into(), value: provider_id.clone() },
+                    KeyValue { key: "version".into(), value: version.clone() },
+                    KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
+                ],
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         let svc = self.clone();
         let install_root = req.install_root;
@@ -1412,7 +1768,15 @@ impl ToolchainService for Svc {
 
         tokio::spawn(async move {
             if let Err(err) = svc
-                .run_install_job(job_id_for_spawn.clone(), provider_id, version, install_root, verify_hash)
+                .run_install_job(
+                    job_id_for_spawn.clone(),
+                    provider_id,
+                    version,
+                    install_root,
+                    verify_hash,
+                    host,
+                    fixtures,
+                )
                 .await
             {
                 warn!("install job {} failed to run: {}", job_id_for_spawn, err);
@@ -1434,26 +1798,67 @@ impl ToolchainService for Svc {
             .ok_or_else(|| Status::invalid_argument("toolchain_id is required"))?
             .value;
 
-        if fixtures_dir().is_none() && host_key().is_none() {
-            let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let fixtures = fixtures_dir();
+        let host = host_key().unwrap_or_else(|| "unknown".into());
+        if fixtures.is_none() && host == "unknown" {
+            let host_raw = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
             return Err(Status::failed_precondition(format!(
-                "unsupported host for remote toolchain artifacts: {host}"
+                "unsupported host for toolchain artifacts: {host_raw}"
             )));
         }
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "toolchain.verify",
-            vec![KeyValue { key: "toolchain_id".into(), value: id.clone() }],
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "toolchain.verify",
+                vec![KeyValue { key: "toolchain_id".into(), value: id.clone() }],
+            )
+            .await?
+        } else {
+            job_id
+        };
+
+        let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+        if job_is_cancelled(&mut job_client, &job_id).await {
+            let _ = publish_log(&mut job_client, &job_id, "Verification cancelled before start\n").await;
+            return Ok(Response::new(VerifyToolchainResponse {
+                verified: false,
+                error: Some(job_error_detail(
+                    ErrorCode::Cancelled,
+                    "verification cancelled",
+                    "cancelled before start".into(),
+                    &job_id,
+                )),
+                job_id: Some(Id { value: job_id }),
+            }));
+        }
 
         if let Err(err) = publish_state(&mut job_client, &job_id, JobState::Running).await {
             warn!("Failed to publish job state: {}", err);
         }
         if let Err(err) = publish_log(&mut job_client, &job_id, "Starting toolchain verification\n").await {
             warn!("Failed to publish job log: {}", err);
+        }
+
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Verification cancelled\n").await;
+            return Ok(Response::new(VerifyToolchainResponse {
+                verified: false,
+                error: Some(job_error_detail(
+                    ErrorCode::Cancelled,
+                    "verification cancelled",
+                    "cancelled before checks".into(),
+                    &job_id,
+                )),
+                job_id: Some(Id { value: job_id }),
+            }));
         }
 
         let mut st = self.state.lock().await;
@@ -1539,6 +1944,20 @@ impl ToolchainService for Svc {
             return Ok(Response::new(resp));
         }
 
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Verification cancelled\n").await;
+            return Ok(Response::new(VerifyToolchainResponse {
+                verified: false,
+                error: Some(job_error_detail(
+                    ErrorCode::Cancelled,
+                    "verification cancelled",
+                    "cancelled before download".into(),
+                    &job_id,
+                )),
+                job_id: Some(Id { value: job_id }),
+            }));
+        }
+
         let artifact = ToolchainArtifact {
             url: entry.source_url.clone(),
             sha256: entry.sha256.clone(),
@@ -1547,7 +1966,7 @@ impl ToolchainService for Svc {
 
         drop(st);
 
-        let verify_result = ensure_artifact_local(&artifact, true).await;
+        let verify_result = ensure_artifact_local(&artifact, true, Some(&cancel_rx)).await;
 
         let mut st = self.state.lock().await;
         let entry = st
@@ -1612,18 +2031,31 @@ impl ToolchainService for Svc {
                 }
             }
             Err(err) => {
-                entry.verified = false;
-                let err_detail = job_error_detail(
-                    ErrorCode::ToolchainVerifyFailed,
-                    "verification failed",
-                    err.message().to_string(),
-                    &job_id,
-                );
-                publish_failure = Some(err_detail.clone());
-                VerifyToolchainResponse {
-                    verified: false,
-                    error: Some(err_detail),
-                    job_id: Some(Id { value: job_id.clone() }),
+                if err.code() == tonic::Code::Cancelled {
+                    VerifyToolchainResponse {
+                        verified: false,
+                        error: Some(job_error_detail(
+                            ErrorCode::Cancelled,
+                            "verification cancelled",
+                            "cancelled during verification".into(),
+                            &job_id,
+                        )),
+                        job_id: Some(Id { value: job_id.clone() }),
+                    }
+                } else {
+                    entry.verified = false;
+                    let err_detail = job_error_detail(
+                        ErrorCode::ToolchainVerifyFailed,
+                        "verification failed",
+                        err.message().to_string(),
+                        &job_id,
+                    );
+                    publish_failure = Some(err_detail.clone());
+                    VerifyToolchainResponse {
+                        verified: false,
+                        error: Some(err_detail),
+                        job_id: Some(Id { value: job_id.clone() }),
+                    }
                 }
             }
         };

@@ -15,16 +15,16 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 
 ## Current implementation details
 - Implementation lives in crates/aadk-toolchain/src/main.rs with a tonic server.
-- Providers are hard-coded to two "custom" providers:
-  - android-sdk-custom (SDK)
-  - android-ndk-custom (NDK)
-- Available versions are pinned and come from either:
-  - A fixtures directory (AADK_TOOLCHAIN_FIXTURES_DIR)
-  - A remote host-specific artifact list (currently only linux/aarch64)
+- Providers and versions come from a JSON catalog (crates/aadk-toolchain/catalog.json or
+  AADK_TOOLCHAIN_CATALOG override).
+- Host selection uses AADK_TOOLCHAIN_HOST when set and falls back to host aliases plus
+  AADK_TOOLCHAIN_HOST_FALLBACK when the catalog lacks a matching artifact.
+- Available versions can also be sourced from fixture archives via AADK_TOOLCHAIN_FIXTURES_DIR.
 - Toolchains are installed under ~/.local/share/aadk/toolchains and cached in
   ~/.local/share/aadk/downloads; state is persisted in ~/.local/share/aadk/state/toolchains.json.
 - verify_toolchain checks that the install path exists, a provenance file exists, and
   validates layout; it re-fetches the artifact for verification when needed.
+- InstallToolchain and VerifyToolchain accept optional job_id to reuse existing JobService jobs.
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
   toolchain set id.
 
@@ -37,9 +37,10 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - AADK_TOOLCHAIN_ADDR sets the bind address (default 127.0.0.1:50052).
 - AADK_JOB_ADDR sets the JobService address.
 - AADK_TOOLCHAIN_FIXTURES_DIR points to local fixture archives for offline dev.
+- AADK_TOOLCHAIN_CATALOG overrides the provider catalog path.
+- AADK_TOOLCHAIN_HOST overrides detected host (e.g., linux-aarch64, linux-x86_64).
+- AADK_TOOLCHAIN_HOST_FALLBACK provides a comma-separated fallback host list.
 
 ## Prioritized TODO checklist by service
-- P0: Replace fixed providers/versions with provider discovery + version catalog. main.rs (line 162) main.rs (line 1163)
-- P0: Expand host support beyond linux/aarch64; add fallback behavior. main.rs (line 224) main.rs (line 263)
 - P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
 - P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)
