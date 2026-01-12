@@ -24,6 +24,8 @@ dependencies = [
  "aadk-proto",
  "clap",
  "futures-util",
+ "serde",
+ "serde_json",
  "tokio",
  "tonic",
 ]
@@ -133,6 +135,8 @@ dependencies = [
  "futures-util",
  "glib",
  "gtk4",
+ "serde",
+ "serde_json",
  "tokio",
  "tonic",
 ]

@@ -39,6 +39,9 @@ Update this file whenever BuildService behavior changes or when commits touching
 - AADK_GRADLE_REQUIRE_WRAPPER forces the Gradle wrapper to be present.
 - AADK_GRADLE_USER_HOME overrides GRADLE_USER_HOME for builds.
 
+## Implementation notes
+- Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.
+
 ## Prioritized TODO checklist by service
 - P2: Replace module/variant validation with Gradle model introspection. main.rs (line 655)
 - P2: Improve variant filtering for flavored builds and richer artifact metadata (ABI/density). main.rs (line 1189)

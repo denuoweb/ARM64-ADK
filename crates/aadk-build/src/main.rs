@@ -867,7 +867,7 @@ fn gradle_user_home() -> Option<PathBuf> {
     Some(data_dir().join("gradle"))
 }
 
-fn expand_gradle_args(items: Vec<KeyValue>) -> Vec<String> {
+fn expand_gradle_args(items: &[KeyValue]) -> Vec<String> {
     let mut args = Vec::new();
     for item in items {
         let key = item.key.trim();
@@ -1441,7 +1441,7 @@ async fn run_build_job(
 
     let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
     let mut args = plan.tasks.clone();
-    let extra_args = expand_gradle_args(req.gradle_args);
+    let extra_args = expand_gradle_args(&req.gradle_args);
     args.extend(extra_args);
 
     if !gradle_daemon_enabled() && !arg_is_flag(&args, "--no-daemon") {

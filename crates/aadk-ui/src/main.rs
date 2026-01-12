@@ -418,7 +418,7 @@ fn build_ui(app: &gtk::Application) {
     stack.add_titled(&settings.container, Some("settings"), "Settings");
 
     // Clone page handles for event routing closure.
-    let home_page_for_events = home.page.clone();
+    let home_page_for_events = home.clone();
     let jobs_for_events = jobs_history.clone();
     let toolchains_for_events = toolchains.clone();
     let projects_for_events = projects.clone();
@@ -545,6 +545,10 @@ struct HomePage {
 }
 
 impl HomePage {
+    fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
     fn set_job_id(&self, job_id: Option<&str>) {
         let label = job_id.unwrap_or("-");
         self.job_id_label.set_text(&format!("job_id: {label}"));

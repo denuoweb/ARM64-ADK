@@ -34,6 +34,9 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - All service addresses can be overridden via env vars listed above.
 - If running on minimal GTK installs, GTK_A11Y=none can suppress the accessibility warning.
 
+## Implementation notes
+- Home page event routing now keeps the HomePage handle so status labels and log output update together.
+
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
 Completed UI job flow expansions are tracked in README.

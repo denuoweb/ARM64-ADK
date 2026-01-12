@@ -47,5 +47,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - AADK_TOOLCHAIN_HOST overrides detected host (e.g., linux-aarch64, linux-x86_64).
 - AADK_TOOLCHAIN_HOST_FALLBACK provides a comma-separated fallback host list.
 
+## Implementation notes
+- InstallToolchain clones artifact URL/hash when persisting InstalledToolchain so post-install metrics can reuse artifact metadata.
+
 ## Prioritized TODO checklist by service
 - P2: Add transparency log validation for toolchain artifacts. main.rs (line 1108)

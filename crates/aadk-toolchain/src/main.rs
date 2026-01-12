@@ -2215,8 +2215,8 @@ impl Svc {
             install_path: final_dir.to_string_lossy().to_string(),
             verified: verify_hash,
             installed_at: Some(installed_at),
-            source_url: artifact.url,
-            sha256: artifact.sha256,
+            source_url: artifact.url.clone(),
+            sha256: artifact.sha256.clone(),
         };
 
         let mut st = self.state.lock().await;
