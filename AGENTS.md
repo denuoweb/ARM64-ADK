@@ -36,14 +36,14 @@ Default addresses (override with env vars):
 ## Cross-service flows
 - UI/CLI call gRPC services; they do not implement business logic.
 - JobService is the event bus. Toolchain/Build/Targets publish job events; UI streams events.
-- BuildService resolves project paths via ProjectService (recent list) or AADK_PROJECT_ROOT.
+- BuildService resolves project paths via ProjectService GetProject for ids; direct paths are accepted.
 - TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
-- ObserveService persists run history and uses JobService for bundle work; richer run metadata and
-  retention are still TODO.
+- ObserveService persists run history and uses JobService for bundle work; log capture is still TODO.
 
 ## Shared data and locations
 - Project state: ~/.local/share/aadk/state/projects.json
+- Build state: ~/.local/share/aadk/state/builds.json
 - Toolchain state: ~/.local/share/aadk/state/toolchains.json
 - Toolchain downloads: ~/.local/share/aadk/downloads
 - Toolchain installs: ~/.local/share/aadk/toolchains
@@ -68,32 +68,21 @@ Default addresses (override with env vars):
 - P2: Add template defaults resolution (minSdk/compileSdk) with schema errors. main.rs (line 32)
 
 ### JobService (aadk-core)
-- P0: Replace demo-only job flow with real job dispatch (build/toolchain/targets/observe). main.rs (line 193)
-- P0: Propagate cancellation to actual workers, not just demo jobs. main.rs (line 118) main.rs (line 257)
 - P1: Persist job state/history across restarts. main.rs (line 35)
-- P1: Return explicit errors for unknown job types instead of leaving them queued. main.rs (line 236)
 - P2: Add retention/cleanup policy for job history. main.rs (line 84)
 - P2: Expand progress/metrics payloads per job type. main.rs (line 100)
 
 ### ObserveService (aadk-observe)
-- P1: Capture run metadata (project/target/toolchain ids) for filtering. main.rs (line 17)
-- P2: Add retention/cleanup for bundles and temp dirs. main.rs (line 24)
+- P1: Replace placeholder log/config collection with real files. main.rs (line 24)
 
 ### BuildService (aadk-build)
-- P0: Make project resolution authoritative (real ProjectService IDs) with robust error mapping. main.rs (line 242)
-- P0: Populate artifact hashes instead of empty sha256. main.rs (line 516)
-- P1: Persist build records/artifacts per job so list_artifacts is backed by stored results. main.rs (line 800)
-- P1: Harden Gradle invocation (wrapper detection, env setup, error surfacing). main.rs (line 529)
 - P2: Expand variant/module support and artifact filtering. main.rs (line 293)
 
 ### ToolchainService (aadk-toolchain)
-- P0: Replace fixed providers/versions with provider discovery + version catalog. main.rs (line 162) main.rs (line 1163)
-- P0: Expand host support beyond linux/aarch64; add fallback behavior. main.rs (line 224) main.rs (line 263)
 - P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
 - P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)
 
 ### TargetService (aadk-targets)
-- P0: Add provider abstraction beyond adb/cuttlefish discovery. main.rs (line 1193)
 - P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
 - P1: Normalize/validate target IDs and address formats consistently. main.rs (line 1050)
 - P2: Add target inventory persistence and reconciliation on startup. main.rs (line 2809)

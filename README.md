@@ -39,12 +39,14 @@ Default addresses (override via env):
 - Toolchain installs: `~/.local/share/aadk/toolchains`
 - Projects: `~/.local/share/aadk/state/projects.json`
 - Project metadata: `<project>/.aadk/project.json`
+- Builds: `~/.local/share/aadk/state/builds.json`
 - Observe runs: `~/.local/share/aadk/state/observe.json`
 - Observe bundles: `~/.local/share/aadk/bundles`
 
 ## Third-party inventory (downloaded on demand)
 This repo does not bundle third-party toolchains; services download or invoke them when requested.
-- Android SDK/NDK custom archives (pinned in ToolchainService):
+- Android SDK/NDK custom archives (ToolchainService catalog in `crates/aadk-toolchain/catalog.json`,
+  override with `AADK_TOOLCHAIN_CATALOG`):
   - SDK: `https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz`
   - NDK: `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz`
   - These repos are MIT licensed; review upstream Android SDK/NDK terms if you plan to redistribute.
@@ -117,28 +119,30 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ### JobService (aadk-core)
 - In-memory job registry with bounded history and broadcast streaming.
 - `include_history` replay followed by live event streaming.
-- Demo job runner in-process; other services use JobService for tracking and event streaming.
+- Validates job types; demo job runner remains for smoke tests while services publish real jobs.
 
 ### ToolchainService (aadk-toolchain)
-- Lists providers, installs SDK/NDK toolchains, verifies installs, publishes job events.
+- Provider catalog with host-aware artifacts (override via `AADK_TOOLCHAIN_CATALOG`).
+- Installs and verifies SDK/NDK toolchains, publishing job events.
 - Supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
 
 ### ProjectService (aadk-project)
 - Template registry backed by JSON (`AADK_PROJECT_TEMPLATES` or default registry).
 - Create/open project, scaffold files on disk, store metadata and recents.
+- Exposes GetProject for authoritative project resolution.
 
 ### BuildService (aadk-build)
-- Resolves project paths via ProjectService or `AADK_PROJECT_ROOT`.
-- Runs Gradle (wrapper or system Gradle) and streams logs.
+- Resolves project paths via ProjectService IDs (or accepts direct paths) and persists build/artifact records.
+- Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; streams logs.
 - Scans build outputs for APK artifacts and computes sha256 per artifact.
 
 ### TargetService (aadk-targets)
-- Enumerates ADB devices, supports Cuttlefish start/stop/status/install.
-- Install APK, launch/stop app, stream logcat; publishes job events.
+- Enumerates targets via provider pipeline (ADB + Cuttlefish) and persists default target.
+- Install APK, launch/stop app, stream logcat, and manage Cuttlefish; publishes job events.
 
 ### ObserveService (aadk-observe)
-- Persists run history and paginated listing.
-- Exports support/evidence bundles as JobService jobs with progress/log streaming.
+- Persists run history and paginated listing with project/target/toolchain ids.
+- Exports support/evidence bundles as JobService jobs with progress/log streaming and retention.
 - Bundle log capture is currently a placeholder file.
 
 ### GTK UI (aadk-ui)
@@ -157,11 +161,12 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Observe list-runs/export-support/export-evidence.
 
 ## Extending from here (recommended order)
-1. Replace demo-only job dispatch in `aadk-core` with real worker routing + cancellation.
-2. Harden BuildService (authoritative project resolution, artifact persistence, Gradle wrapper checks).
-3. Expand ToolchainService providers/versions and host support.
-4. Add TargetService provider abstraction and default target persistence.
-5. Enrich ObserveService metadata capture and retention/cleanup.
+1. Persist JobService history across restarts and add retention/cleanup policy.
+2. Replace placeholder ObserveService log/config collection with real sources.
+3. Expand BuildService variant/module support and artifact filtering.
+4. Add ToolchainService uninstall/update operations, cached-artifact cleanup, and stronger verification.
+5. Enrich TargetService metadata/health, normalize IDs, and add inventory reconciliation.
+6. Replace demo-only UI/CLI flows with real job selection/history views and config persistence.
 
 ## Development notes
 - gRPC uses TCP loopback for simplicity; Unix domain sockets are a straightforward follow-on.

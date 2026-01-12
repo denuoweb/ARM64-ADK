@@ -17,6 +17,12 @@ Update this file whenever proto contracts change or when commits touching this d
 - target.proto: TargetService (includes ResolveCuttlefishBuild and install overrides)
 - observe.proto: ObserveService
 
+## Recent changes
+- Added optional job_id fields to long-running requests (build/toolchain/target/observe) so services
+  can accept pre-created jobs from JobService.
+- Added GetProject RPC to project.proto for authoritative project resolution.
+- Added project/target/toolchain_set metadata to observe ExportSupportBundleRequest.
+
 ## Code generation
 - Build script: crates/aadk-proto/build.rs
 - The build script uses a fixed list of protos and `tonic_build` to generate Rust types.
