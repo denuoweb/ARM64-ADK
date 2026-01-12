@@ -20,8 +20,11 @@ Update this file whenever proto contracts change or when commits touching this d
 ## Recent changes
 - Added optional job_id fields to long-running requests (build/toolchain/target/observe) so services
   can accept pre-created jobs from JobService.
+- Added JobService list APIs (ListJobs, ListJobHistory) with pagination and filters plus JobEventKind.
 - Added GetProject RPC to project.proto for authoritative project resolution.
 - Added project/target/toolchain_set metadata to observe ExportSupportBundleRequest.
+- Extended build.proto with module/variant/task selection fields, ArtifactType, and ArtifactFilter.
+- Extended toolchain.proto with update/uninstall/cache cleanup RPCs and new toolchain error codes.
 
 ## Code generation
 - Build script: crates/aadk-proto/build.rs

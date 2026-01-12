@@ -34,6 +34,9 @@ Default addresses (override via env):
 - Observe:      127.0.0.1:50056 (AADK_OBSERVE_ADDR)
 
 ## Data and state locations
+- Jobs: `~/.local/share/aadk/state/jobs.json`
+- UI config: `~/.local/share/aadk/state/ui-config.json`
+- CLI config: `~/.local/share/aadk/state/cli-config.json`
 - Toolchains: `~/.local/share/aadk/state/toolchains.json`
 - Toolchain downloads: `~/.local/share/aadk/downloads`
 - Toolchain installs: `~/.local/share/aadk/toolchains`
@@ -42,6 +45,7 @@ Default addresses (override via env):
 - Builds: `~/.local/share/aadk/state/builds.json`
 - Observe runs: `~/.local/share/aadk/state/observe.json`
 - Observe bundles: `~/.local/share/aadk/bundles`
+- UI/CLI log exports: `~/.local/share/aadk/state/*-job-export-*.json`
 
 ## Third-party inventory (downloaded on demand)
 This repo does not bundle third-party toolchains; services download or invoke them when requested.
@@ -117,14 +121,15 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ## What is implemented today
 
 ### JobService (aadk-core)
-- In-memory job registry with bounded history and broadcast streaming.
+- Persisted job registry with bounded history, retention cleanup, and broadcast streaming.
 - `include_history` replay followed by live event streaming.
+- ListJobs/ListJobHistory APIs with pagination and filters (type/state/time, event kinds).
 - Validates job types; demo job runner remains for smoke tests while services publish real jobs.
 
 ### ToolchainService (aadk-toolchain)
 - Provider catalog with host-aware artifacts (override via `AADK_TOOLCHAIN_CATALOG`).
-- Installs and verifies SDK/NDK toolchains, publishing job events.
-- Supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
+- Installs, updates, uninstalls, and verifies SDK/NDK toolchains with JobService events; supports cache cleanup.
+- Verification validates provenance, catalog entries, artifact size, signatures (when configured), and layout; supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
 
 ### ProjectService (aadk-project)
 - Template registry backed by JSON (`AADK_PROJECT_TEMPLATES` or default registry).
@@ -132,9 +137,9 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Exposes GetProject for authoritative project resolution.
 
 ### BuildService (aadk-build)
-- Resolves project paths via ProjectService IDs (or accepts direct paths) and persists build/artifact records.
-- Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; streams logs.
-- Scans build outputs for APK artifacts and computes sha256 per artifact.
+- Resolves project paths via ProjectService IDs (or accepts direct paths) and persists build/artifact records with module/variant/task selections.
+- Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; supports module/variant/task overrides and streams logs.
+- Scans build outputs for APK/AAB/AAR/mapping/test results, tags metadata (module/variant/task/artifact_type), and supports artifact filters with sha256.
 
 ### TargetService (aadk-targets)
 - Enumerates targets via provider pipeline (ADB + Cuttlefish) and persists default target.
@@ -143,35 +148,34 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ### ObserveService (aadk-observe)
 - Persists run history and paginated listing with project/target/toolchain ids.
 - Exports support/evidence bundles as JobService jobs with progress/log streaming and retention.
-- Bundle log capture is currently a placeholder file.
+- Support bundles include job log history plus config/state snapshots.
 
 ### GTK UI (aadk-ui)
-- Home: demo job and streaming.
-- Toolchains: list/install/verify, list toolchain sets.
+- Home: run jobs with type/params/ids, watch streams, live status panel.
+- Job History: list jobs and event history with filters; export logs.
+- Toolchains: list/install/verify/update/uninstall, cache cleanup, list toolchain sets.
 - Projects: list templates, create/open, list recents, set config, use active defaults.
 - Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
-- Console: run Gradle builds and stream logs.
+- Console: run Gradle builds with module/variant/task selection, list artifacts with filters grouped by module, stream logs.
 - Evidence: list runs, export support/evidence bundles and stream job events.
 
 ### CLI (aadk-cli)
-- Job demo start/cancel.
-- Toolchain list-providers/list-sets.
+- Job run/list/watch/history/export + demo start/cancel.
+- Toolchain list-providers/list-sets/update/uninstall/cleanup-cache.
 - Targets list/start/stop/status/install Cuttlefish.
 - Projects list-templates/list-recent/create/open/use-active-defaults.
 - Observe list-runs/export-support/export-evidence.
+- Build run/list-artifacts with module/variant/tasks + artifact filters.
 
 ## Extending from here (recommended order)
-1. Persist JobService history across restarts and add retention/cleanup policy.
-2. Replace placeholder ObserveService log/config collection with real sources.
-3. Expand BuildService variant/module support and artifact filtering.
-4. Add ToolchainService uninstall/update operations, cached-artifact cleanup, and stronger verification.
-5. Enrich TargetService metadata/health, normalize IDs, and add inventory reconciliation.
-6. Replace demo-only UI/CLI flows with real job selection/history views and config persistence.
+1. Enrich TargetService metadata/health, normalize IDs, and add inventory reconciliation.
+2. Add transparency log validation to ToolchainService verification.
+
 
 ## Development notes
 - gRPC uses TCP loopback for simplicity; Unix domain sockets are a straightforward follow-on.
 - UI uses a background tokio runtime to keep the GTK main thread responsive.
-- Toolchain install/verify publishes progress via JobService; run `aadk-core` to see UI streams.
+- Job workflows publish progress metrics via JobService; run `aadk-core` to see UI streams.
 
 ## Why AADK (ARM64 gap)
 AADK targets efficient, ARM64-first Android development tooling (not an IDE clone), because the

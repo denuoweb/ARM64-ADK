@@ -36,12 +36,16 @@ Default addresses (override with env vars):
 ## Cross-service flows
 - UI/CLI call gRPC services; they do not implement business logic.
 - JobService is the event bus. Toolchain/Build/Targets publish job events; UI streams events.
+- Progress payloads include job-specific metrics for build/project/toolchain/target/observe workflows.
 - BuildService resolves project paths via ProjectService GetProject for ids; direct paths are accepted.
 - TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
-- ObserveService persists run history and uses JobService for bundle work; log capture is still TODO.
+- ObserveService persists run history and uses JobService history plus state/env snapshots for bundle contents.
 
 ## Shared data and locations
+- Job state: ~/.local/share/aadk/state/jobs.json
+- UI config: ~/.local/share/aadk/state/ui-config.json
+- CLI config: ~/.local/share/aadk/state/cli-config.json
 - Project state: ~/.local/share/aadk/state/projects.json
 - Build state: ~/.local/share/aadk/state/builds.json
 - Toolchain state: ~/.local/share/aadk/state/toolchains.json
@@ -50,6 +54,7 @@ Default addresses (override with env vars):
 - Target state: ~/.local/share/aadk/state/targets.json
 - Observe state: ~/.local/share/aadk/state/observe.json
 - Observe bundle outputs: ~/.local/share/aadk/bundles
+- UI/CLI log exports: ~/.local/share/aadk/state/*-job-export-*.json
 
 ## Per-service AGENT files
 - crates/aadk-project/AGENTS.md
@@ -68,19 +73,15 @@ Default addresses (override with env vars):
 - P2: Add template defaults resolution (minSdk/compileSdk) with schema errors. main.rs (line 32)
 
 ### JobService (aadk-core)
-- P1: Persist job state/history across restarts. main.rs (line 35)
-- P2: Add retention/cleanup policy for job history. main.rs (line 84)
-- P2: Expand progress/metrics payloads per job type. main.rs (line 100)
 
 ### ObserveService (aadk-observe)
-- P1: Replace placeholder log/config collection with real files. main.rs (line 24)
 
 ### BuildService (aadk-build)
-- P2: Expand variant/module support and artifact filtering. main.rs (line 293)
+- P2: Replace module/variant validation with Gradle model introspection. main.rs (line 655)
+- P2: Improve variant filtering for flavored builds and richer artifact metadata (ABI/density). main.rs (line 1189)
 
 ### ToolchainService (aadk-toolchain)
-- P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
-- P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)
+- P2: Add transparency log validation for toolchain artifacts. main.rs (line 1108)
 
 ### TargetService (aadk-targets)
 - P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
@@ -88,6 +89,4 @@ Default addresses (override with env vars):
 - P2: Add target inventory persistence and reconciliation on startup. main.rs (line 2809)
 
 ### Clients (aadk-ui, aadk-cli)
-- P0: Replace demo-job UI/CLI with real job type selection/status views. main.rs (line 790) main.rs (line 41)
-- P1: Add project recent list + job history viewer. main.rs (line 157)
-- P2: Persist UI config (service addresses) and export logs. main.rs (line 34)
+Completed job flow expansions are tracked in README.
