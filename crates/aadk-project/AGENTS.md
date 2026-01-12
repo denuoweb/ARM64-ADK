@@ -20,6 +20,7 @@ Update this file whenever ProjectService behavior changes or when commits touchi
   skipping invalid entries.
 - create_project scaffolds files from the template directory, streams job progress/logs to
   JobService, and persists metadata in .aadk/project.json plus the recent list.
+- create_project progress metrics include project/template metadata plus copied/total files.
 - open_project reads .aadk/project.json when present, otherwise generates metadata and persists it.
 - list_recent_projects pages through the persisted recent list with page tokens.
 - get_project resolves a project by id for authoritative build resolution.

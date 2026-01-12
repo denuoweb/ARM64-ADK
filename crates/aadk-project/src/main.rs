@@ -516,6 +516,13 @@ async fn publish_progress(
     .await
 }
 
+fn metric(key: &str, value: impl ToString) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
 async fn publish_log(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -703,6 +710,26 @@ fn copy_template_with_progress(
     Ok(total)
 }
 
+fn project_progress_metrics(
+    req: &CreateRequestParts,
+    template: &TemplateEntry,
+    project_id: &str,
+) -> Vec<KeyValue> {
+    let mut metrics = vec![
+        metric("project_id", project_id),
+        metric("project_name", &req.name),
+        metric("project_path", req.path.display()),
+        metric("template_id", &req.template_id),
+        metric("template_name", &template.name),
+    ];
+    if let Some(toolchain_set_id) = req.toolchain_set_id.as_ref() {
+        if !toolchain_set_id.trim().is_empty() {
+            metrics.push(metric("toolchain_set_id", toolchain_set_id));
+        }
+    }
+    metrics
+}
+
 async fn run_create_job(
     mut job_client: JobServiceClient<Channel>,
     state: Arc<Mutex<State>>,
@@ -765,6 +792,7 @@ async fn run_create_job(
         copy_template_with_progress(&copy_src, &copy_dest, &copy_template, tx, &copy_cancel)
     });
 
+    let base_metrics = project_progress_metrics(&req, &template, &project_id);
     let mut last_percent = 0u32;
 
     while let Some(update) = rx.recv().await {
@@ -793,16 +821,12 @@ async fn run_create_job(
                         &job_id,
                         percent,
                         "Copying template",
-                        vec![
-                            KeyValue {
-                                key: "files_copied".into(),
-                                value: copied.to_string(),
-                            },
-                            KeyValue {
-                                key: "files_total".into(),
-                                value: total.to_string(),
-                            },
-                        ],
+                        {
+                            let mut metrics = base_metrics.clone();
+                            metrics.push(metric("files_copied", copied));
+                            metrics.push(metric("files_total", total));
+                            metrics
+                        },
                     )
                     .await;
                 }
