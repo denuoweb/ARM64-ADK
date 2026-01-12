@@ -1,20 +1,435 @@
-use std::{collections::{HashMap, VecDeque}, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use aadk_proto::aadk::v1::{
     job_service_server::{JobService, JobServiceServer},
-    CancelJobRequest, CancelJobResponse, GetJobRequest, GetJobResponse, Id, Job, JobCompleted,
-    JobEvent, JobProgress, JobProgressUpdated, JobRef, JobState, JobStateChanged,
-    JobLogAppended, KeyValue, LogChunk, PublishJobEventRequest, PublishJobEventResponse,
-    StartJobRequest, StartJobResponse, StreamJobEventsRequest, Timestamp, ErrorDetail, ErrorCode,
+    CancelJobRequest, CancelJobResponse, ErrorCode, ErrorDetail, GetJobRequest, GetJobResponse, Id,
+    Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter,
+    JobLogAppended, JobProgress, JobProgressUpdated, JobRef, JobState, JobStateChanged, KeyValue,
+    ListJobHistoryRequest, ListJobHistoryResponse, ListJobsRequest, ListJobsResponse, LogChunk,
+    PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation,
+    StartJobRequest, StartJobResponse, StreamJobEventsRequest, Timestamp,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const HISTORY_CAPACITY: usize = 2048;
+const STATE_FILE_NAME: &str = "jobs.json";
+const DEFAULT_JOB_HISTORY_RETENTION_DAYS: u64 = 30;
+const DEFAULT_JOB_HISTORY_MAX: usize = 200;
+const PERSIST_DEBOUNCE_MS: u64 = 250;
+const RETENTION_TICK_SECS: u64 = 300;
+const DEFAULT_PAGE_SIZE: usize = 50;
+const MAX_PAGE_SIZE: usize = 200;
+
+#[derive(Clone, Copy)]
+struct RetentionPolicy {
+    max_jobs: usize,
+    max_age: Option<Duration>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct JobStateFile {
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
+    jobs: Vec<PersistedJob>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedJob {
+    job_id: String,
+    job_type: String,
+    state: i32,
+    created_at_unix_millis: i64,
+    started_at_unix_millis: Option<i64>,
+    finished_at_unix_millis: Option<i64>,
+    display_name: String,
+    correlation_id: String,
+    project_id: Option<String>,
+    target_id: Option<String>,
+    toolchain_set_id: Option<String>,
+    history: Vec<PersistedEvent>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PersistedEvent {
+    at_unix_millis: i64,
+    payload: PersistedEventPayload,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum PersistedEventPayload {
+    StateChanged { new_state: i32 },
+    Progress { progress: Option<PersistedJobProgress> },
+    Log { chunk: Option<PersistedLogChunk> },
+    Completed { summary: String, outputs: Vec<KeyValueRecord> },
+    Failed { error: Option<ErrorDetailRecord> },
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedJobProgress {
+    percent: u32,
+    phase: String,
+    metrics: Vec<KeyValueRecord>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedLogChunk {
+    stream: String,
+    data: Vec<u8>,
+    truncated: bool,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct KeyValueRecord {
+    key: String,
+    value: String,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct RemediationRecord {
+    title: String,
+    description: String,
+    action_id: String,
+    params: Vec<KeyValueRecord>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct ErrorDetailRecord {
+    code: i32,
+    message: String,
+    technical_details: String,
+    remedies: Vec<RemediationRecord>,
+    correlation_id: String,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl KeyValueRecord {
+    fn from_proto(item: &KeyValue) -> Self {
+        Self {
+            key: item.key.clone(),
+            value: item.value.clone(),
+        }
+    }
+
+    fn into_proto(self) -> KeyValue {
+        KeyValue {
+            key: self.key,
+            value: self.value,
+        }
+    }
+}
+
+impl RemediationRecord {
+    fn from_proto(item: &Remediation) -> Self {
+        Self {
+            title: item.title.clone(),
+            description: item.description.clone(),
+            action_id: item.action_id.clone(),
+            params: item.params.iter().map(KeyValueRecord::from_proto).collect(),
+        }
+    }
+
+    fn into_proto(self) -> Remediation {
+        Remediation {
+            title: self.title,
+            description: self.description,
+            action_id: self.action_id,
+            params: self
+                .params
+                .into_iter()
+                .map(KeyValueRecord::into_proto)
+                .collect(),
+        }
+    }
+}
+
+impl ErrorDetailRecord {
+    fn from_proto(item: &ErrorDetail) -> Self {
+        Self {
+            code: item.code,
+            message: item.message.clone(),
+            technical_details: item.technical_details.clone(),
+            remedies: item
+                .remedies
+                .iter()
+                .map(RemediationRecord::from_proto)
+                .collect(),
+            correlation_id: item.correlation_id.clone(),
+        }
+    }
+
+    fn into_proto(self) -> ErrorDetail {
+        ErrorDetail {
+            code: self.code,
+            message: self.message,
+            technical_details: self.technical_details,
+            remedies: self
+                .remedies
+                .into_iter()
+                .map(RemediationRecord::into_proto)
+                .collect(),
+            correlation_id: self.correlation_id,
+        }
+    }
+}
+
+impl PersistedJobProgress {
+    fn from_proto(item: &JobProgress) -> Self {
+        Self {
+            percent: item.percent,
+            phase: item.phase.clone(),
+            metrics: item
+                .metrics
+                .iter()
+                .map(KeyValueRecord::from_proto)
+                .collect(),
+        }
+    }
+
+    fn into_proto(self) -> JobProgress {
+        JobProgress {
+            percent: self.percent,
+            phase: self.phase,
+            metrics: self
+                .metrics
+                .into_iter()
+                .map(KeyValueRecord::into_proto)
+                .collect(),
+        }
+    }
+}
+
+impl PersistedLogChunk {
+    fn from_proto(item: &LogChunk) -> Self {
+        Self {
+            stream: item.stream.clone(),
+            data: item.data.clone(),
+            truncated: item.truncated,
+        }
+    }
+
+    fn into_proto(self) -> LogChunk {
+        LogChunk {
+            stream: self.stream,
+            data: self.data,
+            truncated: self.truncated,
+        }
+    }
+}
+
+impl PersistedEventPayload {
+    fn from_proto(payload: &aadk_proto::aadk::v1::job_event::Payload) -> Self {
+        match payload {
+            aadk_proto::aadk::v1::job_event::Payload::StateChanged(state) => {
+                PersistedEventPayload::StateChanged {
+                    new_state: state.new_state,
+                }
+            }
+            aadk_proto::aadk::v1::job_event::Payload::Progress(progress) => {
+                PersistedEventPayload::Progress {
+                    progress: progress
+                        .progress
+                        .as_ref()
+                        .map(PersistedJobProgress::from_proto),
+                }
+            }
+            aadk_proto::aadk::v1::job_event::Payload::Log(log) => PersistedEventPayload::Log {
+                chunk: log.chunk.as_ref().map(PersistedLogChunk::from_proto),
+            },
+            aadk_proto::aadk::v1::job_event::Payload::Completed(done) => {
+                PersistedEventPayload::Completed {
+                    summary: done.summary.clone(),
+                    outputs: done.outputs.iter().map(KeyValueRecord::from_proto).collect(),
+                }
+            }
+            aadk_proto::aadk::v1::job_event::Payload::Failed(failed) => {
+                PersistedEventPayload::Failed {
+                    error: failed.error.as_ref().map(ErrorDetailRecord::from_proto),
+                }
+            }
+        }
+    }
+
+    fn into_proto(self) -> aadk_proto::aadk::v1::job_event::Payload {
+        match self {
+            PersistedEventPayload::StateChanged { new_state } => {
+                aadk_proto::aadk::v1::job_event::Payload::StateChanged(JobStateChanged {
+                    new_state,
+                })
+            }
+            PersistedEventPayload::Progress { progress } => {
+                aadk_proto::aadk::v1::job_event::Payload::Progress(JobProgressUpdated {
+                    progress: progress.map(PersistedJobProgress::into_proto),
+                })
+            }
+            PersistedEventPayload::Log { chunk } => {
+                aadk_proto::aadk::v1::job_event::Payload::Log(JobLogAppended {
+                    chunk: chunk.map(PersistedLogChunk::into_proto),
+                })
+            }
+            PersistedEventPayload::Completed { summary, outputs } => {
+                aadk_proto::aadk::v1::job_event::Payload::Completed(JobCompleted {
+                    summary,
+                    outputs: outputs
+                        .into_iter()
+                        .map(KeyValueRecord::into_proto)
+                        .collect(),
+                })
+            }
+            PersistedEventPayload::Failed { error } => {
+                aadk_proto::aadk::v1::job_event::Payload::Failed(JobFailed {
+                    error: error.map(ErrorDetailRecord::into_proto),
+                })
+            }
+        }
+    }
+}
+
+impl PersistedEvent {
+    fn from_proto(event: &JobEvent) -> Option<Self> {
+        let payload = event.payload.as_ref()?;
+        let at_unix_millis = event.at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+        Some(Self {
+            at_unix_millis,
+            payload: PersistedEventPayload::from_proto(payload),
+        })
+    }
+
+    fn into_proto(self, job_id: &str) -> JobEvent {
+        JobEvent {
+            at: Some(Timestamp {
+                unix_millis: self.at_unix_millis,
+            }),
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
+            payload: Some(self.payload.into_proto()),
+        }
+    }
+}
+
+impl PersistedJob {
+    fn from_inner(job_id: &str, inner: &JobRecordInner) -> Self {
+        let job = &inner.job;
+        Self {
+            job_id: job_id.to_string(),
+            job_type: job.job_type.clone(),
+            state: job.state,
+            created_at_unix_millis: job
+                .created_at
+                .as_ref()
+                .map(|ts| ts.unix_millis)
+                .unwrap_or_default(),
+            started_at_unix_millis: job.started_at.as_ref().map(|ts| ts.unix_millis),
+            finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
+            display_name: job.display_name.clone(),
+            correlation_id: job.correlation_id.clone(),
+            project_id: job.project_id.as_ref().map(|id| id.value.clone()),
+            target_id: job.target_id.as_ref().map(|id| id.value.clone()),
+            toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()),
+            history: inner
+                .history
+                .iter()
+                .filter_map(PersistedEvent::from_proto)
+                .collect(),
+        }
+    }
+
+    fn into_inner(self) -> JobRecordInner {
+        let PersistedJob {
+            job_id,
+            job_type,
+            state,
+            created_at_unix_millis,
+            started_at_unix_millis,
+            finished_at_unix_millis,
+            display_name,
+            correlation_id,
+            project_id,
+            target_id,
+            toolchain_set_id,
+            mut history,
+        } = self;
+
+        if history.len() > HISTORY_CAPACITY {
+            let trim = history.len() - HISTORY_CAPACITY;
+            history.drain(0..trim);
+        }
+
+        let mut deque = VecDeque::with_capacity(HISTORY_CAPACITY);
+        for evt in history {
+            deque.push_back(evt.into_proto(&job_id));
+        }
+
+        let (btx, _brx) = broadcast::channel::<JobEvent>(BROADCAST_CAPACITY);
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+
+        let correlation = if correlation_id.is_empty() {
+            job_id.clone()
+        } else {
+            correlation_id
+        };
+
+        let job = Job {
+            job_id: Some(Id { value: job_id.clone() }),
+            job_type,
+            state,
+            created_at: Some(Timestamp {
+                unix_millis: created_at_unix_millis,
+            }),
+            started_at: started_at_unix_millis.map(|ms| Timestamp { unix_millis: ms }),
+            finished_at: finished_at_unix_millis.map(|ms| Timestamp { unix_millis: ms }),
+            display_name,
+            correlation_id: correlation,
+            project_id: project_id.map(|value| Id { value }),
+            target_id: target_id.map(|value| Id { value }),
+            toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
+        };
+
+        JobRecordInner {
+            job,
+            broadcaster: btx,
+            history: deque,
+            cancel_tx,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(
+            JobState::try_from(self.state).unwrap_or(JobState::Unspecified),
+            JobState::Queued | JobState::Running
+        )
+    }
+
+    fn sort_key(&self) -> i64 {
+        self.finished_at_unix_millis
+            .unwrap_or(self.created_at_unix_millis)
+    }
+}
 
 fn is_known_job_type(job_type: &str) -> bool {
     matches!(
@@ -35,12 +450,170 @@ fn is_known_job_type(job_type: &str) -> bool {
     )
 }
 
-fn now_ts() -> Timestamp {
-    let ms = std::time::SystemTime::now()
+fn now_millis() -> i64 {
+    SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64;
-    Timestamp { unix_millis: ms }
+        .as_millis() as i64
+}
+
+fn now_ts() -> Timestamp {
+    Timestamp {
+        unix_millis: now_millis(),
+    }
+}
+
+fn parse_page(page: Option<Pagination>) -> Result<(usize, usize), Status> {
+    let page = page.unwrap_or_default();
+    let mut page_size = if page.page_size == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        page.page_size as usize
+    };
+    if page_size > MAX_PAGE_SIZE {
+        page_size = MAX_PAGE_SIZE;
+    }
+    let start = if page.page_token.trim().is_empty() {
+        0
+    } else {
+        page.page_token
+            .parse::<usize>()
+            .map_err(|_| Status::invalid_argument("invalid page_token"))?
+    };
+    Ok((start, page_size))
+}
+
+fn millis_from_ts(ts: &Option<Timestamp>) -> Option<i64> {
+    ts.as_ref().map(|ts| ts.unix_millis)
+}
+
+fn job_sort_key(job: &Job) -> i64 {
+    millis_from_ts(&job.finished_at).unwrap_or_else(|| {
+        millis_from_ts(&job.created_at).unwrap_or_default()
+    })
+}
+
+fn job_matches_filter(job: &Job, filter: &JobFilter) -> bool {
+    if !filter.job_types.is_empty()
+        && !filter.job_types.iter().any(|t| t == &job.job_type)
+    {
+        return false;
+    }
+    if !filter.states.is_empty() && !filter.states.contains(&job.state) {
+        return false;
+    }
+    if let Some(after) = filter.created_after.as_ref() {
+        let created = millis_from_ts(&job.created_at).unwrap_or_default();
+        if created < after.unix_millis {
+            return false;
+        }
+    }
+    if let Some(before) = filter.created_before.as_ref() {
+        let created = millis_from_ts(&job.created_at).unwrap_or_default();
+        if created > before.unix_millis {
+            return false;
+        }
+    }
+    if let Some(after) = filter.finished_after.as_ref() {
+        match millis_from_ts(&job.finished_at) {
+            Some(finished) if finished >= after.unix_millis => {}
+            _ => return false,
+        }
+    }
+    if let Some(before) = filter.finished_before.as_ref() {
+        match millis_from_ts(&job.finished_at) {
+            Some(finished) if finished <= before.unix_millis => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn event_kind(event: &JobEvent) -> JobEventKind {
+    match event.payload {
+        Some(aadk_proto::aadk::v1::job_event::Payload::StateChanged(_)) => {
+            JobEventKind::StateChanged
+        }
+        Some(aadk_proto::aadk::v1::job_event::Payload::Progress(_)) => JobEventKind::Progress,
+        Some(aadk_proto::aadk::v1::job_event::Payload::Log(_)) => JobEventKind::Log,
+        Some(aadk_proto::aadk::v1::job_event::Payload::Completed(_)) => JobEventKind::Completed,
+        Some(aadk_proto::aadk::v1::job_event::Payload::Failed(_)) => JobEventKind::Failed,
+        None => JobEventKind::Unspecified,
+    }
+}
+
+fn event_matches_filter(event: &JobEvent, filter: &JobHistoryFilter) -> bool {
+    if !filter.kinds.is_empty() {
+        let kind = event_kind(event) as i32;
+        if !filter.kinds.contains(&kind) {
+            return false;
+        }
+    }
+    if let Some(after) = filter.after.as_ref() {
+        let at = millis_from_ts(&event.at).unwrap_or_default();
+        if at < after.unix_millis {
+            return false;
+        }
+    }
+    if let Some(before) = filter.before.as_ref() {
+        let at = millis_from_ts(&event.at).unwrap_or_default();
+        if at > before.unix_millis {
+            return false;
+        }
+    }
+    true
+}
+
+fn data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/aadk")
+    } else {
+        PathBuf::from("/tmp/aadk")
+    }
+}
+
+fn state_file_path() -> PathBuf {
+    data_dir().join("state").join(STATE_FILE_NAME)
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, payload)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn read_env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn read_env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn retention_policy_from_env() -> RetentionPolicy {
+    let retention_days =
+        read_env_u64("AADK_JOB_HISTORY_RETENTION_DAYS", DEFAULT_JOB_HISTORY_RETENTION_DAYS);
+    let max_jobs = read_env_usize("AADK_JOB_HISTORY_MAX", DEFAULT_JOB_HISTORY_MAX);
+    let max_age = if retention_days == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(
+            retention_days.saturating_mul(24 * 60 * 60),
+        ))
+    };
+    RetentionPolicy { max_jobs, max_age }
 }
 
 fn mk_event(job_id: &str, payload: aadk_proto::aadk::v1::job_event::Payload) -> JobEvent {
@@ -74,16 +647,163 @@ impl JobStore {
     async fn get(&self, job_id: &str) -> Option<Arc<Mutex<JobRecordInner>>> {
         self.inner.lock().await.get(job_id).cloned()
     }
+
+    async fn list_jobs(&self) -> Vec<Job> {
+        let entries = {
+            let inner = self.inner.lock().await;
+            inner.values().cloned().collect::<Vec<_>>()
+        };
+        let mut jobs = Vec::with_capacity(entries.len());
+        for rec in entries {
+            let inner = rec.lock().await;
+            jobs.push(inner.job.clone());
+        }
+        jobs
+    }
+
+    async fn snapshot(&self) -> Vec<PersistedJob> {
+        let entries = {
+            let inner = self.inner.lock().await;
+            inner
+                .iter()
+                .map(|(job_id, rec)| (job_id.clone(), rec.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut jobs = Vec::with_capacity(entries.len());
+        for (job_id, rec) in entries {
+            let inner = rec.lock().await;
+            jobs.push(PersistedJob::from_inner(&job_id, &inner));
+        }
+        jobs
+    }
+
+    async fn prune_to(&self, keep_ids: &HashSet<String>) {
+        let mut inner = self.inner.lock().await;
+        inner.retain(|job_id, _| keep_ids.contains(job_id));
+    }
+}
+
+fn load_state_file() -> JobStateFile {
+    let path = state_file_path();
+    match fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<JobStateFile>(&data) {
+            Ok(file) => file,
+            Err(err) => {
+                warn!("Failed to parse {}: {}", path.display(), err);
+                JobStateFile::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!("Failed to read {}: {}", path.display(), err);
+            }
+            JobStateFile::default()
+        }
+    }
+}
+
+fn apply_retention(jobs: &mut Vec<PersistedJob>, policy: &RetentionPolicy) {
+    let now_ms = now_millis();
+    let max_age_ms = policy.max_age.map(|age| age.as_millis() as i64);
+    let mut active = Vec::new();
+    let mut completed = Vec::new();
+
+    for job in jobs.drain(..) {
+        if job.is_active() {
+            active.push(job);
+        } else {
+            completed.push(job);
+        }
+    }
+
+    if let Some(max_age_ms) = max_age_ms {
+        completed.retain(|job| now_ms.saturating_sub(job.sort_key()) <= max_age_ms);
+    }
+
+    if policy.max_jobs != 0 {
+        let max_completed = policy.max_jobs.saturating_sub(active.len());
+        if completed.len() > max_completed {
+            completed.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()));
+            completed.truncate(max_completed);
+        }
+    }
+
+    let mut kept = Vec::new();
+    kept.extend(active);
+    kept.extend(completed);
+    kept.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()));
+    *jobs = kept;
+}
+
+async fn load_store(policy: &RetentionPolicy) -> JobStore {
+    let mut state = load_state_file();
+    apply_retention(&mut state.jobs, policy);
+    let count = state.jobs.len();
+    let store = JobStore::default();
+
+    for job in state.jobs {
+        let job_id = job.job_id.clone();
+        store.insert(&job_id, job.into_inner()).await;
+    }
+
+    if count > 0 {
+        info!("Loaded {} job(s) from {}", count, state_file_path().display());
+    }
+
+    store
+}
+
+async fn persist_state(store: &JobStore, policy: RetentionPolicy) -> io::Result<()> {
+    let mut jobs = store.snapshot().await;
+    apply_retention(&mut jobs, &policy);
+    let keep_ids: HashSet<String> = jobs.iter().map(|job| job.job_id.clone()).collect();
+    store.prune_to(&keep_ids).await;
+
+    let file = JobStateFile {
+        schema_version: default_schema_version(),
+        jobs,
+    };
+    write_json_atomic(&state_file_path(), &file)
+}
+
+fn spawn_persist_worker(store: JobStore, policy: RetentionPolicy) -> mpsc::Sender<()> {
+    let (tx, mut rx) = mpsc::channel::<()>(32);
+    tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            tokio::time::sleep(Duration::from_millis(PERSIST_DEBOUNCE_MS)).await;
+            while rx.try_recv().is_ok() {}
+            if let Err(err) = persist_state(&store, policy).await {
+                warn!("Failed to persist job history: {}", err);
+            }
+        }
+    });
+    tx
+}
+
+fn spawn_retention_tick(tx: mpsc::Sender<()>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(RETENTION_TICK_SECS));
+        loop {
+            ticker.tick().await;
+            let _ = tx.try_send(());
+        }
+    });
 }
 
 #[derive(Clone)]
 struct JobSvc {
     store: JobStore,
+    persist_tx: mpsc::Sender<()>,
 }
 
 impl JobSvc {
-    fn new(store: JobStore) -> Self {
-        Self { store }
+    fn new(store: JobStore, persist_tx: mpsc::Sender<()>) -> Self {
+        Self { store, persist_tx }
+    }
+
+    fn schedule_persist(&self) {
+        let _ = self.persist_tx.try_send(());
     }
 
     async fn update_state_only(&self, job_id: &str, state: JobState) {
@@ -97,22 +817,25 @@ impl JobSvc {
                 }
                 _ => {}
             }
+            self.schedule_persist();
         }
     }
 
     async fn publish(&self, job_id: &str, payload: aadk_proto::aadk::v1::job_event::Payload) {
         if let Some(rec) = self.store.get(job_id).await {
-            let mut inner = rec.lock().await;
             let evt = mk_event(job_id, payload);
+            {
+                let mut inner = rec.lock().await;
+                // Maintain bounded history.
+                if inner.history.len() >= HISTORY_CAPACITY {
+                    inner.history.pop_front();
+                }
+                inner.history.push_back(evt.clone());
 
-            // Maintain bounded history.
-            if inner.history.len() >= HISTORY_CAPACITY {
-                inner.history.pop_front();
+                // Broadcast (ignore send errors if no listeners).
+                let _ = inner.broadcaster.send(evt);
             }
-            inner.history.push_back(evt.clone());
-
-            // Broadcast (ignore send errors if no listeners).
-            let _ = inner.broadcaster.send(evt);
+            self.schedule_persist();
         }
     }
 
@@ -140,7 +863,8 @@ impl JobSvc {
 
         self.set_state(&job_id, JobState::Running).await;
 
-        for step in 1..=10u32 {
+        let total_steps = 10u32;
+        for step in 1..=total_steps {
             // Cancellation check (cheap and deterministic).
             if *cancel_rx.borrow() {
                 self.set_state(&job_id, JobState::Cancelled).await;
@@ -169,10 +893,16 @@ impl JobSvc {
                     progress: Some(JobProgress {
                         percent: pct,
                         phase: format!("Demo phase {step}"),
-                        metrics: vec![KeyValue {
-                            key: "step".into(),
-                            value: step.to_string(),
-                        }],
+                        metrics: vec![
+                            KeyValue {
+                                key: "step".into(),
+                                value: step.to_string(),
+                            },
+                            KeyValue {
+                                key: "total_steps".into(),
+                                value: total_steps.to_string(),
+                            },
+                        ],
                     }),
                 }),
             )
@@ -251,6 +981,7 @@ impl JobService for JobSvc {
         };
 
         self.store.insert(&job_id, rec).await;
+        self.schedule_persist();
 
         // Start known jobs.
         if job_type == "demo.job" {
@@ -415,6 +1146,71 @@ impl JobService for JobSvc {
 
         Ok(Response::new(PublishJobEventResponse { accepted: true }))
     }
+
+    async fn list_jobs(
+        &self,
+        request: Request<ListJobsRequest>,
+    ) -> Result<Response<ListJobsResponse>, Status> {
+        let req = request.into_inner();
+        let (start, page_size) = parse_page(req.page)?;
+        let filter = req.filter.unwrap_or_default();
+
+        let mut jobs = self.store.list_jobs().await;
+        jobs.retain(|job| job_matches_filter(job, &filter));
+        jobs.sort_by(|a, b| job_sort_key(b).cmp(&job_sort_key(a)));
+
+        let total = jobs.len();
+        if start >= total && total != 0 {
+            return Err(Status::invalid_argument("page_token out of range"));
+        }
+        let end = (start + page_size).min(total);
+        let items = jobs[start..end].to_vec();
+        let next_token = if end < total { end.to_string() } else { String::new() };
+
+        Ok(Response::new(ListJobsResponse {
+            jobs: items,
+            page_info: Some(PageInfo {
+                next_page_token: next_token,
+            }),
+        }))
+    }
+
+    async fn list_job_history(
+        &self,
+        request: Request<ListJobHistoryRequest>,
+    ) -> Result<Response<ListJobHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let job_id = req.job_id.map(|id| id.value).unwrap_or_default();
+        if job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id is required"));
+        }
+        let rec = self.store.get(&job_id).await.ok_or_else(|| {
+            Status::not_found(format!("Job not found: {job_id}"))
+        })?;
+        let (start, page_size) = parse_page(req.page)?;
+        let filter = req.filter.unwrap_or_default();
+
+        let mut events = {
+            let inner = rec.lock().await;
+            inner.history.iter().cloned().collect::<Vec<_>>()
+        };
+        events.retain(|event| event_matches_filter(event, &filter));
+
+        let total = events.len();
+        if start >= total && total != 0 {
+            return Err(Status::invalid_argument("page_token out of range"));
+        }
+        let end = (start + page_size).min(total);
+        let items = events[start..end].to_vec();
+        let next_token = if end < total { end.to_string() } else { String::new() };
+
+        Ok(Response::new(ListJobHistoryResponse {
+            events: items,
+            page_info: Some(PageInfo {
+                next_page_token: next_token,
+            }),
+        }))
+    }
 }
 
 #[tokio::main]
@@ -426,8 +1222,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr_str = std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
     let addr: SocketAddr = addr_str.parse()?;
 
-    let store = JobStore::default();
-    let svc = JobSvc::new(store);
+    let retention = retention_policy_from_env();
+    let store = load_store(&retention).await;
+    let persist_tx = spawn_persist_worker(store.clone(), retention);
+    spawn_retention_tick(persist_tx.clone());
+    let svc = JobSvc::new(store, persist_tx.clone());
+    let _ = persist_tx.try_send(());
 
     info!("aadk-core (JobService) listening on {}", addr);
 
