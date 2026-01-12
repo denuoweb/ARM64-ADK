@@ -23,6 +23,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - Cuttlefish install can accept per-request branch/target/build_id overrides; build resolution is
   exposed via ResolveCuttlefishBuild.
 - Cuttlefish operations run external commands and report state via JobService events.
+- Job progress metrics include target/app identifiers, adb serials, install/launch inputs, and Cuttlefish env/artifact details.
 - InstallApk, Launch, StopApp, and Cuttlefish job RPCs accept optional job_id for existing jobs.
 - Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
 - Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.

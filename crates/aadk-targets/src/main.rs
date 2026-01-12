@@ -1664,6 +1664,13 @@ async fn publish_progress(
     .await
 }
 
+fn metric(key: &str, value: impl ToString) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
 async fn publish_log(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -1755,7 +1762,11 @@ async fn ensure_target_ready(
                 job_id,
                 20,
                 "target online",
-                vec![KeyValue { key: "state".into(), value: state }],
+                vec![
+                    metric("target_id", target_id),
+                    metric("adb_serial", &canonical),
+                    metric("state", state),
+                ],
             )
             .await;
             Some(canonical)
@@ -1815,7 +1826,10 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
         &job_id,
         10,
         "checking target",
-        vec![KeyValue { key: "target_id".into(), value: target_id.clone() }],
+        vec![
+            metric("target_id", &target_id),
+            metric("apk_path", &apk_path),
+        ],
     )
     .await;
 
@@ -1839,7 +1853,11 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
         &job_id,
         55,
         "adb install",
-        vec![KeyValue { key: "apk_path".into(), value: apk_path.clone() }],
+        vec![
+            metric("adb_serial", &target_id),
+            metric("apk_path", &apk_path),
+            metric("replace", true),
+        ],
     )
     .await;
 
@@ -1904,7 +1922,11 @@ async fn run_launch_job(job_id: String, target_id: String, application_id: Strin
         &job_id,
         10,
         "checking target",
-        vec![KeyValue { key: "target_id".into(), value: target_id.clone() }],
+        vec![
+            metric("target_id", &target_id),
+            metric("application_id", &application_id),
+            metric("activity", &activity),
+        ],
     )
     .await;
 
@@ -1923,7 +1945,18 @@ async fn run_launch_job(job_id: String, target_id: String, application_id: Strin
         return;
     }
 
-    let _ = publish_progress(&mut job_client, &job_id, 60, "adb launch", vec![]).await;
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        60,
+        "adb launch",
+        vec![
+            metric("adb_serial", &target_id),
+            metric("application_id", &application_id),
+            metric("activity", &activity),
+        ],
+    )
+    .await;
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Launch cancelled\n").await;
@@ -2016,7 +2049,10 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
         &job_id,
         10,
         "checking target",
-        vec![KeyValue { key: "target_id".into(), value: target_id.clone() }],
+        vec![
+            metric("target_id", &target_id),
+            metric("application_id", &application_id),
+        ],
     )
     .await;
 
@@ -2034,6 +2070,18 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
         let _ = publish_log(&mut job_client, &job_id, "Stop cancelled\n").await;
         return;
     }
+
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        60,
+        "adb stop",
+        vec![
+            metric("adb_serial", &target_id),
+            metric("application_id", &application_id),
+        ],
+    )
+    .await;
 
     let args = [
         "-s",
@@ -2270,7 +2318,11 @@ async fn run_cuttlefish_command(
     percent: u32,
     cwd: Option<&Path>,
 ) -> Result<CuttlefishCommandOutcome, ErrorDetail> {
-    let _ = publish_progress(job_client, job_id, percent, phase, vec![]).await;
+    let mut metrics = vec![metric("command", command)];
+    if let Some(dir) = cwd {
+        metrics.push(metric("cwd", dir.display()));
+    }
+    let _ = publish_progress(job_client, job_id, percent, phase, metrics).await;
     let _ = publish_log(job_client, job_id, &format!("Running: {command}\n")).await;
 
     let result = match cwd {
@@ -2612,10 +2664,19 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
 
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Starting Cuttlefish\n").await;
-    let _ = publish_progress(&mut job_client, &job_id, 5, "checking cuttlefish", vec![]).await;
-
     let mut need_start = true;
     let mut adb_serial = cuttlefish_adb_serial();
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        5,
+        "checking cuttlefish",
+        vec![
+            metric("show_full_ui", show_full_ui),
+            metric("adb_serial_hint", &adb_serial),
+        ],
+    )
+    .await;
     match cuttlefish_status().await {
         Ok(status) => {
             if !status.adb_serial.is_empty() {
@@ -2837,7 +2898,11 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
                 &job_id,
                 70,
                 "waiting for device",
-                vec![KeyValue { key: "attempt".into(), value: (attempt + 1).to_string() }],
+                vec![
+                    metric("attempt", attempt + 1),
+                    metric("max_attempts", max_attempts),
+                    metric("adb_serial", &adb_serial),
+                ],
             )
             .await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -2897,7 +2962,15 @@ async fn run_cuttlefish_stop_job(job_id: String) {
 
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Stopping Cuttlefish\n").await;
-    let _ = publish_progress(&mut job_client, &job_id, 10, "stopping", vec![]).await;
+    let adb_serial = cuttlefish_adb_serial();
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        10,
+        "stopping",
+        vec![metric("adb_serial_hint", adb_serial)],
+    )
+    .await;
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled\n").await;
@@ -2988,7 +3061,6 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
 
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Installing Cuttlefish\n").await;
-    let _ = publish_progress(&mut job_client, &job_id, 5, "checking environment", vec![]).await;
 
     let page_size = host_page_size();
     let home_dir = cuttlefish_home_dir(page_size);
@@ -2998,6 +3070,23 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
     let host_installed = cuttlefish_cvd_path().is_some() || cuttlefish_launch_path(page_size).is_some();
     let images_ready = cuttlefish_images_ready(&images_dir);
     let kvm_status = kvm_status();
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        5,
+        "checking environment",
+        vec![
+            metric("page_size", page_size.unwrap_or_default()),
+            metric("home_dir", home_dir.display()),
+            metric("images_dir", images_dir.display()),
+            metric("host_dir", host_dir.display()),
+            metric("host_installed", host_installed),
+            metric("images_ready", images_ready),
+            metric("kvm_present", kvm_status.present),
+            metric("kvm_accessible", kvm_status.accessible),
+        ],
+    )
+    .await;
 
     if cuttlefish_kvm_check_enabled() {
         let _ = publish_log(
@@ -3101,7 +3190,17 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         };
 
         let _ = publish_log(&mut job_client, &job_id, &format!("Install command: {install_cmd}\n")).await;
-        let _ = publish_progress(&mut job_client, &job_id, 30, "installing host tools", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            30,
+            "installing host tools",
+            vec![
+                metric("force", options.force),
+                metric("install_cmd", &install_cmd),
+            ],
+        )
+        .await;
 
         if cancel_requested(&cancel_rx) {
             let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
@@ -3371,7 +3470,21 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         let img_path = downloads_dir.join(&img_artifact);
         let host_path = downloads_dir.join(&host_artifact);
 
-        let _ = publish_progress(&mut job_client, &job_id, 55, "downloading images", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            55,
+            "downloading images",
+            vec![
+                metric("branch", &branch),
+                metric("target", &target),
+                metric("build_id", &build_id),
+                metric("product", &product),
+                metric("image_url", &img_url),
+                metric("image_path", img_path.display()),
+            ],
+        )
+        .await;
         let img_cmd = format!(
             "curl -fL {} -o {}",
             shell_escape(&img_url),
@@ -3392,7 +3505,21 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             return;
         }
 
-        let _ = publish_progress(&mut job_client, &job_id, 60, "downloading host package", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            60,
+            "downloading host package",
+            vec![
+                metric("branch", &branch),
+                metric("target", &target),
+                metric("build_id", &build_id),
+                metric("product", &product),
+                metric("host_url", &host_url),
+                metric("host_path", host_path.display()),
+            ],
+        )
+        .await;
         let host_cmd = format!(
             "curl -fL {} -o {}",
             shell_escape(&host_url),
@@ -3416,7 +3543,17 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         let _ = std::fs::create_dir_all(&images_dir);
         let _ = std::fs::create_dir_all(&host_dir);
 
-        let _ = publish_progress(&mut job_client, &job_id, 70, "extracting images", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            70,
+            "extracting images",
+            vec![
+                metric("image_path", img_path.display()),
+                metric("images_dir", images_dir.display()),
+            ],
+        )
+        .await;
         let unzip_cmd = format!(
             "unzip -o {} -d {}",
             shell_escape(&img_path.display().to_string()),
@@ -3449,7 +3586,17 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             }
         }
 
-        let _ = publish_progress(&mut job_client, &job_id, 80, "extracting host tools", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            80,
+            "extracting host tools",
+            vec![
+                metric("host_path", host_path.display()),
+                metric("host_dir", host_dir.display()),
+            ],
+        )
+        .await;
         let tar_cmd = format!(
             "tar -xzf {} -C {}",
             shell_escape(&host_path.display().to_string()),
