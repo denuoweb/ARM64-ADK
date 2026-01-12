@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fs,
     io,
     net::SocketAddr,
@@ -15,10 +15,11 @@ use aadk_proto::aadk::v1::{
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
     project_service_client::ProjectServiceClient,
-    Artifact, BuildRequest, BuildResponse, BuildVariant, ErrorCode, ErrorDetail, Id, JobCompleted,
-    JobEvent, JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged,
-    KeyValue, ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest,
-    StartJobRequest, StreamJobEventsRequest, GetJobRequest, GetProjectRequest,
+    Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildResponse, BuildVariant, ErrorCode,
+    ErrorDetail, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
+    JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListArtifactsRequest,
+    ListArtifactsResponse, LogChunk, PublishJobEventRequest, StartJobRequest,
+    StreamJobEventsRequest, GetJobRequest, GetProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,7 +47,10 @@ struct BuildState {
 struct BuildRecord {
     job_id: String,
     project_id: String,
+    module: String,
     variant: i32,
+    variant_name: String,
+    tasks: Vec<String>,
     created_at_unix_millis: i64,
     project_path: String,
     artifacts: Vec<ArtifactRecord>,
@@ -59,6 +63,7 @@ struct ArtifactRecord {
     path: String,
     size_bytes: u64,
     sha256: String,
+    artifact_type: i32,
     metadata: Vec<KeyValueRecord>,
 }
 
@@ -105,6 +110,7 @@ impl ArtifactRecord {
             path: item.path.clone(),
             size_bytes: item.size_bytes,
             sha256: item.sha256.clone(),
+            artifact_type: item.r#type,
             metadata: item
                 .metadata
                 .iter()
@@ -119,6 +125,7 @@ impl ArtifactRecord {
             path: self.path,
             size_bytes: self.size_bytes,
             sha256: self.sha256,
+            r#type: self.artifact_type,
             metadata: self
                 .metadata
                 .into_iter()
@@ -326,6 +333,55 @@ async fn publish_progress(
     .await
 }
 
+fn metric(key: &str, value: impl ToString) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn build_progress_metrics(
+    project_id: &str,
+    project_path: &Path,
+    plan: &BuildPlan,
+    req: &BuildRequest,
+    args: &[String],
+) -> Vec<KeyValue> {
+    let mut metrics = vec![
+        metric("project_id", project_id),
+        metric("project_path", project_path.display()),
+        metric("variant", plan.variant.label.clone()),
+        metric("clean_first", req.clean_first),
+    ];
+
+    if let Some(module) = plan.module.as_ref() {
+        if !module.trim().is_empty() {
+            metrics.push(metric("module", module));
+        }
+    }
+
+    if !plan.tasks.is_empty() {
+        metrics.push(metric("tasks", plan.tasks.join(" ")));
+        metrics.push(metric("task_count", plan.tasks.len()));
+    }
+
+    if !args.is_empty() {
+        metrics.push(metric("gradle_args", args.join(" ")));
+        metrics.push(metric("gradle_arg_count", args.len()));
+    }
+
+    metrics
+}
+
+fn artifact_type_summary(artifacts: &[Artifact]) -> String {
+    let mut types = BTreeSet::new();
+    for artifact in artifacts {
+        let kind = ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+        types.insert(artifact_type_label(kind).to_string());
+    }
+    types.into_iter().collect::<Vec<_>>().join(",")
+}
+
 async fn publish_log(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -455,12 +511,18 @@ fn build_record(
     project_id: &str,
     project_path: &Path,
     variant: BuildVariant,
+    variant_name: &str,
+    module: Option<&str>,
+    tasks: &[String],
     artifacts: &[Artifact],
 ) -> BuildRecord {
     BuildRecord {
         job_id: job_id.to_string(),
         project_id: project_id.to_string(),
+        module: module.unwrap_or_default().to_string(),
         variant: variant as i32,
+        variant_name: variant_name.to_string(),
+        tasks: tasks.to_vec(),
         created_at_unix_millis: now_millis(),
         project_path: project_path.to_string_lossy().to_string(),
         artifacts: artifacts.iter().map(ArtifactRecord::from_proto).collect(),
@@ -475,19 +537,49 @@ fn upsert_build_record(state: &mut BuildState, record: BuildRecord) {
     }
 }
 
+fn record_variant_label(record: &BuildRecord) -> Option<String> {
+    if !record.variant_name.trim().is_empty() {
+        return Some(record.variant_name.trim().to_string());
+    }
+    let variant = BuildVariant::try_from(record.variant).unwrap_or(BuildVariant::Unspecified);
+    if variant == BuildVariant::Unspecified {
+        return None;
+    }
+    Some(variant_label(variant).to_string())
+}
+
 fn find_latest_record<'a>(
     state: &'a BuildState,
     project_id: &str,
-    variant: BuildVariant,
+    query: &ArtifactQuery,
 ) -> Option<&'a BuildRecord> {
     state.records.iter().find(|record| {
         if record.project_id != project_id {
             return false;
         }
-        if variant == BuildVariant::Unspecified {
-            return true;
+
+        if !query.modules.is_empty() {
+            let record_module = normalize_module_for_compare(&record.module);
+            if !query
+                .modules
+                .iter()
+                .any(|module| normalize_module_for_compare(module) == record_module)
+            {
+                return false;
+            }
         }
-        record.variant == variant as i32
+
+        if let Some(variant) = query.variant.as_ref() {
+            let record_variant = match record_variant_label(record) {
+                Some(value) => value,
+                None => return false,
+            };
+            if !record_variant.eq_ignore_ascii_case(variant) {
+                return false;
+            }
+        }
+
+        true
     })
 }
 
@@ -559,17 +651,181 @@ fn variant_label(variant: BuildVariant) -> &'static str {
     }
 }
 
-fn tasks_for_variant(variant: BuildVariant, clean_first: bool) -> Vec<String> {
-    let task = match variant {
-        BuildVariant::Release => "assembleRelease",
-        _ => "assembleDebug",
+fn normalize_module_label(value: &str) -> Result<Option<String>, Status> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let normalized = trimmed.trim_matches(':').replace('/', ":");
+    if normalized.is_empty() {
+        return Err(Status::invalid_argument("module is invalid"));
+    }
+
+    for segment in normalized.split(':') {
+        if segment.is_empty() {
+            return Err(Status::invalid_argument("module contains empty segment"));
+        }
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(Status::invalid_argument(
+                "module contains unsupported characters",
+            ));
+        }
+    }
+
+    Ok(Some(normalized))
+}
+
+fn normalize_module_for_compare(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(':')
+        .replace('/', ":")
+        .to_ascii_lowercase()
+}
+
+fn module_path_from_label(label: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for segment in label.split(':') {
+        if !segment.is_empty() {
+            path.push(segment);
+        }
+    }
+    path
+}
+
+fn module_has_build_file(path: &Path) -> bool {
+    path.join("build.gradle").is_file() || path.join("build.gradle.kts").is_file()
+}
+
+fn module_exists(project_path: &Path, module: &str) -> bool {
+    let module_dir = project_path.join(module_path_from_label(module));
+    module_dir.is_dir() && module_has_build_file(&module_dir)
+}
+
+fn normalize_variant_name(value: &str) -> Result<Option<String>, Status> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\' || c == ':') {
+        return Err(Status::invalid_argument("variant_name contains invalid characters"));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn capitalize_first(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push(first.to_ascii_uppercase());
+    out.push_str(chars.as_str());
+    out
+}
+
+#[derive(Clone)]
+struct VariantSelection {
+    label: String,
+    task_suffix: String,
+}
+
+#[derive(Clone)]
+struct BuildPlan {
+    module: Option<String>,
+    variant: VariantSelection,
+    tasks: Vec<String>,
+}
+
+#[derive(Default, Clone)]
+struct ArtifactQuery {
+    modules: Vec<String>,
+    variant: Option<String>,
+    types: Vec<ArtifactType>,
+    name_contains: Option<String>,
+    path_contains: Option<String>,
+}
+
+fn resolve_variant_selection(req: &BuildRequest) -> Result<VariantSelection, Status> {
+    if let Some(name) = normalize_variant_name(&req.variant_name)? {
+        return Ok(VariantSelection {
+            task_suffix: capitalize_first(&name),
+            label: name,
+        });
+    }
+
+    let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Debug);
+    let label = match variant {
+        BuildVariant::Release => "release",
+        BuildVariant::Debug => "debug",
+        BuildVariant::Unspecified => "debug",
+    };
+    Ok(VariantSelection {
+        label: label.to_string(),
+        task_suffix: capitalize_first(label),
+    })
+}
+
+fn normalized_tasks(tasks: &[String]) -> Vec<String> {
+    tasks
+        .iter()
+        .map(|task| task.trim())
+        .filter(|task| !task.is_empty())
+        .map(|task| task.to_string())
+        .collect()
+}
+
+fn is_clean_task(task: &str) -> bool {
+    task == "clean" || task.ends_with(":clean")
+}
+
+fn tasks_for_selection(
+    module: Option<&str>,
+    variant: &VariantSelection,
+    clean_first: bool,
+    overrides: &[String],
+) -> Vec<String> {
+    let mut tasks = if overrides.is_empty() {
+        vec![format!("assemble{}", variant.task_suffix)]
+    } else {
+        overrides.to_vec()
     };
 
-    if clean_first {
-        vec!["clean".into(), task.into()]
-    } else {
-        vec![task.into()]
+    if clean_first && !tasks.iter().any(|task| is_clean_task(task)) {
+        tasks.insert(0, "clean".into());
     }
+
+    if let Some(module) = module {
+        tasks = tasks
+            .into_iter()
+            .map(|task| {
+                if task.contains(':') || is_clean_task(&task) {
+                    task
+                } else {
+                    format!(":{}:{}", module, task)
+                }
+            })
+            .collect();
+    }
+
+    tasks
+}
+
+fn build_plan_for_request(req: &BuildRequest) -> Result<BuildPlan, Status> {
+    let module = normalize_module_label(&req.module)?;
+    let variant = resolve_variant_selection(req)?;
+    let overrides = normalized_tasks(&req.tasks);
+    let tasks = tasks_for_selection(module.as_deref(), &variant, req.clean_first, &overrides);
+
+    Ok(BuildPlan {
+        module,
+        variant,
+        tasks,
+    })
 }
 
 fn arg_is_flag(args: &[String], flag: &str) -> bool {
@@ -748,37 +1004,116 @@ fn collect_recent(recent: &VecDeque<String>) -> String {
     combined
 }
 
-fn list_apk_roots(project_path: &Path) -> Vec<(Option<String>, PathBuf)> {
+fn module_outputs_exist(module_path: &Path) -> bool {
+    let outputs = [
+        module_path.join("build/outputs/apk"),
+        module_path.join("build/outputs/bundle"),
+        module_path.join("build/outputs/aar"),
+        module_path.join("build/outputs/mapping"),
+        module_path.join("build/test-results"),
+        module_path.join("build/outputs/androidTest-results"),
+    ];
+    outputs.iter().any(|path| path.is_dir())
+}
+
+fn output_roots_for_modules(
+    project_path: &Path,
+    modules: &[String],
+) -> Vec<(Option<String>, PathBuf)> {
     let mut roots = Vec::new();
-    let root_build = project_path.join("build").join("outputs").join("apk");
-    if root_build.is_dir() {
-        roots.push((None, root_build));
+
+    if modules.is_empty() {
+        if module_outputs_exist(project_path) || module_has_build_file(project_path) {
+            roots.push((None, project_path.to_path_buf()));
+        }
+
+        if let Ok(entries) = fs::read_dir(project_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if !module_outputs_exist(&path) && !module_has_build_file(&path) {
+                    continue;
+                }
+                let module_name = entry.file_name().to_string_lossy().to_string();
+                roots.push((Some(module_name), path));
+            }
+        }
+
+        return roots;
     }
 
-    if let Ok(entries) = fs::read_dir(project_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let module_name = entry.file_name().to_string_lossy().to_string();
-            let module_root = path.join("build").join("outputs").join("apk");
-            if module_root.is_dir() {
-                roots.push((Some(module_name), module_root));
-            }
+    for module in modules {
+        let module_dir = project_path.join(module_path_from_label(module));
+        if module_dir.is_dir() {
+            roots.push((Some(module.clone()), module_dir));
         }
     }
 
     roots
 }
 
-fn collect_apk_paths(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+fn output_dirs_for_root(root: &Path) -> Vec<(ArtifactType, PathBuf)> {
+    vec![
+        (ArtifactType::Apk, root.join("build/outputs/apk")),
+        (ArtifactType::Aab, root.join("build/outputs/bundle")),
+        (ArtifactType::Aar, root.join("build/outputs/aar")),
+        (ArtifactType::Mapping, root.join("build/outputs/mapping")),
+        (ArtifactType::TestResult, root.join("build/test-results")),
+        (
+            ArtifactType::TestResult,
+            root.join("build/outputs/androidTest-results"),
+        ),
+    ]
+}
+
+fn variant_search_root(root: &Path, variant: Option<&str>) -> PathBuf {
+    let Some(variant) = variant else {
+        return root.to_path_buf();
+    };
+    let trimmed = variant.trim();
+    if trimmed.is_empty() {
+        return root.to_path_buf();
+    }
+    let candidate = root.join(trimmed);
+    if candidate.is_dir() {
+        return candidate;
+    }
+    let lower = trimmed.to_lowercase();
+    let lower_candidate = root.join(&lower);
+    if lower_candidate.is_dir() {
+        return lower_candidate;
+    }
+    root.to_path_buf()
+}
+
+fn matches_artifact_type(path: &Path, artifact_type: ArtifactType) -> bool {
+    match artifact_type {
+        ArtifactType::Apk => path.extension().map(|e| e == "apk").unwrap_or(false),
+        ArtifactType::Aab => path.extension().map(|e| e == "aab").unwrap_or(false),
+        ArtifactType::Aar => path.extension().map(|e| e == "aar").unwrap_or(false),
+        ArtifactType::Mapping => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("mapping.txt"))
+            .unwrap_or(false),
+        ArtifactType::TestResult => path.extension().map(|e| e == "xml").unwrap_or(false),
+        ArtifactType::Unspecified => false,
+    }
+}
+
+fn collect_artifact_paths(
+    root: &Path,
+    artifact_type: ArtifactType,
+    out: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_apk_paths(&path, out)?;
-        } else if path.extension().map(|e| e == "apk").unwrap_or(false) {
+            collect_artifact_paths(&path, artifact_type, out)?;
+        } else if matches_artifact_type(&path, artifact_type) {
             out.push(path);
         }
     }
@@ -816,81 +1151,224 @@ fn nibble_to_hex(n: u8) -> char {
     }
 }
 
-fn variant_dir(variant: BuildVariant) -> Option<&'static str> {
-    match variant {
-        BuildVariant::Debug => Some("debug"),
-        BuildVariant::Release => Some("release"),
-        BuildVariant::Unspecified => None,
+fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::Apk => "apk",
+        ArtifactType::Aab => "aab",
+        ArtifactType::Aar => "aar",
+        ArtifactType::Mapping => "mapping",
+        ArtifactType::TestResult => "test_result",
+        ArtifactType::Unspecified => "unspecified",
     }
 }
 
-fn collect_artifacts(project_path: &Path, variant: BuildVariant) -> Vec<Artifact> {
+fn artifact_metadata_value<'a>(artifact: &'a Artifact, key: &str) -> Option<&'a str> {
+    artifact
+        .metadata
+        .iter()
+        .find(|item| item.key == key)
+        .map(|item| item.value.as_str())
+}
+
+fn artifact_matches_variant(artifact: &Artifact, variant: &str) -> bool {
+    let trimmed = variant.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if let Some(value) = artifact_metadata_value(artifact, "variant") {
+        if value.eq_ignore_ascii_case(trimmed) {
+            return true;
+        }
+    }
+    let needle = trimmed.to_lowercase();
+    let name = artifact.name.to_lowercase();
+    if name.contains(&needle) {
+        return true;
+    }
+    let path = artifact.path.to_lowercase();
+    path.contains(&needle)
+}
+
+fn artifact_matches(artifact: &Artifact, query: &ArtifactQuery) -> bool {
+    if !query.types.is_empty() {
+        let artifact_type = ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+        if artifact_type == ArtifactType::Unspecified {
+            return false;
+        }
+        if !query.types.iter().any(|t| *t == artifact_type) {
+            return false;
+        }
+    }
+
+    if !query.modules.is_empty() {
+        let Some(module) = artifact_metadata_value(artifact, "module") else {
+            return false;
+        };
+        let module_value = normalize_module_for_compare(module);
+        if !query
+            .modules
+            .iter()
+            .any(|m| normalize_module_for_compare(m) == module_value)
+        {
+            return false;
+        }
+    }
+
+    if let Some(variant) = query.variant.as_ref() {
+        if !artifact_matches_variant(artifact, variant) {
+            return false;
+        }
+    }
+
+    if let Some(name_contains) = query.name_contains.as_ref() {
+        if !artifact.name.to_lowercase().contains(name_contains) {
+            return false;
+        }
+    }
+
+    if let Some(path_contains) = query.path_contains.as_ref() {
+        if !artifact.path.to_lowercase().contains(path_contains) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn collect_artifacts(
+    project_path: &Path,
+    query: &ArtifactQuery,
+    primary_task: Option<&str>,
+) -> Vec<Artifact> {
     let mut artifacts = Vec::new();
-    let roots = list_apk_roots(project_path);
-    let variant_filter = variant_dir(variant);
+    let roots = output_roots_for_modules(project_path, &query.modules);
+    let variant_filter = query.variant.as_deref();
 
     for (module, root) in roots {
-        let search_root = if let Some(dir) = variant_filter {
-            let candidate = root.join(dir);
-            if candidate.is_dir() {
-                candidate
-            } else {
-                root.clone()
-            }
-        } else {
-            root.clone()
-        };
-
-        let mut paths = Vec::new();
-        if collect_apk_paths(&search_root, &mut paths).is_err() {
-            continue;
-        }
-
-        for path in paths {
-            if !path.is_file() {
+        for (artifact_type, output_dir) in output_dirs_for_root(&root) {
+            if !output_dir.is_dir() {
                 continue;
             }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("app.apk")
-                .to_string();
-            let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let sha256 = match sha256_file(&path) {
-                Ok(value) => value,
-                Err(err) => {
-                    warn!("failed to hash {}: {}", path.display(), err);
-                    String::new()
-                }
-            };
-            let mut metadata = Vec::new();
-            if let Some(module) = module.clone() {
-                metadata.push(KeyValue {
-                    key: "module".into(),
-                    value: module,
-                });
-            }
-            if let Some(dir) = variant_filter {
-                metadata.push(KeyValue {
-                    key: "variant".into(),
-                    value: dir.into(),
-                });
+            let search_root = variant_search_root(&output_dir, variant_filter);
+            let mut paths = Vec::new();
+            if collect_artifact_paths(&search_root, artifact_type, &mut paths).is_err() {
+                continue;
             }
 
-            artifacts.push(Artifact {
-                name,
-                path: path.to_string_lossy().to_string(),
-                size_bytes,
-                sha256,
-                metadata,
-            });
+            for path in paths {
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("artifact.bin")
+                    .to_string();
+                let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let sha256 = match sha256_file(&path) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!("failed to hash {}: {}", path.display(), err);
+                        String::new()
+                    }
+                };
+                let mut metadata = Vec::new();
+                if let Some(module) = module.clone() {
+                    metadata.push(KeyValue {
+                        key: "module".into(),
+                        value: module,
+                    });
+                }
+                if let Some(dir) = variant_filter {
+                    metadata.push(KeyValue {
+                        key: "variant".into(),
+                        value: dir.into(),
+                    });
+                }
+                metadata.push(KeyValue {
+                    key: "artifact_type".into(),
+                    value: artifact_type_label(artifact_type).into(),
+                });
+                if let Some(task) = primary_task {
+                    metadata.push(KeyValue {
+                        key: "task".into(),
+                        value: task.to_string(),
+                    });
+                }
+
+                artifacts.push(Artifact {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes,
+                    sha256,
+                    metadata,
+                    r#type: artifact_type as i32,
+                });
+            }
         }
     }
 
     artifacts
+        .into_iter()
+        .filter(|artifact| artifact_matches(artifact, query))
+        .collect()
 }
 
-async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: BuildRequest) {
+fn artifact_query_from_filter(filter: &ArtifactFilter) -> Result<ArtifactQuery, Status> {
+    let mut query = ArtifactQuery::default();
+
+    for module in &filter.modules {
+        if let Some(label) = normalize_module_label(module)? {
+            query.modules.push(label);
+        }
+    }
+
+    if let Some(variant) = normalize_variant_name(&filter.variant)? {
+        query.variant = Some(variant);
+    }
+
+    for raw in &filter.types {
+        let artifact_type = ArtifactType::try_from(*raw).unwrap_or(ArtifactType::Unspecified);
+        if artifact_type != ArtifactType::Unspecified {
+            query.types.push(artifact_type);
+        }
+    }
+
+    let name_contains = filter.name_contains.trim();
+    if !name_contains.is_empty() {
+        query.name_contains = Some(name_contains.to_lowercase());
+    }
+
+    let path_contains = filter.path_contains.trim();
+    if !path_contains.is_empty() {
+        query.path_contains = Some(path_contains.to_lowercase());
+    }
+
+    Ok(query)
+}
+
+fn artifact_query_from_request(req: &ListArtifactsRequest) -> Result<ArtifactQuery, Status> {
+    let mut query = match req.filter.as_ref() {
+        Some(filter) => artifact_query_from_filter(filter)?,
+        None => ArtifactQuery::default(),
+    };
+
+    if query.variant.is_none() {
+        let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
+        if variant != BuildVariant::Unspecified {
+            query.variant = Some(variant_label(variant).to_string());
+        }
+    }
+
+    Ok(query)
+}
+
+async fn run_build_job(
+    state: Arc<Mutex<BuildState>>,
+    job_id: String,
+    req: BuildRequest,
+    plan: BuildPlan,
+) {
     let mut job_client = match connect_job().await {
         Ok(client) => client,
         Err(err) => {
@@ -948,8 +1426,21 @@ async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: Build
         return;
     }
 
-    let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Debug);
-    let mut args = tasks_for_variant(variant, req.clean_first);
+    if let Some(module) = plan.module.as_deref() {
+        if !module_exists(&project_path, module) {
+            let detail = job_error_detail(
+                ErrorCode::InvalidArgument,
+                "module not found",
+                format!("module not found or missing build file: {module}"),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, detail).await;
+            return;
+        }
+    }
+
+    let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
+    let mut args = plan.tasks.clone();
     let extra_args = expand_gradle_args(req.gradle_args);
     args.extend(extra_args);
 
@@ -965,16 +1456,7 @@ async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: Build
         &job_id,
         10,
         "preflight",
-        vec![
-            KeyValue {
-                key: "variant".into(),
-                value: variant_label(variant).into(),
-            },
-            KeyValue {
-                key: "project".into(),
-                value: project_path.to_string_lossy().to_string(),
-            },
-        ],
+        build_progress_metrics(&project_id, &project_path, &plan, &req, &args),
     )
     .await;
 
@@ -1054,7 +1536,14 @@ async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: Build
     tokio::spawn(read_lines(stdout, "stdout", line_tx.clone()));
     tokio::spawn(read_lines(stderr, "stderr", line_tx));
 
-    let _ = publish_progress(&mut job_client, &job_id, 25, "gradle running", vec![]).await;
+    let _ = publish_progress(
+        &mut job_client,
+        &job_id,
+        25,
+        "gradle running",
+        build_progress_metrics(&project_id, &project_path, &plan, &req, &args),
+    )
+    .await;
 
     let mut recent = VecDeque::with_capacity(RECENT_LOG_LIMIT);
     let start = Instant::now();
@@ -1125,10 +1614,29 @@ async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: Build
     }
 
     if status.success() {
-        let artifacts = collect_artifacts(&project_path, variant);
+        let mut query = ArtifactQuery::default();
+        if let Some(module) = plan.module.as_ref() {
+            query.modules.push(module.clone());
+        }
+        query.variant = Some(plan.variant.label.clone());
+        let primary_task = plan
+            .tasks
+            .iter()
+            .find(|task| !is_clean_task(task))
+            .map(|task| task.as_str());
+        let artifacts = collect_artifacts(&project_path, &query, primary_task);
         {
             let mut st = state.lock().await;
-            let record = build_record(&job_id, &project_id, &project_path, variant, &artifacts);
+            let record = build_record(
+                &job_id,
+                &project_id,
+                &project_path,
+                variant,
+                &plan.variant.label,
+                plan.module.as_deref(),
+                &plan.tasks,
+                &artifacts,
+            );
             upsert_build_record(&mut st, record);
             save_state_best_effort(&st);
         }
@@ -1142,15 +1650,49 @@ async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: Build
                 value: artifacts.len().to_string(),
             },
         ];
-
-        for artifact in artifacts.iter().take(10) {
+        outputs.push(KeyValue {
+            key: "variant".into(),
+            value: plan.variant.label.clone(),
+        });
+        if let Some(module) = plan.module.as_ref() {
             outputs.push(KeyValue {
-                key: "apk_path".into(),
-                value: artifact.path.clone(),
+                key: "module".into(),
+                value: module.clone(),
+            });
+        }
+        if !plan.tasks.is_empty() {
+            outputs.push(KeyValue {
+                key: "tasks".into(),
+                value: plan.tasks.join(" "),
             });
         }
 
-        let _ = publish_progress(&mut job_client, &job_id, 95, "finalizing", vec![]).await;
+        for artifact in artifacts.iter().take(10) {
+            let artifact_type =
+                ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+            outputs.push(KeyValue {
+                key: "artifact_path".into(),
+                value: artifact.path.clone(),
+            });
+            outputs.push(KeyValue {
+                key: "artifact_type".into(),
+                value: artifact_type_label(artifact_type).into(),
+            });
+            if artifact_type == ArtifactType::Apk {
+                outputs.push(KeyValue {
+                    key: "apk_path".into(),
+                    value: artifact.path.clone(),
+                });
+            }
+        }
+
+        let mut metrics = build_progress_metrics(&project_id, &project_path, &plan, &req, &args);
+        metrics.push(metric("artifact_count", artifacts.len()));
+        let type_summary = artifact_type_summary(&artifacts);
+        if !type_summary.is_empty() {
+            metrics.push(metric("artifact_types", type_summary));
+        }
+        let _ = publish_progress(&mut job_client, &job_id, 95, "finalizing", metrics).await;
         let _ = publish_completed(
             &mut job_client,
             &job_id,
@@ -1181,7 +1723,7 @@ impl BuildService for Svc {
             .clone()
             .ok_or_else(|| Status::invalid_argument("project_id is required"))?;
 
-        let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Debug);
+        let plan = build_plan_for_request(&req)?;
         let mut job_client = connect_job().await?;
         let job_id = req
             .job_id
@@ -1190,19 +1732,32 @@ impl BuildService for Svc {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
         let job_id = if job_id.is_empty() {
+            let mut params = vec![
+                KeyValue {
+                    key: "variant".into(),
+                    value: plan.variant.label.clone(),
+                },
+                KeyValue {
+                    key: "clean_first".into(),
+                    value: req.clean_first.to_string(),
+                },
+            ];
+            if let Some(module) = plan.module.as_ref() {
+                params.push(KeyValue {
+                    key: "module".into(),
+                    value: module.clone(),
+                });
+            }
+            if !plan.tasks.is_empty() {
+                params.push(KeyValue {
+                    key: "tasks".into(),
+                    value: plan.tasks.join(" "),
+                });
+            }
             start_job(
                 &mut job_client,
                 "build.run",
-                vec![
-                    KeyValue {
-                        key: "variant".into(),
-                        value: variant_label(variant).into(),
-                    },
-                    KeyValue {
-                        key: "clean_first".into(),
-                        value: req.clean_first.to_string(),
-                    },
-                ],
+                params,
                 Some(project_id),
             )
             .await?
@@ -1211,7 +1766,7 @@ impl BuildService for Svc {
         };
 
         let state = self.state.clone();
-        tokio::spawn(run_build_job(state, job_id.clone(), req));
+        tokio::spawn(run_build_job(state, job_id.clone(), req, plan));
 
         Ok(Response::new(BuildResponse {
             job_id: Some(Id { value: job_id }),
@@ -1228,25 +1783,25 @@ impl BuildService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .unwrap_or_default();
-
-        let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
+        let query = artifact_query_from_request(&req)?;
         if !project_id.trim().is_empty() {
             let record = {
                 let st = self.state.lock().await;
-                find_latest_record(&st, &project_id, variant).cloned()
+                find_latest_record(&st, &project_id, &query).cloned()
             };
             if let Some(record) = record {
                 let artifacts = record
                     .artifacts
                     .into_iter()
                     .map(ArtifactRecord::into_proto)
+                    .filter(|artifact| artifact_matches(artifact, &query))
                     .collect();
                 return Ok(Response::new(ListArtifactsResponse { artifacts }));
             }
         }
 
         let project_path = resolve_project_path(&project_id).await?;
-        let artifacts = collect_artifacts(&project_path, variant);
+        let artifacts = collect_artifacts(&project_path, &query, None);
 
         Ok(Response::new(ListArtifactsResponse { artifacts }))
     }

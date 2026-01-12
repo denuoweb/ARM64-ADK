@@ -9,12 +9,24 @@ enum BuildVariant {
   BUILD_VARIANT_RELEASE = 2;
 }
 
+enum ArtifactType {
+  ARTIFACT_TYPE_UNSPECIFIED = 0;
+  ARTIFACT_TYPE_APK = 1;
+  ARTIFACT_TYPE_AAB = 2;
+  ARTIFACT_TYPE_AAR = 3;
+  ARTIFACT_TYPE_MAPPING = 4;
+  ARTIFACT_TYPE_TEST_RESULT = 5;
+}
+
 message BuildRequest {
   Id project_id = 1;
   BuildVariant variant = 2;
   bool clean_first = 3;
   repeated KeyValue gradle_args = 4;
   Id job_id = 5;
+  string module = 6;
+  string variant_name = 7;
+  repeated string tasks = 8;
 }
 
 message BuildResponse { Id job_id = 1; }
@@ -25,9 +37,22 @@ message Artifact {
   uint64 size_bytes = 3;
   string sha256 = 4;
   repeated KeyValue metadata = 5;
+  ArtifactType type = 6;
 }
 
-message ListArtifactsRequest { Id project_id = 1; BuildVariant variant = 2; }
+message ArtifactFilter {
+  repeated string modules = 1;
+  string variant = 2;
+  repeated ArtifactType types = 3;
+  string name_contains = 4;
+  string path_contains = 5;
+}
+
+message ListArtifactsRequest {
+  Id project_id = 1;
+  BuildVariant variant = 2;
+  ArtifactFilter filter = 3;
+}
 message ListArtifactsResponse { repeated Artifact artifacts = 1; }
 
 service BuildService {

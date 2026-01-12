@@ -10,17 +10,21 @@ Update this file whenever BuildService behavior changes or when commits touching
 ## gRPC contract
 - proto/aadk/v1/build.proto
 - RPCs: Build, ListArtifacts
-- Shared messages: Artifact, BuildVariant, KeyValue, Job events (via JobService)
+- Shared messages: Artifact, ArtifactType, ArtifactFilter, BuildVariant, KeyValue, Job events (via JobService)
 
 ## Current implementation details
 - Implementation lives in crates/aadk-build/src/main.rs with a tonic server.
 - Build requests:
   - Validate project_id and resolve to a path using ProjectService GetProject unless the value already looks like a path.
-  - Spawn a Gradle process with wrapper checks, GRADLE_USER_HOME defaults, and tasks based on BuildVariant/clean_first.
+  - Accept module/variant_name/tasks overrides, validate basic formatting, and prefix module tasks as needed.
+  - Spawn a Gradle process with wrapper checks, GRADLE_USER_HOME defaults, and computed task lists.
   - Publish job state, progress, and logs to JobService.
+- Progress metrics include project/module/variant/tasks/gradle args; finalizing reports artifact_count and artifact_types.
 - BuildRequest can include job_id to attach work to an existing JobService job.
 - Persist build/job artifact records in ~/.local/share/aadk/state/builds.json.
-- list_artifacts returns stored artifacts when available and falls back to scanning outputs.
+- list_artifacts returns stored artifacts when available, applies ArtifactFilter, and falls back to scanning outputs.
+- Artifact discovery scans build outputs for APK/AAB/AAR/mapping/test results and tags metadata (module/variant/task/type).
+- Job completion outputs include module/variant/tasks plus artifact path/type entries.
 - Artifact sha256 is populated for stored artifacts.
 
 ## Data flow and dependencies
@@ -36,4 +40,5 @@ Update this file whenever BuildService behavior changes or when commits touching
 - AADK_GRADLE_USER_HOME overrides GRADLE_USER_HOME for builds.
 
 ## Prioritized TODO checklist by service
-- P2: Expand variant/module support and artifact filtering. main.rs (line 293)
+- P2: Replace module/variant validation with Gradle model introspection. main.rs (line 655)
+- P2: Improve variant filtering for flavored builds and richer artifact metadata (ABI/density). main.rs (line 1189)
