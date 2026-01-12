@@ -10,7 +10,7 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 
 ## gRPC contract
 - proto/aadk/v1/project.proto
-- RPCs: ListTemplates, CreateProject, OpenProject, ListRecentProjects, SetProjectConfig
+- RPCs: ListTemplates, CreateProject, OpenProject, ListRecentProjects, GetProject, SetProjectConfig
 - Shared messages: Id, Project, Template, PageInfo, Timestamp, KeyValue
 
 ## Current implementation details
@@ -22,12 +22,12 @@ Update this file whenever ProjectService behavior changes or when commits touchi
   JobService, and persists metadata in .aadk/project.json plus the recent list.
 - open_project reads .aadk/project.json when present, otherwise generates metadata and persists it.
 - list_recent_projects pages through the persisted recent list with page tokens.
+- get_project resolves a project by id for authoritative build resolution.
 - set_project_config updates metadata and persists recent state; missing fields leave existing
   values unchanged.
 
 ## Data flow and dependencies
-- BuildService resolves project_id to a path by calling ProjectService list_recent_projects if
-  AADK_PROJECT_ROOT does not match; any changes here affect build resolution logic.
+- BuildService resolves project_id to a path by calling ProjectService GetProject.
 - The GTK UI and CLI call list_templates/create/open/list_recent and use set_project_config.
 
 ## Environment / config

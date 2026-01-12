@@ -36,6 +36,9 @@ message CreateProjectResponse { Id job_id = 1; Id project_id = 2; }
 message OpenProjectRequest { string path = 1; }
 message OpenProjectResponse { Project project = 1; }
 
+message GetProjectRequest { Id project_id = 1; }
+message GetProjectResponse { Project project = 1; }
+
 message ListRecentProjectsRequest { Pagination page = 1; }
 message ListRecentProjectsResponse { repeated Project projects = 1; PageInfo page_info = 2; }
 
@@ -46,6 +49,7 @@ service ProjectService {
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
   rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
   rpc OpenProject(OpenProjectRequest) returns (OpenProjectResponse);
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
   rpc ListRecentProjects(ListRecentProjectsRequest) returns (ListRecentProjectsResponse);
   rpc SetProjectConfig(SetProjectConfigRequest) returns (SetProjectConfigResponse);
 }

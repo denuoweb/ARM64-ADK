@@ -3,6 +3,7 @@ use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
 
@@ -15,10 +16,10 @@ use aadk_proto::aadk::v1::{
     KeyValue, ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
     PublishJobEventRequest, SetProjectConfigRequest, SetProjectConfigResponse, StartJobRequest,
-    Template, Timestamp,
+    Template, Timestamp, StreamJobEventsRequest, GetJobRequest, GetProjectRequest, GetProjectResponse,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, watch};
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -360,6 +361,75 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     Ok(JobServiceClient::new(channel))
 }
 
+async fn job_is_cancelled(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> bool {
+    let resp = client
+        .get_job(GetJobRequest {
+            job_id: Some(Id { value: job_id.to_string() }),
+        })
+        .await;
+    let job = match resp {
+        Ok(resp) => resp.into_inner().job,
+        Err(_) => return false,
+    };
+    match job.and_then(|job| JobState::try_from(job.state).ok()) {
+        Some(JobState::Cancelled) => true,
+        _ => false,
+    }
+}
+
+async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut client = match connect_job().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("cancel watcher: failed to connect job service: {err}");
+            return rx;
+        }
+    };
+    let mut stream = match client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id { value: job_id.clone() }),
+            include_history: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(err) => {
+            warn!("cancel watcher: stream failed for {job_id}: {err}");
+            return rx;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(evt)) => {
+                    if let Some(JobPayload::StateChanged(state)) = evt.payload {
+                        if JobState::try_from(state.new_state)
+                            .unwrap_or(JobState::Unspecified)
+                            == JobState::Cancelled
+                        {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    rx
+}
+
+fn cancel_requested(cancel_rx: &watch::Receiver<bool>) -> bool {
+    *cancel_rx.borrow()
+}
+
 async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
@@ -580,6 +650,7 @@ fn copy_dir_recursive<F>(
     src: &Path,
     dest: &Path,
     template: &TemplateEntry,
+    cancel_flag: &AtomicBool,
     copied: &mut u64,
     total: u64,
     on_file: &mut F,
@@ -588,6 +659,9 @@ where
     F: FnMut(u64, u64),
 {
     for entry in fs::read_dir(src)? {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "copy cancelled"));
+        }
         let entry = entry?;
         let file_type = entry.file_type()?;
         let name = entry.file_name();
@@ -599,7 +673,7 @@ where
             }
             let dest_dir = dest.join(name.as_ref());
             fs::create_dir_all(&dest_dir)?;
-            copy_dir_recursive(&entry.path(), &dest_dir, template, copied, total, on_file)?;
+            copy_dir_recursive(&entry.path(), &dest_dir, template, cancel_flag, copied, total, on_file)?;
         } else if file_type.is_file() {
             if template.exclude_files.iter().any(|item| item == name.as_ref()) {
                 continue;
@@ -617,12 +691,13 @@ fn copy_template_with_progress(
     dest: &Path,
     template: &TemplateEntry,
     tx: mpsc::UnboundedSender<CopyUpdate>,
+    cancel_flag: &AtomicBool,
 ) -> io::Result<u64> {
     let total = count_files(src, template)?;
     let _ = tx.send(CopyUpdate::Total(total));
     fs::create_dir_all(dest)?;
     let mut copied = 0;
-    copy_dir_recursive(src, dest, template, &mut copied, total, &mut |copied, total| {
+    copy_dir_recursive(src, dest, template, cancel_flag, &mut copied, total, &mut |copied, total| {
         let _ = tx.send(CopyUpdate::File { copied, total });
     })?;
     Ok(total)
@@ -637,6 +712,24 @@ async fn run_create_job(
     project_id: String,
     job_id: String,
 ) -> Result<(), Status> {
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled before start\n").await;
+        return Ok(());
+    }
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_flag_task = cancel_flag.clone();
+    let mut cancel_rx_task = cancel_rx.clone();
+    tokio::spawn(async move {
+        while cancel_rx_task.changed().await.is_ok() {
+            if *cancel_rx_task.borrow() {
+                cancel_flag_task.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    });
+
     publish_state(&mut job_client, &job_id, JobState::Running).await?;
     publish_log(
         &mut job_client,
@@ -666,14 +759,19 @@ async fn run_create_job(
     let copy_src = template_path.clone();
     let copy_dest = req.path.clone();
     let copy_template = template.clone();
+    let copy_cancel = cancel_flag.clone();
 
     let copy_handle = tokio::task::spawn_blocking(move || {
-        copy_template_with_progress(&copy_src, &copy_dest, &copy_template, tx)
+        copy_template_with_progress(&copy_src, &copy_dest, &copy_template, tx, &copy_cancel)
     });
 
     let mut last_percent = 0u32;
 
     while let Some(update) = rx.recv().await {
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+            break;
+        }
         match update {
             CopyUpdate::Total(total) => {
                 let _ = publish_log(
@@ -713,13 +811,26 @@ async fn run_create_job(
     }
 
     match copy_handle.await {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => {
+            if cancel_requested(&cancel_rx) {
+                let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+                return Ok(());
+            }
+        }
         Ok(Err(err)) => {
+            if err.kind() == io::ErrorKind::Interrupted || cancel_requested(&cancel_rx) {
+                let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+                return Ok(());
+            }
             let detail = error_detail_for_io("copy template", &err, &job_id);
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
             return Err(Status::internal(format!("copy template failed: {err}")));
         }
         Err(err) => {
+            if cancel_requested(&cancel_rx) {
+                let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+                return Ok(());
+            }
             let detail = error_detail_for_message(
                 ErrorCode::Internal,
                 "copy template failed",
@@ -729,6 +840,11 @@ async fn run_create_job(
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
             return Err(Status::internal(format!("copy task failed: {err}")));
         }
+    }
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+        return Ok(());
     }
 
     let mut meta = ProjectMetadata::new(
@@ -758,6 +874,11 @@ async fn run_create_job(
     }
 
     publish_log(&mut job_client, &job_id, "Project created successfully.\n").await?;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
+        return Ok(());
+    }
     publish_completed(
         &mut job_client,
         &job_id,
@@ -941,6 +1062,32 @@ impl ProjectService for Svc {
         Ok(Response::new(OpenProjectResponse {
             project: Some(meta.to_proto()),
         }))
+    }
+
+    async fn get_project(
+        &self,
+        request: Request<GetProjectRequest>,
+    ) -> Result<Response<GetProjectResponse>, Status> {
+        let req = request.into_inner();
+        let project_id = req
+            .project_id
+            .map(|id| id.value)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::invalid_argument("project_id is required"))?;
+
+        let st = self.state.lock().await;
+        let project = st
+            .recent
+            .iter()
+            .find(|item| item.project_id == project_id)
+            .map(|item| item.to_proto());
+
+        match project {
+            Some(project) => Ok(Response::new(GetProjectResponse {
+                project: Some(project),
+            })),
+            None => Err(Status::not_found("project_id not found")),
+        }
     }
 
     async fn list_recent_projects(
