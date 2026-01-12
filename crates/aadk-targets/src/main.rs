@@ -20,11 +20,12 @@ use aadk_proto::aadk::v1::{
     SetDefaultTargetRequest, SetDefaultTargetResponse, StartCuttlefishRequest,
     StartCuttlefishResponse, StartJobRequest, StopAppRequest, StopAppResponse, StopCuttlefishRequest,
     StopCuttlefishResponse, StreamLogcatRequest, Target, TargetKind, Timestamp,
+    StreamJobEventsRequest, GetJobRequest,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, watch},
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Channel, Request, Response, Status};
@@ -1440,15 +1441,59 @@ async fn maybe_cuttlefish_target(
     }))
 }
 
-async fn fetch_targets(include_offline: bool) -> Result<Vec<Target>, Status> {
+enum TargetProvider {
+    Adb,
+    Cuttlefish,
+}
+
+impl TargetProvider {
+    async fn list_targets(&self, include_offline: bool) -> Result<Vec<Target>, Status> {
+        match self {
+            TargetProvider::Adb => list_adb_targets(include_offline).await,
+            TargetProvider::Cuttlefish => Ok(vec![]),
+        }
+    }
+
+    async fn augment_targets(
+        &self,
+        targets: &mut Vec<Target>,
+        include_offline: bool,
+    ) -> Result<(), Status> {
+        match self {
+            TargetProvider::Adb => Ok(()),
+            TargetProvider::Cuttlefish => {
+                if let Some(cuttlefish) = maybe_cuttlefish_target(targets, include_offline).await? {
+                    targets.push(cuttlefish);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn target_providers() -> Vec<TargetProvider> {
+    vec![TargetProvider::Adb, TargetProvider::Cuttlefish]
+}
+
+async fn list_adb_targets(include_offline: bool) -> Result<Vec<Target>, Status> {
     let output = adb_output(&["devices", "-l"])
         .await
         .map_err(adb_failure_status)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut targets = parse_adb_devices(&stdout, include_offline);
+    Ok(parse_adb_devices(&stdout, include_offline))
+}
 
-    if let Some(cuttlefish) = maybe_cuttlefish_target(&mut targets, include_offline).await? {
-        targets.push(cuttlefish);
+async fn fetch_targets(include_offline: bool) -> Result<Vec<Target>, Status> {
+    let providers = target_providers();
+    let mut targets = Vec::new();
+
+    for provider in &providers {
+        let mut items = provider.list_targets(include_offline).await?;
+        targets.append(&mut items);
+    }
+
+    for provider in &providers {
+        provider.augment_targets(&mut targets, include_offline).await?;
     }
 
     Ok(targets)
@@ -1467,6 +1512,71 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
         .await
         .map_err(|e| Status::unavailable(format!("job service unavailable: {e}")))?;
     Ok(JobServiceClient::new(channel))
+}
+
+async fn job_is_cancelled(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> bool {
+    let resp = client
+        .get_job(GetJobRequest {
+            job_id: Some(Id { value: job_id.to_string() }),
+        })
+        .await;
+    let job = match resp {
+        Ok(resp) => resp.into_inner().job,
+        Err(_) => return false,
+    };
+    match job.and_then(|job| JobState::try_from(job.state).ok()) {
+        Some(JobState::Cancelled) => true,
+        _ => false,
+    }
+}
+
+async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut client = match connect_job().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("cancel watcher: failed to connect job service: {err}");
+            return rx;
+        }
+    };
+    let mut stream = match client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id { value: job_id.clone() }),
+            include_history: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(err) => {
+            warn!("cancel watcher: stream failed for {job_id}: {err}");
+            return rx;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(evt)) => {
+                    if let Some(JobPayload::StateChanged(state)) = evt.payload {
+                        if JobState::try_from(state.new_state)
+                            .unwrap_or(JobState::Unspecified)
+                            == JobState::Cancelled
+                        {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    rx
 }
 
 async fn start_job(
@@ -1615,6 +1725,10 @@ fn job_error_detail(code: ErrorCode, message: &str, technical: String, correlati
     }
 }
 
+fn cancel_requested(cancel_rx: &watch::Receiver<bool>) -> bool {
+    *cancel_rx.borrow()
+}
+
 fn require_id(id: Option<Id>, field: &str) -> Result<String, Status> {
     let value = id.map(|i| i.value).unwrap_or_default();
     if value.trim().is_empty() {
@@ -1683,6 +1797,12 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Install cancelled before start\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(
         &mut job_client,
@@ -1699,10 +1819,20 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
     )
     .await;
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+        return;
+    }
+
     let target_id = match ensure_target_ready(&mut job_client, &job_id, &target_id).await {
         Some(serial) => serial,
         None => return,
     };
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+        return;
+    }
 
     let _ = publish_progress(
         &mut job_client,
@@ -1712,6 +1842,11 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
         vec![KeyValue { key: "apk_path".into(), value: apk_path.clone() }],
     )
     .await;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Install cancelled\n").await;
+        return;
+    }
 
     let args = ["-s", target_id.as_str(), "install", "-r", apk_path.as_str()];
     match adb_output(&args).await {
@@ -1751,6 +1886,12 @@ async fn run_launch_job(job_id: String, target_id: String, application_id: Strin
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Launch cancelled before start\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(
         &mut job_client,
@@ -1767,12 +1908,27 @@ async fn run_launch_job(job_id: String, target_id: String, application_id: Strin
     )
     .await;
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Launch cancelled\n").await;
+        return;
+    }
+
     let target_id = match ensure_target_ready(&mut job_client, &job_id, &target_id).await {
         Some(serial) => serial,
         None => return,
     };
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Launch cancelled\n").await;
+        return;
+    }
+
     let _ = publish_progress(&mut job_client, &job_id, 60, "adb launch", vec![]).await;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Launch cancelled\n").await;
+        return;
+    }
 
     let output = if activity.trim().is_empty() {
         let args = [
@@ -1842,6 +1998,12 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Stop cancelled before start\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(
         &mut job_client,
@@ -1858,10 +2020,20 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
     )
     .await;
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Stop cancelled\n").await;
+        return;
+    }
+
     let target_id = match ensure_target_ready(&mut job_client, &job_id, &target_id).await {
         Some(serial) => serial,
         None => return,
     };
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Stop cancelled\n").await;
+        return;
+    }
 
     let args = [
         "-s",
@@ -1871,6 +2043,11 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
         "force-stop",
         application_id.as_str(),
     ];
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Stop cancelled\n").await;
+        return;
+    }
 
     match adb_output(&args).await {
         Ok(output) => {
@@ -2427,6 +2604,12 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled before launch\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Starting Cuttlefish\n").await;
     let _ = publish_progress(&mut job_client, &job_id, 5, "checking cuttlefish", vec![]).await;
@@ -2480,6 +2663,11 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
         }
     }
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled\n").await;
+        return;
+    }
+
     let runtime = match cuttlefish_preflight(&mut job_client, &job_id, true, true).await {
         Ok(runtime) => runtime,
         Err(detail) => {
@@ -2487,6 +2675,11 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
             return;
         }
     };
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled\n").await;
+        return;
+    }
 
     let mut start_cmd = String::new();
     if need_start {
@@ -2499,6 +2692,10 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
             }
         };
         start_cmd = command.clone();
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled\n").await;
+            return;
+        }
         let outcome = match run_cuttlefish_command(
             &mut job_client,
             &job_id,
@@ -2675,6 +2872,11 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
         outputs.push(KeyValue { key: "start_command".into(), value: start_cmd });
     }
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled\n").await;
+        return;
+    }
+
     let _ = publish_completed(&mut job_client, &job_id, "Cuttlefish ready", outputs).await;
 }
 
@@ -2687,9 +2889,20 @@ async fn run_cuttlefish_stop_job(job_id: String) {
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled before start\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Stopping Cuttlefish\n").await;
     let _ = publish_progress(&mut job_client, &job_id, 10, "stopping", vec![]).await;
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled\n").await;
+        return;
+    }
 
     let runtime = match cuttlefish_preflight(&mut job_client, &job_id, false, false).await {
         Ok(runtime) => runtime,
@@ -2699,6 +2912,11 @@ async fn run_cuttlefish_stop_job(job_id: String) {
         }
     };
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled\n").await;
+        return;
+    }
+
     let command = match cuttlefish_stop_command(&runtime, &job_id) {
         Ok(command) => command,
         Err(detail) => {
@@ -2706,6 +2924,11 @@ async fn run_cuttlefish_stop_job(job_id: String) {
             return;
         }
     };
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled\n").await;
+        return;
+    }
 
     let outcome = match run_cuttlefish_command(
         &mut job_client,
@@ -2740,6 +2963,11 @@ async fn run_cuttlefish_stop_job(job_id: String) {
     outputs.push(KeyValue { key: "stop_command".into(), value: command });
     outputs.push(KeyValue { key: "home_dir".into(), value: runtime.home_dir.display().to_string() });
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled\n").await;
+        return;
+    }
+
     let _ = publish_completed(&mut job_client, &job_id, "Cuttlefish stopped", outputs).await;
 }
 
@@ -2751,6 +2979,12 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             return;
         }
     };
+
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled before start\n").await;
+        return;
+    }
 
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Installing Cuttlefish\n").await;
@@ -2803,6 +3037,11 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             "Skipping KVM check (AADK_CUTTLEFISH_KVM_CHECK=0)\n",
         )
         .await;
+    }
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+        return;
     }
 
     let install_host = match std::env::var("AADK_CUTTLEFISH_INSTALL_HOST") {
@@ -2863,6 +3102,11 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
 
         let _ = publish_log(&mut job_client, &job_id, &format!("Install command: {install_cmd}\n")).await;
         let _ = publish_progress(&mut job_client, &job_id, 30, "installing host tools", vec![]).await;
+
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
 
         match run_shell_command(&install_cmd).await {
             Ok((true, _, log)) => {
@@ -2927,6 +3171,11 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         }
     }
 
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+        return;
+    }
+
     if add_groups {
         if missing.is_empty() {
             let _ = publish_log(
@@ -2970,6 +3219,10 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
     }
 
     if install_images && (!images_ready || options.force) {
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
         let config = resolve_cuttlefish_request_config(
             page_size,
             options.branch.clone(),
@@ -3124,6 +3377,10 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             shell_escape(&img_url),
             shell_escape(&img_path.display().to_string())
         );
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
         if let Err(err) = run_shell_command(&img_cmd).await {
             let error = job_error_detail(
                 ErrorCode::Internal,
@@ -3141,6 +3398,10 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             shell_escape(&host_url),
             shell_escape(&host_path.display().to_string())
         );
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
         if let Err(err) = run_shell_command(&host_cmd).await {
             let error = job_error_detail(
                 ErrorCode::Internal,
@@ -3161,6 +3422,10 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             shell_escape(&img_path.display().to_string()),
             shell_escape(&images_dir.display().to_string())
         );
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
         match run_shell_command(&unzip_cmd).await {
             Ok((true, _, log)) => {
                 if !log.is_empty() {
@@ -3190,6 +3455,10 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
             shell_escape(&host_path.display().to_string()),
             shell_escape(&host_dir.display().to_string())
         );
+        if cancel_requested(&cancel_rx) {
+            let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+            return;
+        }
         match run_shell_command(&tar_cmd).await {
             Ok((true, _, log)) => {
                 if !log.is_empty() {
@@ -3216,6 +3485,11 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         let _ = publish_log(&mut job_client, &job_id, "Image install disabled (AADK_CUTTLEFISH_INSTALL_IMAGES=0)\n").await;
     } else {
         let _ = publish_log(&mut job_client, &job_id, "Images already present; skipping download\n").await;
+    }
+
+    if cancel_requested(&cancel_rx) {
+        let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
+        return;
     }
 
     let mut outputs = Vec::new();
@@ -3383,14 +3657,24 @@ impl TargetService for Svc {
         }
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "targets.install",
-            vec![KeyValue { key: "apk_path".into(), value: apk_path.clone() }],
-            req.project_id,
-            Some(Id { value: target_id.clone() }),
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.install",
+                vec![KeyValue { key: "apk_path".into(), value: apk_path.clone() }],
+                req.project_id,
+                Some(Id { value: target_id.clone() }),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_install_job(job_id.clone(), target_id, apk_path));
         Ok(Response::new(InstallApkResponse {
@@ -3410,14 +3694,24 @@ impl TargetService for Svc {
         }
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "targets.launch",
-            vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
-            None,
-            Some(Id { value: target_id.clone() }),
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.launch",
+                vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
+                None,
+                Some(Id { value: target_id.clone() }),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_launch_job(
             job_id.clone(),
@@ -3442,14 +3736,24 @@ impl TargetService for Svc {
         }
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "targets.stop",
-            vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
-            None,
-            Some(Id { value: target_id.clone() }),
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.stop",
+                vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
+                None,
+                Some(Id { value: target_id.clone() }),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_stop_job(job_id.clone(), target_id, application_id));
         Ok(Response::new(StopAppResponse {
@@ -3495,14 +3799,24 @@ impl TargetService for Svc {
             });
         }
 
-        let job_id = start_job(
-            &mut job_client,
-            "targets.cuttlefish.install",
-            params,
-            None,
-            None,
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.cuttlefish.install",
+                params,
+                None,
+                None,
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_cuttlefish_install_job(
             job_id.clone(),
@@ -3560,17 +3874,27 @@ impl TargetService for Svc {
         let show_full_ui = req.show_full_ui;
 
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "targets.cuttlefish.start",
-            vec![KeyValue {
-                key: "show_full_ui".into(),
-                value: show_full_ui.to_string(),
-            }],
-            None,
-            None,
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.cuttlefish.start",
+                vec![KeyValue {
+                    key: "show_full_ui".into(),
+                    value: show_full_ui.to_string(),
+                }],
+                None,
+                None,
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_cuttlefish_start_job(job_id.clone(), show_full_ui));
 
@@ -3583,15 +3907,26 @@ impl TargetService for Svc {
         &self,
         _request: Request<StopCuttlefishRequest>,
     ) -> Result<Response<StopCuttlefishResponse>, Status> {
+        let req = _request.into_inner();
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "targets.cuttlefish.stop",
-            vec![],
-            None,
-            None,
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "targets.cuttlefish.stop",
+                vec![],
+                None,
+                None,
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         tokio::spawn(run_cuttlefish_stop_job(job_id.clone()));
 
