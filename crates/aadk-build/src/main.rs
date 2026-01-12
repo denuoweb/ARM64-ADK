@@ -5,6 +5,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Instant,
 };
 use std::io::Read;
@@ -16,24 +17,116 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     Artifact, BuildRequest, BuildResponse, BuildVariant, ErrorCode, ErrorDetail, Id, JobCompleted,
     JobEvent, JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged,
-    KeyValue, ListArtifactsRequest, ListArtifactsResponse, ListRecentProjectsRequest, LogChunk,
-    Pagination, PublishJobEventRequest, StartJobRequest,
+    KeyValue, ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest,
+    StartJobRequest, StreamJobEventsRequest, GetJobRequest, GetProjectRequest,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::mpsc,
+    sync::{mpsc, watch, Mutex},
 };
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 const RECENT_LOG_LIMIT: usize = 200;
-const PROJECT_PAGE_SIZE: u32 = 50;
+const STATE_FILE_NAME: &str = "builds.json";
+const MAX_BUILD_RECORDS: usize = 200;
 
-#[derive(Clone, Default)]
-struct Svc;
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct BuildState {
+    records: Vec<BuildRecord>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct BuildRecord {
+    job_id: String,
+    project_id: String,
+    variant: i32,
+    created_at_unix_millis: i64,
+    project_path: String,
+    artifacts: Vec<ArtifactRecord>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct ArtifactRecord {
+    name: String,
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+    metadata: Vec<KeyValueRecord>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct KeyValueRecord {
+    key: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct Svc {
+    state: Arc<Mutex<BuildState>>,
+}
+
+impl Default for Svc {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(load_state())),
+        }
+    }
+}
+
+impl KeyValueRecord {
+    fn from_proto(item: &KeyValue) -> Self {
+        Self {
+            key: item.key.clone(),
+            value: item.value.clone(),
+        }
+    }
+
+    fn into_proto(self) -> KeyValue {
+        KeyValue {
+            key: self.key,
+            value: self.value,
+        }
+    }
+}
+
+impl ArtifactRecord {
+    fn from_proto(item: &Artifact) -> Self {
+        Self {
+            name: item.name.clone(),
+            path: item.path.clone(),
+            size_bytes: item.size_bytes,
+            sha256: item.sha256.clone(),
+            metadata: item
+                .metadata
+                .iter()
+                .map(KeyValueRecord::from_proto)
+                .collect(),
+        }
+    }
+
+    fn into_proto(self) -> Artifact {
+        Artifact {
+            name: self.name,
+            path: self.path,
+            size_bytes: self.size_bytes,
+            sha256: self.sha256,
+            metadata: self
+                .metadata
+                .into_iter()
+                .map(KeyValueRecord::into_proto)
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct LogLine {
@@ -41,12 +134,17 @@ struct LogLine {
     line: String,
 }
 
-fn now_ts() -> aadk_proto::aadk::v1::Timestamp {
-    let ms = std::time::SystemTime::now()
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64;
-    aadk_proto::aadk::v1::Timestamp { unix_millis: ms }
+        .as_millis() as i64
+}
+
+fn now_ts() -> aadk_proto::aadk::v1::Timestamp {
+    aadk_proto::aadk::v1::Timestamp {
+        unix_millis: now_millis(),
+    }
 }
 
 fn job_addr() -> String {
@@ -77,6 +175,71 @@ async fn connect_project() -> Result<ProjectServiceClient<Channel>, Status> {
         .await
         .map_err(|e| Status::unavailable(format!("project service unavailable: {e}")))?;
     Ok(ProjectServiceClient::new(channel))
+}
+
+async fn job_is_cancelled(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> bool {
+    let resp = client
+        .get_job(GetJobRequest {
+            job_id: Some(Id { value: job_id.to_string() }),
+        })
+        .await;
+    let job = match resp {
+        Ok(resp) => resp.into_inner().job,
+        Err(_) => return false,
+    };
+    match job.and_then(|job| JobState::try_from(job.state).ok()) {
+        Some(JobState::Cancelled) => true,
+        _ => false,
+    }
+}
+
+async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut client = match connect_job().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("cancel watcher: failed to connect job service: {err}");
+            return rx;
+        }
+    };
+    let mut stream = match client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id { value: job_id.clone() }),
+            include_history: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(err) => {
+            warn!("cancel watcher: stream failed for {job_id}: {err}");
+            return rx;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match stream.message().await {
+                Ok(Some(evt)) => {
+                    if let Some(JobPayload::StateChanged(state)) = evt.payload {
+                        if JobState::try_from(state.new_state)
+                            .unwrap_or(JobState::Unspecified)
+                            == JobState::Cancelled
+                        {
+                            let _ = tx.send(true);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    rx
 }
 
 async fn start_job(
@@ -234,43 +397,122 @@ fn expand_user(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-async fn lookup_project_path(project_id: &str) -> Result<Option<PathBuf>, Status> {
-    let mut client = connect_project().await?;
-    let mut page_token = String::new();
+fn data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/aadk")
+    } else {
+        PathBuf::from("/tmp/aadk")
+    }
+}
 
-    loop {
-        let resp = client
-            .list_recent_projects(ListRecentProjectsRequest {
-                page: Some(Pagination {
-                    page_size: PROJECT_PAGE_SIZE,
-                    page_token: page_token.clone(),
-                }),
-            })
-            .await
-            .map_err(|e| Status::unavailable(format!("list recent projects failed: {e}")))?
-            .into_inner();
+fn state_file_path() -> PathBuf {
+    data_dir().join("state").join(STATE_FILE_NAME)
+}
 
-        for project in resp.projects {
-            let matches = project
-                .project_id
-                .as_ref()
-                .map(|id| id.value.as_str())
-                == Some(project_id);
-            if matches {
-                return Ok(Some(PathBuf::from(project.path)));
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, payload)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_state() -> BuildState {
+    let path = state_file_path();
+    match fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<BuildState>(&data) {
+            Ok(state) => state,
+            Err(err) => {
+                warn!("Failed to parse {}: {}", path.display(), err);
+                BuildState::default()
             }
-        }
-
-        page_token = resp
-            .page_info
-            .map(|info| info.next_page_token)
-            .unwrap_or_default();
-        if page_token.trim().is_empty() {
-            break;
+        },
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!("Failed to read {}: {}", path.display(), err);
+            }
+            BuildState::default()
         }
     }
+}
 
-    Ok(None)
+fn save_state(state: &BuildState) -> io::Result<()> {
+    write_json_atomic(&state_file_path(), state)
+}
+
+fn save_state_best_effort(state: &BuildState) {
+    if let Err(err) = save_state(state) {
+        warn!("Failed to persist build state: {}", err);
+    }
+}
+
+fn build_record(
+    job_id: &str,
+    project_id: &str,
+    project_path: &Path,
+    variant: BuildVariant,
+    artifacts: &[Artifact],
+) -> BuildRecord {
+    BuildRecord {
+        job_id: job_id.to_string(),
+        project_id: project_id.to_string(),
+        variant: variant as i32,
+        created_at_unix_millis: now_millis(),
+        project_path: project_path.to_string_lossy().to_string(),
+        artifacts: artifacts.iter().map(ArtifactRecord::from_proto).collect(),
+    }
+}
+
+fn upsert_build_record(state: &mut BuildState, record: BuildRecord) {
+    state.records.retain(|item| item.job_id != record.job_id);
+    state.records.insert(0, record);
+    if state.records.len() > MAX_BUILD_RECORDS {
+        state.records.truncate(MAX_BUILD_RECORDS);
+    }
+}
+
+fn find_latest_record<'a>(
+    state: &'a BuildState,
+    project_id: &str,
+    variant: BuildVariant,
+) -> Option<&'a BuildRecord> {
+    state.records.iter().find(|record| {
+        if record.project_id != project_id {
+            return false;
+        }
+        if variant == BuildVariant::Unspecified {
+            return true;
+        }
+        record.variant == variant as i32
+    })
+}
+
+async fn get_project_path(project_id: &str) -> Result<PathBuf, Status> {
+    let mut client = connect_project().await?;
+    let resp = client
+        .get_project(GetProjectRequest {
+            project_id: Some(Id { value: project_id.to_string() }),
+        })
+        .await
+        .map_err(|e| match e.code() {
+            tonic::Code::NotFound => Status::not_found(format!("project not found: {project_id}")),
+            tonic::Code::InvalidArgument => Status::invalid_argument(e.message().to_string()),
+            tonic::Code::Unavailable => Status::unavailable(format!("project service unavailable: {e}")),
+            _ => Status::internal(format!("get project failed: {e}")),
+        })?
+        .into_inner();
+
+    let project = resp
+        .project
+        .ok_or_else(|| Status::internal("project lookup returned empty response"))?;
+    if project.path.trim().is_empty() {
+        return Err(Status::internal("project path missing in ProjectService response"));
+    }
+    Ok(PathBuf::from(project.path))
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -306,24 +548,7 @@ async fn resolve_project_path(project_id: &str) -> Result<PathBuf, Status> {
         )));
     }
 
-    match lookup_project_path(trimmed).await? {
-        Some(path) => Ok(path),
-        None => {
-            if let Ok(root) = std::env::var("AADK_PROJECT_ROOT") {
-                let candidate = PathBuf::from(root).join(trimmed);
-                if candidate.is_dir() {
-                    warn!(
-                        "project_id {} not in ProjectService; using AADK_PROJECT_ROOT fallback",
-                        trimmed
-                    );
-                    return Ok(candidate);
-                }
-            }
-            Err(Status::not_found(format!(
-                "project not found: {trimmed}"
-            )))
-        }
-    }
+    get_project_path(trimmed).await
 }
 
 fn variant_label(variant: BuildVariant) -> &'static str {
@@ -363,6 +588,27 @@ fn gradle_stacktrace_enabled() -> bool {
         std::env::var("AADK_GRADLE_STACKTRACE"),
         Ok(val) if val == "1" || val.eq_ignore_ascii_case("true")
     )
+}
+
+fn gradle_wrapper_required() -> bool {
+    matches!(
+        std::env::var("AADK_GRADLE_REQUIRE_WRAPPER"),
+        Ok(val) if val == "1" || val.eq_ignore_ascii_case("true")
+    )
+}
+
+fn gradle_user_home() -> Option<PathBuf> {
+    if let Ok(existing) = std::env::var("GRADLE_USER_HOME") {
+        if !existing.trim().is_empty() {
+            return None;
+        }
+    }
+    if let Ok(configured) = std::env::var("AADK_GRADLE_USER_HOME") {
+        if !configured.trim().is_empty() {
+            return Some(expand_user(&configured));
+        }
+    }
+    Some(data_dir().join("gradle"))
 }
 
 fn expand_gradle_args(items: Vec<KeyValue>) -> Vec<String> {
@@ -416,18 +662,41 @@ fn spawn_error(err: io::Error) -> Status {
     }
 }
 
-fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<Child, Status> {
-    let wrapper = project_dir.join("gradlew");
-    let mut cmd = if wrapper.is_file() {
-        if is_executable(&wrapper) {
-            Command::new(wrapper)
+struct GradleSpawn {
+    child: Child,
+    description: String,
+}
+
+fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Status> {
+    let wrapper_props = project_dir.join("gradle").join("wrapper").join("gradle-wrapper.properties");
+    let wrapper = if cfg!(windows) {
+        project_dir.join("gradlew.bat")
+    } else {
+        project_dir.join("gradlew")
+    };
+    let (mut cmd, description) = if wrapper.is_file() {
+        if !wrapper_props.is_file() {
+            return Err(Status::failed_precondition(
+                "gradle wrapper missing gradle/wrapper/gradle-wrapper.properties",
+            ));
+        }
+        let cmd = if cfg!(windows) {
+            Command::new(&wrapper)
+        } else if is_executable(&wrapper) {
+            Command::new(&wrapper)
         } else {
             let mut cmd = Command::new("sh");
-            cmd.arg(wrapper);
+            cmd.arg(&wrapper);
             cmd
-        }
+        };
+        (cmd, wrapper.display().to_string())
     } else {
-        Command::new("gradle")
+        if gradle_wrapper_required() {
+            return Err(Status::failed_precondition(
+                "gradle wrapper not found (AADK_GRADLE_REQUIRE_WRAPPER=1)",
+            ));
+        }
+        (Command::new("gradle"), "gradle (PATH)".into())
     };
 
     cmd.current_dir(project_dir)
@@ -435,7 +704,17 @@ fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<Child, Status> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    cmd.spawn().map_err(spawn_error)
+    if let Some(home) = gradle_user_home() {
+        if let Err(err) = fs::create_dir_all(&home) {
+            return Err(Status::internal(format!(
+                "failed to create GRADLE_USER_HOME: {err}"
+            )));
+        }
+        cmd.env("GRADLE_USER_HOME", home);
+    }
+
+    let child = cmd.spawn().map_err(spawn_error)?;
+    Ok(GradleSpawn { child, description })
 }
 
 async fn read_lines<R>(reader: R, stream: &'static str, tx: mpsc::Sender<LogLine>)
@@ -611,7 +890,7 @@ fn collect_artifacts(project_path: &Path, variant: BuildVariant) -> Vec<Artifact
     artifacts
 }
 
-async fn run_build_job(job_id: String, req: BuildRequest) {
+async fn run_build_job(state: Arc<Mutex<BuildState>>, job_id: String, req: BuildRequest) {
     let mut job_client = match connect_job().await {
         Ok(client) => client,
         Err(err) => {
@@ -620,11 +899,17 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
         }
     };
 
+    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    if job_is_cancelled(&mut job_client, &job_id).await {
+        let _ = publish_log(&mut job_client, &job_id, "Build cancelled before start\n").await;
+        return;
+    }
+
     let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
     let _ = publish_log(&mut job_client, &job_id, "Starting Gradle build\n").await;
 
     let project_id = match req.project_id.as_ref() {
-        Some(id) if !id.value.trim().is_empty() => id.value.clone(),
+        Some(id) if !id.value.trim().is_empty() => id.value.trim().to_string(),
         _ => {
             let detail = job_error_detail(
                 ErrorCode::InvalidArgument,
@@ -657,6 +942,11 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
             return;
         }
     };
+
+    if *cancel_rx.borrow() {
+        let _ = publish_log(&mut job_client, &job_id, "Build cancelled before Gradle start\n").await;
+        return;
+    }
 
     let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Debug);
     let mut args = tasks_for_variant(variant, req.clean_first);
@@ -702,7 +992,16 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
     )
     .await;
 
-    let mut child = match spawn_gradle(&project_path, &args) {
+    if let Some(home) = gradle_user_home() {
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            &format!("GRADLE_USER_HOME={}\n", home.display()),
+        )
+        .await;
+    }
+
+    let spawn = match spawn_gradle(&project_path, &args) {
         Ok(child) => child,
         Err(err) => {
             let detail = job_error_detail(
@@ -715,6 +1014,13 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
             return;
         }
     };
+    let _ = publish_log(
+        &mut job_client,
+        &job_id,
+        &format!("Gradle command: {}\n", spawn.description),
+    )
+    .await;
+    let mut child = spawn.child;
 
     let stdout = match child.stdout.take() {
         Some(out) => out,
@@ -752,12 +1058,18 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
 
     let mut recent = VecDeque::with_capacity(RECENT_LOG_LIMIT);
     let start = Instant::now();
-    let mut status = None;
-    let wait = child.wait();
-    tokio::pin!(wait);
+    let mut status: Option<Result<std::process::ExitStatus, io::Error>> = None;
 
     loop {
         tokio::select! {
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    let _ = publish_log(&mut job_client, &job_id, "Cancellation requested; stopping Gradle\n").await;
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return;
+                }
+            }
             line = line_rx.recv() => {
                 match line {
                     Some(line) => {
@@ -775,7 +1087,7 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
                     }
                 }
             }
-            result = &mut wait, if status.is_none() => {
+            result = child.wait(), if status.is_none() => {
                 status = Some(result);
             }
         }
@@ -807,8 +1119,19 @@ async fn run_build_job(job_id: String, req: BuildRequest) {
 
     let duration_ms = start.elapsed().as_millis();
 
+    if *cancel_rx.borrow() {
+        let _ = publish_log(&mut job_client, &job_id, "Build cancelled before completion\n").await;
+        return;
+    }
+
     if status.success() {
         let artifacts = collect_artifacts(&project_path, variant);
+        {
+            let mut st = state.lock().await;
+            let record = build_record(&job_id, &project_id, &project_path, variant, &artifacts);
+            upsert_build_record(&mut st, record);
+            save_state_best_effort(&st);
+        }
         let mut outputs = vec![
             KeyValue {
                 key: "duration_ms".into(),
@@ -860,24 +1183,35 @@ impl BuildService for Svc {
 
         let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Debug);
         let mut job_client = connect_job().await?;
-        let job_id = start_job(
-            &mut job_client,
-            "build.run",
-            vec![
-                KeyValue {
-                    key: "variant".into(),
-                    value: variant_label(variant).into(),
-                },
-                KeyValue {
-                    key: "clean_first".into(),
-                    value: req.clean_first.to_string(),
-                },
-            ],
-            Some(project_id),
-        )
-        .await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "build.run",
+                vec![
+                    KeyValue {
+                        key: "variant".into(),
+                        value: variant_label(variant).into(),
+                    },
+                    KeyValue {
+                        key: "clean_first".into(),
+                        value: req.clean_first.to_string(),
+                    },
+                ],
+                Some(project_id),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
-        tokio::spawn(run_build_job(job_id.clone(), req));
+        let state = self.state.clone();
+        tokio::spawn(run_build_job(state, job_id.clone(), req));
 
         Ok(Response::new(BuildResponse {
             job_id: Some(Id { value: job_id }),
@@ -892,11 +1226,26 @@ impl BuildService for Svc {
         let project_id = req
             .project_id
             .as_ref()
-            .map(|id| id.value.clone())
+            .map(|id| id.value.trim().to_string())
             .unwrap_or_default();
 
-        let project_path = resolve_project_path(&project_id).await?;
         let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
+        if !project_id.trim().is_empty() {
+            let record = {
+                let st = self.state.lock().await;
+                find_latest_record(&st, &project_id, variant).cloned()
+            };
+            if let Some(record) = record {
+                let artifacts = record
+                    .artifacts
+                    .into_iter()
+                    .map(ArtifactRecord::into_proto)
+                    .collect();
+                return Ok(Response::new(ListArtifactsResponse { artifacts }));
+            }
+        }
+
+        let project_path = resolve_project_path(&project_id).await?;
         let artifacts = collect_artifacts(&project_path, variant);
 
         Ok(Response::new(ListArtifactsResponse { artifacts }))

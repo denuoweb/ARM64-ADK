@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
  "aadk-proto",
  "prost",
+ "serde",
+ "serde_json",
  "sha2",
  "tokio",
  "tonic",
