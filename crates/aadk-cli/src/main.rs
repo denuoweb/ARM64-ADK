@@ -1,22 +1,35 @@
-use std::io::Write;
+use std::{
+    collections::BTreeMap,
+    fs,
+    io,
+    io::Write,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use aadk_proto::aadk::v1::{
+    build_service_client::BuildServiceClient,
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
     observe_service_client::ObserveServiceClient,
     project_service_client::ProjectServiceClient,
     toolchain_service_client::ToolchainServiceClient,
     target_service_client::TargetServiceClient,
-    CancelJobRequest, CreateProjectRequest, CreateToolchainSetRequest, ExportEvidenceBundleRequest,
-    ExportSupportBundleRequest, GetActiveToolchainSetRequest, GetCuttlefishStatusRequest,
-    GetDefaultTargetRequest, Id, InstallCuttlefishRequest, JobState, ListProvidersRequest,
+    Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildVariant, CancelJobRequest,
+    CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
+    ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
+    GetCuttlefishStatusRequest, GetDefaultTargetRequest, GetJobRequest, Id,
+    InstallCuttlefishRequest, Job, JobEvent, JobEventKind, JobFilter, JobHistoryFilter, JobState,
+    KeyValue, ListArtifactsRequest, ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest,
     ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
     ListToolchainSetsRequest, OpenProjectRequest, Pagination, SetActiveToolchainSetRequest,
     SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
-    StopCuttlefishRequest, StreamJobEventsRequest,
+    StopCuttlefishRequest, StreamJobEventsRequest, UninstallToolchainRequest,
+    UpdateToolchainRequest,
 };
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 
 #[derive(Parser)]
@@ -53,6 +66,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ObserveCmd,
     },
+    /// Build-related commands (BuildService)
+    Build {
+        #[command(subcommand)]
+        cmd: BuildCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -61,6 +79,75 @@ enum JobCmd {
     StartDemo {
         #[arg(long, default_value_t = default_job_addr())]
         addr: String,
+    },
+    /// Run a job by type and optionally stream events
+    Run {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        job_type: String,
+        #[arg(long)]
+        param: Vec<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        target_id: Option<String>,
+        #[arg(long)]
+        toolchain_set_id: Option<String>,
+        #[arg(long)]
+        no_stream: bool,
+    },
+    /// List jobs with optional filters
+    List {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        #[arg(long)]
+        job_type: Vec<String>,
+        #[arg(long)]
+        state: Vec<String>,
+        #[arg(long)]
+        created_after: Option<i64>,
+        #[arg(long)]
+        created_before: Option<i64>,
+        #[arg(long)]
+        finished_after: Option<i64>,
+        #[arg(long)]
+        finished_before: Option<i64>,
+        #[arg(long, default_value_t = 50)]
+        page_size: u32,
+        #[arg(long, default_value = "")]
+        page_token: String,
+    },
+    /// Watch a job stream by id
+    Watch {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        job_id: String,
+        #[arg(long)]
+        include_history: bool,
+    },
+    /// List job event history by id
+    History {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        job_id: String,
+        #[arg(long)]
+        kind: Vec<String>,
+        #[arg(long)]
+        after: Option<i64>,
+        #[arg(long)]
+        before: Option<i64>,
+        #[arg(long, default_value_t = 200)]
+        page_size: u32,
+        #[arg(long, default_value = "")]
+        page_token: String,
+    },
+    /// Export job logs with config snapshot
+    Export {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        job_id: String,
+        #[arg(long)]
+        output: Option<String>,
     },
     /// Cancel a job by id
     Cancel {
@@ -107,6 +194,49 @@ enum ToolchainCmd {
     GetActive {
         #[arg(long, default_value_t = default_toolchain_addr())]
         addr: String,
+    },
+    /// Update an installed toolchain to a new version
+    Update {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        toolchain_id: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value_t = true)]
+        verify_hash: bool,
+        #[arg(long)]
+        remove_cached: bool,
+        #[arg(long)]
+        no_stream: bool,
+    },
+    /// Uninstall a toolchain
+    Uninstall {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        toolchain_id: String,
+        #[arg(long)]
+        remove_cached: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        no_stream: bool,
+    },
+    /// Cleanup cached toolchain artifacts
+    CleanupCache {
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
+        #[arg(long)]
+        remove_all: bool,
+        #[arg(long)]
+        no_stream: bool,
     },
 }
 
@@ -247,20 +377,211 @@ enum ObserveCmd {
     },
 }
 
+const CLI_CONFIG_FILE: &str = "cli-config.json";
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct CliConfig {
+    job_addr: String,
+    toolchain_addr: String,
+    targets_addr: String,
+    project_addr: String,
+    build_addr: String,
+    observe_addr: String,
+    last_job_id: String,
+    last_job_type: String,
+}
+
+#[derive(Serialize)]
+struct CliLogExport {
+    exported_at_unix_millis: i64,
+    job_id: String,
+    config: CliConfig,
+    job: Option<JobSummary>,
+    events: Vec<LogExportEvent>,
+}
+
+#[derive(Serialize)]
+struct JobSummary {
+    job_id: String,
+    job_type: String,
+    state: String,
+    created_at_unix_millis: i64,
+    started_at_unix_millis: Option<i64>,
+    finished_at_unix_millis: Option<i64>,
+    display_name: String,
+    correlation_id: String,
+    project_id: String,
+    target_id: String,
+    toolchain_set_id: String,
+}
+
+#[derive(Serialize)]
+struct LogExportEvent {
+    at_unix_millis: i64,
+    kind: String,
+    summary: String,
+    data: Option<String>,
+}
+
+fn data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/aadk")
+    } else {
+        PathBuf::from("/tmp/aadk")
+    }
+}
+
+fn config_path() -> PathBuf {
+    data_dir().join("state").join(CLI_CONFIG_FILE)
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, payload)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_cli_config() -> CliConfig {
+    let path = config_path();
+    match fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<CliConfig>(&data) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                eprintln!("Failed to parse {}: {err}", path.display());
+                CliConfig::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                eprintln!("Failed to read {}: {err}", path.display());
+            }
+            CliConfig::default()
+        }
+    }
+}
+
+fn save_cli_config(cfg: &CliConfig) -> io::Result<()> {
+    write_json_atomic(&config_path(), cfg)
+}
+
+fn update_cli_config(update: impl FnOnce(&mut CliConfig)) {
+    let mut cfg = load_cli_config();
+    update(&mut cfg);
+    if let Err(err) = save_cli_config(&cfg) {
+        eprintln!("Failed to persist CLI config: {err}");
+    }
+}
+
+#[derive(Subcommand)]
+enum BuildCmd {
+    /// Run a Gradle build
+    Run {
+        #[arg(long, default_value_t = default_build_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        project_ref: String,
+        #[arg(long, default_value = "debug")]
+        variant: String,
+        #[arg(long)]
+        variant_name: Option<String>,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        task: Vec<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        gradle_arg: Vec<String>,
+        #[arg(long)]
+        clean_first: bool,
+        #[arg(long)]
+        no_stream: bool,
+    },
+    /// List build artifacts
+    ListArtifacts {
+        #[arg(long, default_value_t = default_build_addr())]
+        addr: String,
+        project_ref: String,
+        #[arg(long, default_value = "unspecified")]
+        variant: String,
+        #[arg(long, value_delimiter = ',')]
+        module: Vec<String>,
+        #[arg(long)]
+        variant_name: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        artifact_type: Vec<String>,
+        #[arg(long, default_value = "")]
+        name_contains: String,
+        #[arg(long, default_value = "")]
+        path_contains: String,
+    },
+}
+
 fn default_job_addr() -> String {
-    std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into())
+    if let Ok(val) = std::env::var("AADK_JOB_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.job_addr.trim().is_empty() {
+        return cfg.job_addr;
+    }
+    "127.0.0.1:50051".into()
 }
 fn default_toolchain_addr() -> String {
-    std::env::var("AADK_TOOLCHAIN_ADDR").unwrap_or_else(|_| "127.0.0.1:50052".into())
+    if let Ok(val) = std::env::var("AADK_TOOLCHAIN_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.toolchain_addr.trim().is_empty() {
+        return cfg.toolchain_addr;
+    }
+    "127.0.0.1:50052".into()
 }
 fn default_targets_addr() -> String {
-    std::env::var("AADK_TARGETS_ADDR").unwrap_or_else(|_| "127.0.0.1:50055".into())
+    if let Ok(val) = std::env::var("AADK_TARGETS_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.targets_addr.trim().is_empty() {
+        return cfg.targets_addr;
+    }
+    "127.0.0.1:50055".into()
 }
 fn default_project_addr() -> String {
-    std::env::var("AADK_PROJECT_ADDR").unwrap_or_else(|_| "127.0.0.1:50053".into())
+    if let Ok(val) = std::env::var("AADK_PROJECT_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.project_addr.trim().is_empty() {
+        return cfg.project_addr;
+    }
+    "127.0.0.1:50053".into()
+}
+fn default_build_addr() -> String {
+    if let Ok(val) = std::env::var("AADK_BUILD_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.build_addr.trim().is_empty() {
+        return cfg.build_addr;
+    }
+    "127.0.0.1:50054".into()
 }
 fn default_observe_addr() -> String {
-    std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".into())
+    if let Ok(val) = std::env::var("AADK_OBSERVE_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.observe_addr.trim().is_empty() {
+        return cfg.observe_addr;
+    }
+    "127.0.0.1:50056".into()
 }
 
 #[tokio::main]
@@ -270,6 +591,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
             JobCmd::StartDemo { addr } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_type = "demo.job".into();
+                });
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client.start_job(StartJobRequest {
                     job_type: "demo.job".into(),
@@ -282,10 +607,185 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
                 if !job_id.is_empty() {
+                    update_cli_config(|cfg| cfg.last_job_id = job_id.clone());
+                }
+                if !job_id.is_empty() {
                     stream_job_events_until_done(&addr, &job_id).await?;
                 }
             }
+            JobCmd::Run {
+                addr,
+                job_type,
+                param,
+                project_id,
+                target_id,
+                toolchain_set_id,
+                no_stream,
+            } => {
+                if job_type.trim().is_empty() {
+                    eprintln!("job_type is required");
+                    return Ok(());
+                }
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_type = job_type.clone();
+                });
+                let params = parse_kv_params(&param);
+                let mut client = JobServiceClient::new(connect(&addr).await?);
+                let resp = client.start_job(StartJobRequest {
+                    job_type: job_type.clone(),
+                    params,
+                    project_id: project_id.as_ref().map(|value| Id { value: value.clone() }),
+                    target_id: target_id.as_ref().map(|value| Id { value: value.clone() }),
+                    toolchain_set_id: toolchain_set_id
+                        .as_ref()
+                        .map(|value| Id { value: value.clone() }),
+                }).await?.into_inner();
+                let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}");
+                if !job_id.is_empty() {
+                    update_cli_config(|cfg| cfg.last_job_id = job_id.clone());
+                }
+                if !job_id.is_empty() && !no_stream {
+                    stream_job_events_until_done(&addr, &job_id).await?;
+                }
+            }
+            JobCmd::List {
+                addr,
+                job_type,
+                state,
+                created_after,
+                created_before,
+                finished_after,
+                finished_before,
+                page_size,
+                page_token,
+            } => {
+                update_cli_config(|cfg| cfg.job_addr = addr.clone());
+                let (states, unknown_states) = parse_job_states(&state);
+                if !unknown_states.is_empty() {
+                    eprintln!("Unknown states: {}", unknown_states.join(", "));
+                }
+                let filter = JobFilter {
+                    job_types: split_tokens(&job_type),
+                    states,
+                    created_after: created_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    created_before: created_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    finished_after: finished_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    finished_before: finished_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                };
+                let mut client = JobServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .list_jobs(ListJobsRequest {
+                        page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                        filter: Some(filter),
+                    })
+                    .await?
+                    .into_inner();
+                if resp.jobs.is_empty() {
+                    println!("no jobs found");
+                } else {
+                    println!("jobs={}", resp.jobs.len());
+                    for job in &resp.jobs {
+                        render_job_summary(job);
+                    }
+                }
+                if let Some(page_info) = resp.page_info {
+                    if !page_info.next_page_token.is_empty() {
+                        println!("next_page_token={}", page_info.next_page_token);
+                    }
+                }
+            }
+            JobCmd::Watch { addr, job_id, include_history } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_id = job_id.clone();
+                });
+                stream_job_events(&addr, &job_id, include_history, true).await?;
+            }
+            JobCmd::History {
+                addr,
+                job_id,
+                kind,
+                after,
+                before,
+                page_size,
+                page_token,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_id = job_id.clone();
+                });
+                let (kinds, unknown_kinds) = parse_job_event_kinds(&kind);
+                if !unknown_kinds.is_empty() {
+                    eprintln!("Unknown kinds: {}", unknown_kinds.join(", "));
+                }
+                let filter = JobHistoryFilter {
+                    kinds,
+                    after: after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    before: before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                };
+                let mut client = JobServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .list_job_history(ListJobHistoryRequest {
+                        job_id: Some(Id { value: job_id.clone() }),
+                        page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                        filter: Some(filter),
+                    })
+                    .await?
+                    .into_inner();
+                if resp.events.is_empty() {
+                    println!("no events found");
+                } else {
+                    println!("events={}", resp.events.len());
+                    for event in &resp.events {
+                        render_job_event(event);
+                    }
+                }
+                if let Some(page_info) = resp.page_info {
+                    if !page_info.next_page_token.is_empty() {
+                        println!("next_page_token={}", page_info.next_page_token);
+                    }
+                }
+            }
+            JobCmd::Export { addr, job_id, output } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_id = job_id.clone();
+                });
+                let path = output
+                    .as_ref()
+                    .map(|value| PathBuf::from(value))
+                    .unwrap_or_else(|| default_export_path("cli-job-export", &job_id));
+                let mut client = JobServiceClient::new(connect(&addr).await?);
+                let job = match client
+                    .get_job(GetJobRequest {
+                        job_id: Some(Id { value: job_id.clone() }),
+                    })
+                    .await
+                {
+                    Ok(resp) => resp.into_inner().job,
+                    Err(err) => {
+                        eprintln!("GetJob failed: {err}");
+                        None
+                    }
+                };
+                let events = collect_job_history(&mut client, &job_id).await?;
+                let export = CliLogExport {
+                    exported_at_unix_millis: now_millis(),
+                    job_id: job_id.clone(),
+                    config: load_cli_config(),
+                    job: job.as_ref().map(JobSummary::from_proto),
+                    events: events.iter().map(LogExportEvent::from_proto).collect(),
+                };
+                write_json_atomic(&path, &export)?;
+                println!("exported={}", path.display());
+            }
             JobCmd::Cancel { addr, job_id } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = addr.clone();
+                    cfg.last_job_id = job_id.clone();
+                });
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client.cancel_job(CancelJobRequest {
                     job_id: Some(Id { value: job_id }),
@@ -296,6 +796,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Cmd::Toolchain { cmd } => match cmd {
             ToolchainCmd::ListProviders { addr } => {
+                update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client.list_providers(ListProvidersRequest {}).await?.into_inner();
                 for p in resp.providers {
@@ -304,6 +805,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ToolchainCmd::ListSets { addr, page_size, page_token } => {
+                update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client.list_toolchain_sets(ListToolchainSetsRequest {
                     page: Some(Pagination { page_size, page_token }),
@@ -326,6 +828,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ndk_toolchain_id,
                 display_name,
             } => {
+                update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let sdk_id = sdk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
                 let ndk_id = ndk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
                 if sdk_id.is_none() && ndk_id.is_none() {
@@ -348,6 +851,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ToolchainCmd::SetActive { addr, toolchain_set_id } => {
+                update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client.set_active_toolchain_set(SetActiveToolchainSetRequest {
                     toolchain_set_id: Some(Id { value: toolchain_set_id.clone() }),
@@ -355,6 +859,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("ok={}", resp.ok);
             }
             ToolchainCmd::GetActive { addr } => {
+                update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client.get_active_toolchain_set(GetActiveToolchainSetRequest {}).await?.into_inner();
                 if let Some(set) = resp.set {
@@ -366,10 +871,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("no active toolchain set");
                 }
             }
+            ToolchainCmd::Update {
+                addr,
+                job_addr,
+                toolchain_id,
+                version,
+                verify_hash,
+                remove_cached,
+                no_stream,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.toolchain_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
+                if toolchain_id.trim().is_empty() || version.trim().is_empty() {
+                    eprintln!("toolchain_id and --version are required");
+                    return Ok(());
+                }
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .update_toolchain(UpdateToolchainRequest {
+                        toolchain_id: Some(Id { value: toolchain_id.clone() }),
+                        version,
+                        verify_hash,
+                        remove_cached_artifact: remove_cached,
+                        job_id: None,
+                    })
+                    .await?
+                    .into_inner();
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}");
+                if !job_id.is_empty() && !no_stream {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
+                }
+            }
+            ToolchainCmd::Uninstall {
+                addr,
+                job_addr,
+                toolchain_id,
+                remove_cached,
+                force,
+                no_stream,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.toolchain_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
+                if toolchain_id.trim().is_empty() {
+                    eprintln!("toolchain_id is required");
+                    return Ok(());
+                }
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .uninstall_toolchain(UninstallToolchainRequest {
+                        toolchain_id: Some(Id { value: toolchain_id.clone() }),
+                        remove_cached_artifact: remove_cached,
+                        force,
+                        job_id: None,
+                    })
+                    .await?
+                    .into_inner();
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}");
+                if !job_id.is_empty() && !no_stream {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
+                }
+            }
+            ToolchainCmd::CleanupCache {
+                addr,
+                job_addr,
+                dry_run,
+                remove_all,
+                no_stream,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.toolchain_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
+                let mut client = ToolchainServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .cleanup_toolchain_cache(CleanupToolchainCacheRequest {
+                        dry_run,
+                        remove_all,
+                        job_id: None,
+                    })
+                    .await?
+                    .into_inner();
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}");
+                if !job_id.is_empty() && !no_stream {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
+                }
+            }
         },
 
         Cmd::Targets { cmd } => match cmd {
             TargetsCmd::List { addr } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.list_targets(ListTargetsRequest { include_offline: true }).await?.into_inner();
                 for t in resp.targets {
@@ -378,6 +976,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             TargetsCmd::SetDefault { addr, target_id } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.set_default_target(SetDefaultTargetRequest {
                     target_id: Some(Id { value: target_id.clone() }),
@@ -385,6 +984,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("ok={}", resp.ok);
             }
             TargetsCmd::GetDefault { addr } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.get_default_target(GetDefaultTargetRequest {}).await?.into_inner();
                 if let Some(target) = resp.target {
@@ -395,18 +995,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             TargetsCmd::StartCuttlefish { addr, show_full_ui } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui, job_id: None }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
             TargetsCmd::StopCuttlefish { addr } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.stop_cuttlefish(StopCuttlefishRequest { job_id: None }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
             TargetsCmd::CuttlefishStatus { addr } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client.get_cuttlefish_status(GetCuttlefishStatusRequest {}).await?.into_inner();
                 println!("state={}\tadb={}", resp.state, resp.adb_serial);
@@ -415,6 +1018,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             TargetsCmd::InstallCuttlefish { addr, force } => {
+                update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .install_cuttlefish(InstallCuttlefishRequest {
@@ -433,6 +1037,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Cmd::Project { cmd } => match cmd {
             ProjectCmd::ListTemplates { addr } => {
+                update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
                 let resp = client.list_templates(ListTemplatesRequest {}).await?.into_inner();
                 for t in resp.templates {
@@ -452,6 +1057,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ProjectCmd::ListRecent { addr, page_size, page_token } => {
+                update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
                 let resp = client.list_recent_projects(ListRecentProjectsRequest {
                     page: Some(Pagination {
@@ -470,6 +1076,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ProjectCmd::Create { addr, job_addr, name, path, template_id } => {
+                update_cli_config(|cfg| {
+                    cfg.project_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
                 let resp = client.create_project(CreateProjectRequest {
                     name,
@@ -488,6 +1098,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ProjectCmd::Open { addr, path } => {
+                update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
                 let resp = client.open_project(OpenProjectRequest { path }).await?.into_inner();
                 if let Some(project) = resp.project {
@@ -503,6 +1114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 toolchain_set_id,
                 default_target_id,
             } => {
+                update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 if project_id.trim().is_empty() {
                     eprintln!("project_id is required");
                     return Ok(());
@@ -535,6 +1147,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 targets_addr,
                 project_id,
             } => {
+                update_cli_config(|cfg| {
+                    cfg.project_addr = addr.clone();
+                    cfg.toolchain_addr = toolchain_addr.clone();
+                    cfg.targets_addr = targets_addr.clone();
+                });
                 if project_id.trim().is_empty() {
                     eprintln!("project_id is required");
                     return Ok(());
@@ -615,6 +1232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Cmd::Observe { cmd } => match cmd {
             ObserveCmd::ListRuns { addr, page_size, page_token } => {
+                update_cli_config(|cfg| cfg.observe_addr = addr.clone());
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.list_runs(ListRunsRequest {
                     page: Some(Pagination {
@@ -650,6 +1268,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 include_recent_runs,
                 recent_runs_limit,
             } => {
+                update_cli_config(|cfg| {
+                    cfg.observe_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.export_support_bundle(ExportSupportBundleRequest {
                     include_logs,
@@ -669,6 +1291,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ObserveCmd::ExportEvidence { addr, job_addr, run_id } => {
+                update_cli_config(|cfg| {
+                    cfg.observe_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                     run_id: Some(Id { value: run_id }),
@@ -681,6 +1307,136 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+
+        Cmd::Build { cmd } => match cmd {
+            BuildCmd::Run {
+                addr,
+                job_addr,
+                project_ref,
+                variant,
+                variant_name,
+                module,
+                task,
+                gradle_arg,
+                clean_first,
+                no_stream,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.build_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                });
+                if project_ref.trim().is_empty() {
+                    eprintln!("project_ref is required");
+                    return Ok(());
+                }
+                let Some(variant) = parse_build_variant(&variant) else {
+                    eprintln!("unsupported variant: {variant}");
+                    return Ok(());
+                };
+
+                let tasks = task
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>();
+                let gradle_args = gradle_arg
+                    .into_iter()
+                    .map(|arg| arg.trim().to_string())
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| KeyValue {
+                        key: arg,
+                        value: String::new(),
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut client = BuildServiceClient::new(connect(&addr).await?);
+                let resp = client.build(BuildRequest {
+                    project_id: Some(Id { value: project_ref.trim().to_string() }),
+                    variant: variant as i32,
+                    clean_first,
+                    gradle_args,
+                    job_id: None,
+                    module: module.unwrap_or_default().trim().to_string(),
+                    variant_name: variant_name.unwrap_or_default().trim().to_string(),
+                    tasks,
+                }).await?.into_inner();
+
+                let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+                println!("job_id={job_id}");
+                if !job_id.is_empty() && !no_stream {
+                    stream_job_events_until_done(&job_addr, &job_id).await?;
+                }
+            }
+            BuildCmd::ListArtifacts {
+                addr,
+                project_ref,
+                variant,
+                module,
+                variant_name,
+                artifact_type,
+                name_contains,
+                path_contains,
+            } => {
+                update_cli_config(|cfg| cfg.build_addr = addr.clone());
+                if project_ref.trim().is_empty() {
+                    eprintln!("project_ref is required");
+                    return Ok(());
+                }
+                let Some(variant) = parse_build_variant(&variant) else {
+                    eprintln!("unsupported variant: {variant}");
+                    return Ok(());
+                };
+
+                let modules = module
+                    .into_iter()
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect::<Vec<_>>();
+
+                let (types, unknown) = parse_artifact_types(&artifact_type);
+                if !unknown.is_empty() {
+                    eprintln!("unknown artifact types: {}", unknown.join(", "));
+                }
+
+                let filter = ArtifactFilter {
+                    modules,
+                    variant: variant_name.unwrap_or_default().trim().to_string(),
+                    types: types.into_iter().map(|t| t as i32).collect(),
+                    name_contains: name_contains.trim().to_string(),
+                    path_contains: path_contains.trim().to_string(),
+                };
+
+                let mut client = BuildServiceClient::new(connect(&addr).await?);
+                let resp = client.list_artifacts(ListArtifactsRequest {
+                    project_id: Some(Id { value: project_ref.trim().to_string() }),
+                    variant: variant as i32,
+                    filter: Some(filter),
+                }).await?.into_inner();
+
+                if resp.artifacts.is_empty() {
+                    println!("no artifacts found");
+                } else {
+                    let total = resp.artifacts.len();
+                    let mut by_module: BTreeMap<String, Vec<Artifact>> = BTreeMap::new();
+                    for artifact in resp.artifacts {
+                        let module = metadata_value(&artifact.metadata, "module").unwrap_or("");
+                        let label = if module.trim().is_empty() {
+                            "<root>".to_string()
+                        } else {
+                            module.to_string()
+                        };
+                        by_module.entry(label).or_default().push(artifact);
+                    }
+                    println!("artifacts={total}");
+                    for (module, artifacts) in by_module {
+                        println!("module={module} count={}", artifacts.len());
+                        for artifact in artifacts {
+                            render_artifact(&artifact);
+                        }
+                    }
+                }
+            }
+        },
     }
 
     Ok(())
@@ -690,13 +1446,22 @@ async fn stream_job_events_until_done(
     addr: &str,
     job_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    stream_job_events(addr, job_id, true, true).await
+}
+
+async fn stream_job_events(
+    addr: &str,
+    job_id: &str,
+    include_history: bool,
+    stop_on_done: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = JobServiceClient::new(connect(addr).await?);
     let mut stream = client
         .stream_job_events(StreamJobEventsRequest {
             job_id: Some(Id {
                 value: job_id.to_string(),
             }),
-            include_history: true,
+            include_history,
         })
         .await?
         .into_inner();
@@ -704,10 +1469,8 @@ async fn stream_job_events_until_done(
     while let Some(item) = stream.next().await {
         match item {
             Ok(evt) => {
-                if let Some(payload) = evt.payload.as_ref() {
-                    if render_job_payload(payload) {
-                        break;
-                    }
+                if render_job_event(&evt) && stop_on_done {
+                    break;
                 }
             }
             Err(err) => {
@@ -720,50 +1483,398 @@ async fn stream_job_events_until_done(
     Ok(())
 }
 
-fn render_job_payload(payload: &JobPayload) -> bool {
-    match payload {
-        JobPayload::StateChanged(state) => {
+fn render_job_event(event: &JobEvent) -> bool {
+    let ts = event
+        .at
+        .as_ref()
+        .map(|ts| ts.unix_millis)
+        .unwrap_or_default();
+    match event.payload.as_ref() {
+        Some(JobPayload::StateChanged(state)) => {
             let new_state = JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
-            println!("state={new_state:?}");
+            println!("{ts} state={new_state:?}");
             matches!(
                 new_state,
                 JobState::Success | JobState::Failed | JobState::Cancelled
             )
         }
-        JobPayload::Progress(progress) => {
+        Some(JobPayload::Progress(progress)) => {
             if let Some(p) = progress.progress.as_ref() {
-                println!("progress {}% {}", p.percent, p.phase);
+                println!("{ts} progress {}% {}", p.percent, p.phase);
                 for kv in &p.metrics {
                     println!("  {}={}", kv.key, kv.value);
                 }
             }
             false
         }
-        JobPayload::Log(log) => {
+        Some(JobPayload::Log(log)) => {
             if let Some(chunk) = log.chunk.as_ref() {
                 print!("{}", String::from_utf8_lossy(&chunk.data));
                 let _ = std::io::stdout().flush();
             }
             false
         }
-        JobPayload::Completed(completed) => {
-            println!("completed: {}", completed.summary);
+        Some(JobPayload::Completed(completed)) => {
+            println!("{ts} completed: {}", completed.summary);
             for kv in &completed.outputs {
                 println!("  {}={}", kv.key, kv.value);
             }
             true
         }
-        JobPayload::Failed(failed) => {
+        Some(JobPayload::Failed(failed)) => {
             if let Some(err) = failed.error.as_ref() {
-                println!("failed: {} ({})", err.message, err.code);
+                println!("{ts} failed: {} ({})", err.message, err.code);
                 if !err.technical_details.is_empty() {
                     println!("details: {}", err.technical_details);
                 }
             } else {
-                println!("failed");
+                println!("{ts} failed");
             }
             true
         }
+        None => {
+            println!("{ts} event=unknown");
+            false
+        }
+    }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn default_export_path(prefix: &str, job_id: &str) -> PathBuf {
+    let ts = now_millis();
+    data_dir()
+        .join("state")
+        .join(format!("{prefix}-{job_id}-{ts}.json"))
+}
+
+async fn collect_job_history(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> Result<Vec<JobEvent>, Box<dyn std::error::Error>> {
+    let mut events = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = client
+            .list_job_history(ListJobHistoryRequest {
+                job_id: Some(Id {
+                    value: job_id.to_string(),
+                }),
+                page: Some(Pagination {
+                    page_size: 200,
+                    page_token: page_token.clone(),
+                }),
+                filter: None,
+            })
+            .await?
+            .into_inner();
+        events.extend(resp.events);
+        let next_token = resp
+            .page_info
+            .map(|page_info| page_info.next_page_token)
+            .unwrap_or_default();
+        if next_token.is_empty() {
+            break;
+        }
+        page_token = next_token;
+    }
+    Ok(events)
+}
+
+fn split_tokens(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(|c: char| c == ',' || c.is_whitespace()))
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn parse_kv_params(params: &[String]) -> Vec<KeyValue> {
+    params
+        .iter()
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (key, value) = match trimmed.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => (trimmed, ""),
+            };
+            if key.is_empty() {
+                None
+            } else {
+                Some(KeyValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn parse_job_states(values: &[String]) -> (Vec<i32>, Vec<String>) {
+    let mut states = Vec::new();
+    let mut unknown = Vec::new();
+    for token in split_tokens(values) {
+        let state = match token.to_ascii_lowercase().as_str() {
+            "queued" => Some(JobState::Queued),
+            "running" => Some(JobState::Running),
+            "success" | "succeeded" => Some(JobState::Success),
+            "failed" | "failure" => Some(JobState::Failed),
+            "cancelled" | "canceled" => Some(JobState::Cancelled),
+            _ => None,
+        };
+        if let Some(state) = state {
+            states.push(state as i32);
+        } else {
+            unknown.push(token);
+        }
+    }
+    (states, unknown)
+}
+
+fn parse_job_event_kinds(values: &[String]) -> (Vec<i32>, Vec<String>) {
+    let mut kinds = Vec::new();
+    let mut unknown = Vec::new();
+    for token in split_tokens(values) {
+        let kind = match token.to_ascii_lowercase().as_str() {
+            "state" | "state_changed" => Some(JobEventKind::StateChanged),
+            "progress" => Some(JobEventKind::Progress),
+            "log" | "logs" => Some(JobEventKind::Log),
+            "completed" | "complete" => Some(JobEventKind::Completed),
+            "failed" | "failure" => Some(JobEventKind::Failed),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            kinds.push(kind as i32);
+        } else {
+            unknown.push(token);
+        }
+    }
+    (kinds, unknown)
+}
+
+fn render_job_summary(job: &Job) {
+    let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+    let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
+    let created = job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    let finished = job.finished_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    println!(
+        "{}\t{}\tstate={state:?}\tcreated={created}\tfinished={finished}",
+        job_id, job.job_type
+    );
+}
+
+fn kv_pairs(items: &[KeyValue]) -> String {
+    items
+        .iter()
+        .map(|kv| format!("{}={}", kv.key, kv.value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl JobSummary {
+    fn from_proto(job: &Job) -> Self {
+        let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
+        Self {
+            job_id: job.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            job_type: job.job_type.clone(),
+            state: format!("{state:?}"),
+            created_at_unix_millis: job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default(),
+            started_at_unix_millis: job.started_at.as_ref().map(|ts| ts.unix_millis),
+            finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
+            display_name: job.display_name.clone(),
+            correlation_id: job.correlation_id.clone(),
+            project_id: job.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            target_id: job.target_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+impl LogExportEvent {
+    fn from_proto(event: &JobEvent) -> Self {
+        let at_unix_millis = event.at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+        match event.payload.as_ref() {
+            Some(JobPayload::StateChanged(state)) => {
+                let state = JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
+                Self {
+                    at_unix_millis,
+                    kind: "state_changed".into(),
+                    summary: format!("{state:?}"),
+                    data: None,
+                }
+            }
+            Some(JobPayload::Progress(progress)) => {
+                if let Some(p) = progress.progress.as_ref() {
+                    let metrics = kv_pairs(&p.metrics);
+                    let summary = if metrics.is_empty() {
+                        format!("{}% {}", p.percent, p.phase)
+                    } else {
+                        format!("{}% {} ({metrics})", p.percent, p.phase)
+                    };
+                    Self {
+                        at_unix_millis,
+                        kind: "progress".into(),
+                        summary,
+                        data: None,
+                    }
+                } else {
+                    Self {
+                        at_unix_millis,
+                        kind: "progress".into(),
+                        summary: "missing progress payload".into(),
+                        data: None,
+                    }
+                }
+            }
+            Some(JobPayload::Log(log)) => {
+                if let Some(chunk) = log.chunk.as_ref() {
+                    let summary = format!("stream={} truncated={}", chunk.stream, chunk.truncated);
+                    let data = Some(String::from_utf8_lossy(&chunk.data).to_string());
+                    Self {
+                        at_unix_millis,
+                        kind: "log".into(),
+                        summary,
+                        data,
+                    }
+                } else {
+                    Self {
+                        at_unix_millis,
+                        kind: "log".into(),
+                        summary: "missing log chunk".into(),
+                        data: None,
+                    }
+                }
+            }
+            Some(JobPayload::Completed(completed)) => {
+                let outputs = kv_pairs(&completed.outputs);
+                let summary = if outputs.is_empty() {
+                    completed.summary.clone()
+                } else {
+                    format!("{} ({outputs})", completed.summary)
+                };
+                Self {
+                    at_unix_millis,
+                    kind: "completed".into(),
+                    summary,
+                    data: None,
+                }
+            }
+            Some(JobPayload::Failed(failed)) => {
+                let summary = failed
+                    .error
+                    .as_ref()
+                    .map(|err| format!("{} ({})", err.message, err.code))
+                    .unwrap_or_else(|| "failed".into());
+                Self {
+                    at_unix_millis,
+                    kind: "failed".into(),
+                    summary,
+                    data: None,
+                }
+            }
+            None => Self {
+                at_unix_millis,
+                kind: "unknown".into(),
+                summary: "missing payload".into(),
+                data: None,
+            },
+        }
+    }
+}
+
+fn parse_build_variant(value: &str) -> Option<BuildVariant> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "unspecified" => Some(BuildVariant::Unspecified),
+        "debug" => Some(BuildVariant::Debug),
+        "release" => Some(BuildVariant::Release),
+        _ => None,
+    }
+}
+
+fn parse_artifact_type(value: &str) -> Option<ArtifactType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "apk" => Some(ArtifactType::Apk),
+        "aab" | "bundle" => Some(ArtifactType::Aab),
+        "aar" => Some(ArtifactType::Aar),
+        "mapping" | "mapping.txt" => Some(ArtifactType::Mapping),
+        "test" | "tests" | "test_result" | "test-results" => Some(ArtifactType::TestResult),
+        _ => None,
+    }
+}
+
+fn parse_artifact_types(values: &[String]) -> (Vec<ArtifactType>, Vec<String>) {
+    let mut types = Vec::new();
+    let mut unknown = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(artifact_type) = parse_artifact_type(trimmed) {
+            types.push(artifact_type);
+        } else {
+            unknown.push(trimmed.to_string());
+        }
+    }
+    (types, unknown)
+}
+
+fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::Apk => "apk",
+        ArtifactType::Aab => "aab",
+        ArtifactType::Aar => "aar",
+        ArtifactType::Mapping => "mapping",
+        ArtifactType::TestResult => "test_result",
+        ArtifactType::Unspecified => "unspecified",
+    }
+}
+
+fn metadata_value<'a>(items: &'a [KeyValue], key: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .find(|item| item.key == key)
+        .map(|item| item.value.as_str())
+}
+
+fn render_artifact(artifact: &Artifact) {
+    let kind = ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+    println!(
+        "- [{}] {} size={} path={}",
+        artifact_type_label(kind),
+        artifact.name,
+        artifact.size_bytes,
+        artifact.path
+    );
+
+    let module = metadata_value(&artifact.metadata, "module").unwrap_or("");
+    let variant = metadata_value(&artifact.metadata, "variant").unwrap_or("");
+    let task = metadata_value(&artifact.metadata, "task").unwrap_or("");
+    if !module.is_empty() || !variant.is_empty() || !task.is_empty() {
+        let mut parts = Vec::new();
+        if !module.is_empty() {
+            parts.push(format!("module={module}"));
+        }
+        if !variant.is_empty() {
+            parts.push(format!("variant={variant}"));
+        }
+        if !task.is_empty() {
+            parts.push(format!("task={task}"));
+        }
+        println!("  {}", parts.join(" "));
+    }
+    if !artifact.sha256.is_empty() {
+        println!("  sha256={}", artifact.sha256);
     }
 }
 
