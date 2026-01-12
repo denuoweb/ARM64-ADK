@@ -11,7 +11,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 ## gRPC contract
 - proto/aadk/v1/toolchain.proto
 - RPCs: ListProviders, ListAvailable, ListInstalled, ListToolchainSets, InstallToolchain,
-  VerifyToolchain, CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
+  VerifyToolchain, UpdateToolchain, UninstallToolchain, CleanupToolchainCache,
+  CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
 
 ## Current implementation details
 - Implementation lives in crates/aadk-toolchain/src/main.rs with a tonic server.
@@ -22,9 +23,14 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - Available versions can also be sourced from fixture archives via AADK_TOOLCHAIN_FIXTURES_DIR.
 - Toolchains are installed under ~/.local/share/aadk/toolchains and cached in
   ~/.local/share/aadk/downloads; state is persisted in ~/.local/share/aadk/state/toolchains.json.
-- verify_toolchain checks that the install path exists, a provenance file exists, and
-  validates layout; it re-fetches the artifact for verification when needed.
+- Install/Update/Verify job progress metrics include provider/version/host/verify settings plus artifact URLs/paths and install roots.
+- verify_toolchain checks install path, provenance contents, catalog consistency, artifact size,
+  optional Ed25519 signatures (over SHA256 digest), and layout; it re-fetches the artifact for
+  hash verification when needed.
+- Catalog artifacts can supply signature metadata via `signature`, `signature_url`, and
+  `signature_public_key` (hex or base64); signatures are recorded in provenance when available.
 - InstallToolchain and VerifyToolchain accept optional job_id to reuse existing JobService jobs.
+- Update/Uninstall/Cleanup cache operations publish JobService events and can reuse job_id.
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
   toolchain set id.
 
@@ -42,5 +48,4 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - AADK_TOOLCHAIN_HOST_FALLBACK provides a comma-separated fallback host list.
 
 ## Prioritized TODO checklist by service
-- P1: Add uninstall/update operations and cached-artifact cleanup. main.rs (line 1161)
-- P2: Strengthen verification (signatures/provenance, not just hash). main.rs (line 1263)
+- P2: Add transparency log validation for toolchain artifacts. main.rs (line 1108)

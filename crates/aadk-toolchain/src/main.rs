@@ -11,17 +11,22 @@ use aadk_proto::aadk::v1::{
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
     toolchain_service_server::{ToolchainService, ToolchainServiceServer},
-    AvailableToolchain, CreateToolchainSetRequest, CreateToolchainSetResponse, ErrorCode, ErrorDetail,
-    GetActiveToolchainSetRequest, GetActiveToolchainSetResponse, Id, InstallToolchainRequest,
-    InstallToolchainResponse, InstalledToolchain, JobCompleted, JobEvent, JobFailed, JobLogAppended,
-    JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListAvailableRequest,
-    ListAvailableResponse, ListInstalledRequest, ListInstalledResponse, ListProvidersRequest,
-    ListProvidersResponse, ListToolchainSetsRequest, ListToolchainSetsResponse, LogChunk, PageInfo,
-    PublishJobEventRequest, SetActiveToolchainSetRequest,
-    SetActiveToolchainSetResponse, StartJobRequest, Timestamp, ToolchainArtifact, ToolchainKind,
-    ToolchainProvider, ToolchainSet, ToolchainVersion, VerifyToolchainRequest,
-    VerifyToolchainResponse, StreamJobEventsRequest, GetJobRequest,
+    AvailableToolchain, CleanupToolchainCacheRequest, CleanupToolchainCacheResponse,
+    CreateToolchainSetRequest, CreateToolchainSetResponse, ErrorCode, ErrorDetail,
+    GetActiveToolchainSetRequest, GetActiveToolchainSetResponse, GetJobRequest, Id,
+    InstallToolchainRequest, InstallToolchainResponse, InstalledToolchain, JobCompleted, JobEvent,
+    JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
+    ListAvailableRequest, ListAvailableResponse, ListInstalledRequest, ListInstalledResponse,
+    ListProvidersRequest, ListProvidersResponse, ListToolchainSetsRequest, ListToolchainSetsResponse,
+    LogChunk, PageInfo, PublishJobEventRequest, SetActiveToolchainSetRequest,
+    SetActiveToolchainSetResponse, StartJobRequest, StreamJobEventsRequest, Timestamp,
+    ToolchainArtifact, ToolchainKind, ToolchainProvider, ToolchainSet, ToolchainVersion,
+    UninstallToolchainRequest, UninstallToolchainResponse, UpdateToolchainRequest,
+    UpdateToolchainResponse, VerifyToolchainRequest, VerifyToolchainResponse,
 };
+use base64::engine::general_purpose;
+use base64::Engine as _;
+use ed25519_dalek::{Signature, VerifyingKey};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -50,6 +55,7 @@ struct Svc {
     catalog: Arc<Catalog>,
 }
 
+#[derive(Clone, Default)]
 struct Provenance {
     provider_id: String,
     provider_name: String,
@@ -58,6 +64,18 @@ struct Provenance {
     sha256: String,
     installed_at_unix_millis: i64,
     cached_path: String,
+    host: String,
+    artifact_size_bytes: u64,
+    signature: String,
+    signature_url: String,
+    signature_public_key: String,
+}
+
+#[derive(Clone, Default)]
+struct SignatureRecord {
+    signature: String,
+    signature_url: String,
+    public_key: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -93,6 +111,9 @@ struct CatalogArtifact {
     url: String,
     sha256: String,
     size_bytes: u64,
+    signature: String,
+    signature_url: String,
+    signature_public_key: String,
 }
 
 impl Default for Catalog {
@@ -501,6 +522,48 @@ fn default_install_root() -> PathBuf {
     data_dir().join("toolchains")
 }
 
+fn install_root_for_entry(entry: &InstalledToolchain) -> PathBuf {
+    let install_path = Path::new(&entry.install_path);
+    if let Some(provider_dir) = install_path.parent() {
+        if let Some(root) = provider_dir.parent() {
+            return root.to_path_buf();
+        }
+    }
+    default_install_root()
+}
+
+fn provider_id_from_installed(entry: &InstalledToolchain) -> Option<String> {
+    entry
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.provider_id.as_ref().map(|id| id.value.clone()))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn provider_name_from_installed(entry: &InstalledToolchain) -> Option<String> {
+    entry
+        .provider
+        .as_ref()
+        .map(|provider| provider.name.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn version_from_installed(entry: &InstalledToolchain) -> Option<String> {
+    entry
+        .version
+        .as_ref()
+        .map(|version| version.version.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn kind_from_installed(entry: &InstalledToolchain) -> ToolchainKind {
+    entry
+        .provider
+        .as_ref()
+        .and_then(|provider| ToolchainKind::try_from(provider.kind).ok())
+        .unwrap_or(ToolchainKind::Unspecified)
+}
+
 fn expand_user(path: &str) -> PathBuf {
     if path == "~" || path.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -674,6 +737,44 @@ async fn publish_progress(
     .await
 }
 
+fn metric(key: &str, value: impl ToString) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn toolchain_base_metrics(
+    provider_id: &str,
+    provider_name: &str,
+    version: &str,
+    verify_hash: bool,
+    host: &str,
+    artifact: Option<&ToolchainArtifact>,
+) -> Vec<KeyValue> {
+    let mut metrics = vec![
+        metric("provider_id", provider_id),
+        metric("provider", provider_name),
+        metric("version", version),
+        metric("verify_hash", verify_hash),
+        metric("host", host),
+    ];
+
+    if let Some(artifact) = artifact {
+        if !artifact.url.trim().is_empty() {
+            metrics.push(metric("artifact_url", &artifact.url));
+        }
+        if !artifact.sha256.trim().is_empty() {
+            metrics.push(metric("artifact_sha256", &artifact.sha256));
+        }
+        if artifact.size_bytes > 0 {
+            metrics.push(metric("artifact_size_bytes", artifact.size_bytes));
+        }
+    }
+
+    metrics
+}
+
 async fn publish_log(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -759,6 +860,23 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(hex_encode(&hasher.finalize()))
 }
 
+fn sha256_file_bytes(path: &Path) -> io::Result<[u8; 32]> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Ok(out)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -774,6 +892,76 @@ fn nibble_to_hex(n: u8) -> char {
         10..=15 => (b'a' + (n - 10)) as char,
         _ => '0',
     }
+}
+
+fn normalize_signature_value(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    let value = value.trim().trim_start_matches("0x");
+    if value.len() % 2 != 0 {
+        return Err("hex value length must be even".into());
+    }
+    let mut out = Vec::with_capacity(value.len() / 2);
+    let bytes = value.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let high = hex_value(bytes[idx]).ok_or_else(|| "invalid hex character".to_string())?;
+        let low = hex_value(bytes[idx + 1]).ok_or_else(|| "invalid hex character".to_string())?;
+        out.push((high << 4) | low);
+        idx += 2;
+    }
+    Ok(out)
+}
+
+fn decode_signature_field(value: &str) -> Result<Vec<u8>, String> {
+    let normalized = normalize_signature_value(value);
+    if normalized.is_empty() {
+        return Err("signature field is empty".into());
+    }
+    if let Ok(bytes) = decode_hex(&normalized) {
+        return Ok(bytes);
+    }
+    general_purpose::STANDARD
+        .decode(normalized.as_bytes())
+        .map_err(|_| "signature field is not valid hex or base64".to_string())
+}
+
+fn verify_ed25519_signature(
+    artifact_path: &Path,
+    signature_value: &str,
+    public_key_value: &str,
+) -> Result<(), String> {
+    let signature_bytes = decode_signature_field(signature_value)?;
+    let public_key_bytes = decode_signature_field(public_key_value)?;
+
+    let signature: [u8; 64] = signature_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    let public_key: [u8; 32] = public_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "public key must be 32 bytes".to_string())?;
+
+    let message = sha256_file_bytes(artifact_path)
+        .map_err(|e| format!("failed to hash artifact: {e}"))?;
+    let key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|e| format!("invalid public key: {e}"))?;
+    let signature = Signature::from_bytes(&signature);
+
+    key.verify_strict(&message, &signature)
+        .map_err(|e| format!("signature verification failed: {e}"))
 }
 
 fn cancel_requested(cancel_rx: Option<&watch::Receiver<bool>>) -> bool {
@@ -793,7 +981,256 @@ fn write_provenance(dir: &Path, prov: &Provenance) -> io::Result<()> {
     if !prov.cached_path.is_empty() {
         contents.push_str(&format!("cached_path={}\n", prov.cached_path));
     }
+    if !prov.host.is_empty() {
+        contents.push_str(&format!("host={}\n", prov.host));
+    }
+    if prov.artifact_size_bytes > 0 {
+        contents.push_str(&format!(
+            "artifact_size_bytes={}\n",
+            prov.artifact_size_bytes
+        ));
+    }
+    if !prov.signature.is_empty() {
+        contents.push_str(&format!("signature={}\n", prov.signature));
+    }
+    if !prov.signature_url.is_empty() {
+        contents.push_str(&format!("signature_url={}\n", prov.signature_url));
+    }
+    if !prov.signature_public_key.is_empty() {
+        contents.push_str(&format!("signature_public_key={}\n", prov.signature_public_key));
+    }
     fs::write(dir.join("provenance.txt"), contents)
+}
+
+fn parse_provenance(contents: &str) -> Provenance {
+    let mut prov = Provenance::default();
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "provider_id" => prov.provider_id = value.to_string(),
+            "provider_name" => prov.provider_name = value.to_string(),
+            "version" => prov.version = value.to_string(),
+            "source_url" => prov.source_url = value.to_string(),
+            "sha256" => prov.sha256 = value.to_string(),
+            "installed_at_unix_millis" => {
+                if let Ok(parsed) = value.parse::<i64>() {
+                    prov.installed_at_unix_millis = parsed;
+                }
+            }
+            "cached_path" => prov.cached_path = value.to_string(),
+            "host" => prov.host = value.to_string(),
+            "artifact_size_bytes" => {
+                if let Ok(parsed) = value.parse::<u64>() {
+                    prov.artifact_size_bytes = parsed;
+                }
+            }
+            "signature" => prov.signature = value.to_string(),
+            "signature_url" => prov.signature_url = value.to_string(),
+            "signature_public_key" => prov.signature_public_key = value.to_string(),
+            _ => {}
+        }
+    }
+    prov
+}
+
+fn read_provenance(path: &Path) -> io::Result<Provenance> {
+    let contents = fs::read_to_string(path)?;
+    Ok(parse_provenance(&contents))
+}
+
+fn catalog_artifact_for_provenance(
+    catalog: &Catalog,
+    provider_id: &str,
+    version: &str,
+    url: &str,
+    sha256: &str,
+) -> Option<CatalogArtifact> {
+    let provider = catalog
+        .providers
+        .iter()
+        .find(|item| item.provider_id == provider_id)?;
+    let version_entry = provider.versions.iter().find(|item| item.version == version)?;
+    if let Some(artifact) = version_entry.artifacts.iter().find(|item| item.url == url) {
+        return Some(artifact.clone());
+    }
+    if !sha256.is_empty() {
+        if let Some(artifact) = version_entry
+            .artifacts
+            .iter()
+            .find(|item| item.sha256 == sha256)
+        {
+            return Some(artifact.clone());
+        }
+    }
+    None
+}
+
+fn signature_record_from_catalog(artifact: &CatalogArtifact) -> Option<SignatureRecord> {
+    let signature = artifact.signature.trim().to_string();
+    let signature_url = artifact.signature_url.trim().to_string();
+    let public_key = artifact.signature_public_key.trim().to_string();
+    if signature.is_empty() && signature_url.is_empty() && public_key.is_empty() {
+        return None;
+    }
+    Some(SignatureRecord {
+        signature,
+        signature_url,
+        public_key,
+    })
+}
+
+fn signature_record_from_provenance(prov: &Provenance) -> Option<SignatureRecord> {
+    let signature = prov.signature.trim().to_string();
+    let signature_url = prov.signature_url.trim().to_string();
+    let public_key = prov.signature_public_key.trim().to_string();
+    if signature.is_empty() && signature_url.is_empty() && public_key.is_empty() {
+        return None;
+    }
+    Some(SignatureRecord {
+        signature,
+        signature_url,
+        public_key,
+    })
+}
+
+async fn fetch_signature_value(signature_url: &str) -> Result<String, String> {
+    if signature_url.trim().is_empty() {
+        return Err("signature url is empty".into());
+    }
+    if is_remote_url(signature_url) {
+        let client = Client::builder()
+            .user_agent("aadk-toolchain")
+            .build()
+            .map_err(|e| format!("failed to build http client: {e}"))?;
+        let resp = client
+            .get(signature_url)
+            .send()
+            .await
+            .map_err(|e| format!("signature download failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "signature download failed with status {}",
+                resp.status()
+            ));
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("signature download read failed: {e}"))?;
+        return Ok(body);
+    }
+    let path = local_artifact_path(signature_url)
+        .ok_or_else(|| "signature url is not a local file".to_string())?;
+    fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read signature file {}: {e}", path.display()))
+}
+
+async fn resolve_signature_value(record: &SignatureRecord) -> Result<String, String> {
+    if !record.signature.trim().is_empty() {
+        return Ok(normalize_signature_value(&record.signature));
+    }
+    if record.signature_url.trim().is_empty() {
+        return Err("signature is missing".into());
+    }
+    let raw = fetch_signature_value(&record.signature_url).await?;
+    let normalized = normalize_signature_value(&raw);
+    if normalized.is_empty() {
+        return Err("signature content empty".into());
+    }
+    Ok(normalized)
+}
+
+async fn verify_signature_if_configured(
+    artifact_path: &Path,
+    record: Option<&SignatureRecord>,
+) -> Result<Option<String>, String> {
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    if record.public_key.trim().is_empty() {
+        return Err("signature public key missing".into());
+    }
+    let signature_value = resolve_signature_value(record).await?;
+    verify_ed25519_signature(artifact_path, &signature_value, &record.public_key)?;
+    Ok(Some(signature_value))
+}
+
+fn verify_provenance_entry(
+    entry: &InstalledToolchain,
+    prov: &Provenance,
+    catalog: &Catalog,
+) -> Result<(), String> {
+    if prov.provider_id.trim().is_empty() {
+        return Err("provenance missing provider_id".into());
+    }
+    let entry_provider_id = provider_id_from_installed(entry)
+        .ok_or_else(|| "installed entry missing provider_id".to_string())?;
+    if prov.provider_id != entry_provider_id {
+        return Err(format!(
+            "provenance provider_id mismatch (expected {entry_provider_id}, got {})",
+            prov.provider_id
+        ));
+    }
+
+    if prov.version.trim().is_empty() {
+        return Err("provenance missing version".into());
+    }
+    let entry_version =
+        version_from_installed(entry).ok_or_else(|| "installed entry missing version".to_string())?;
+    if prov.version != entry_version {
+        return Err(format!(
+            "provenance version mismatch (expected {entry_version}, got {})",
+            prov.version
+        ));
+    }
+
+    if prov.source_url.trim().is_empty() {
+        return Err("provenance missing source_url".into());
+    }
+    if !entry.source_url.trim().is_empty() && prov.source_url != entry.source_url {
+        return Err("provenance source_url mismatch".into());
+    }
+
+    if prov.sha256.trim().is_empty() && !entry.sha256.trim().is_empty() {
+        return Err("provenance missing sha256".into());
+    }
+    if !prov.sha256.trim().is_empty() && !entry.sha256.trim().is_empty() && prov.sha256 != entry.sha256 {
+        return Err("provenance sha256 mismatch".into());
+    }
+
+    if !prov.provider_name.trim().is_empty() {
+        if let Some(entry_name) = provider_name_from_installed(entry) {
+            if prov.provider_name != entry_name {
+                return Err("provenance provider_name mismatch".into());
+            }
+        }
+    }
+
+    if is_remote_url(&prov.source_url) {
+        let artifact = catalog_artifact_for_provenance(
+            catalog,
+            &entry_provider_id,
+            &entry_version,
+            &prov.source_url,
+            &prov.sha256,
+        )
+        .ok_or_else(|| "provenance source_url not found in catalog".to_string())?;
+        if !artifact.sha256.is_empty() && !prov.sha256.is_empty() && artifact.sha256 != prov.sha256
+        {
+            return Err("catalog sha256 mismatch".into());
+        }
+        if prov.artifact_size_bytes > 0
+            && artifact.size_bytes > 0
+            && prov.artifact_size_bytes != artifact.size_bytes
+        {
+            return Err("catalog size_bytes mismatch".into());
+        }
+    }
+
+    Ok(())
 }
 
 fn load_state() -> State {
@@ -921,6 +1358,83 @@ fn toolchain_set_id(set: &ToolchainSet) -> Option<&str> {
     set.toolchain_set_id.as_ref().map(|id| id.value.as_str())
 }
 
+fn toolchain_referenced_by_sets(sets: &[ToolchainSet], toolchain_id: &str) -> bool {
+    sets.iter().any(|set| {
+        set.sdk_toolchain_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            == Some(toolchain_id)
+            || set
+                .ndk_toolchain_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                == Some(toolchain_id)
+    })
+}
+
+fn scrub_toolchain_from_sets(sets: &mut Vec<ToolchainSet>, toolchain_id: &str) -> Vec<String> {
+    let mut removed_sets = Vec::new();
+    for set in sets.iter_mut() {
+        if set
+            .sdk_toolchain_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            == Some(toolchain_id)
+        {
+            set.sdk_toolchain_id = None;
+        }
+        if set
+            .ndk_toolchain_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            == Some(toolchain_id)
+        {
+            set.ndk_toolchain_id = None;
+        }
+    }
+
+    sets.retain(|set| {
+        let has_any = set.sdk_toolchain_id.is_some() || set.ndk_toolchain_id.is_some();
+        if !has_any {
+            if let Some(set_id) = toolchain_set_id(set) {
+                removed_sets.push(set_id.to_string());
+            }
+        }
+        has_any
+    });
+
+    removed_sets
+}
+
+fn replace_toolchain_in_sets(
+    sets: &mut Vec<ToolchainSet>,
+    old_id: &str,
+    new_id: &str,
+) -> usize {
+    let mut updated = 0usize;
+    for set in sets {
+        if set
+            .sdk_toolchain_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            == Some(old_id)
+        {
+            set.sdk_toolchain_id = Some(Id { value: new_id.to_string() });
+            updated += 1;
+        }
+        if set
+            .ndk_toolchain_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            == Some(old_id)
+        {
+            set.ndk_toolchain_id = Some(Id { value: new_id.to_string() });
+            updated += 1;
+        }
+    }
+    updated
+}
+
 fn download_dir() -> PathBuf {
     data_dir().join("downloads")
 }
@@ -944,6 +1458,31 @@ fn cached_artifact_path(url: &str) -> PathBuf {
 
 fn is_remote_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
+}
+
+fn cached_path_for_entry(entry: &InstalledToolchain) -> Option<PathBuf> {
+    if !is_remote_url(entry.source_url.as_str()) {
+        return None;
+    }
+    let prov_path = Path::new(&entry.install_path).join("provenance.txt");
+    if prov_path.exists() {
+        if let Ok(prov) = read_provenance(&prov_path) {
+            if !prov.cached_path.trim().is_empty() {
+                return Some(PathBuf::from(prov.cached_path));
+            }
+        }
+    }
+    Some(cached_artifact_path(&entry.source_url))
+}
+
+fn cached_paths_for_installed(installed: &[InstalledToolchain]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in installed {
+        if let Some(path) = cached_path_for_entry(entry) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 async fn download_artifact(
@@ -1403,19 +1942,47 @@ impl Svc {
             return Ok(());
         }
 
+        let signature_record = catalog_artifact_for_provenance(
+            &self.catalog,
+            &provider_id,
+            &version,
+            &artifact.url,
+            &artifact.sha256,
+        )
+        .and_then(|artifact| signature_record_from_catalog(&artifact));
+
         if !verify_hash && !artifact.sha256.is_empty() {
             warn!("Skipping hash verification for provider {}", provider.name);
         }
+        if !verify_hash && signature_record.is_some() {
+            warn!("Skipping signature verification for provider {}", provider.name);
+        }
+
+        let install_root = if install_root.trim().is_empty() {
+            default_install_root()
+        } else {
+            expand_user(&install_root)
+        };
+        let provider_kind = ToolchainKind::try_from(provider.kind).unwrap_or(ToolchainKind::Unspecified);
 
         let _ = publish_progress(
             &mut job_client,
             &job_id,
             10,
             "resolve artifact",
-            vec![
-                KeyValue { key: "provider".into(), value: provider.name.clone() },
-                KeyValue { key: "version".into(), value: version.clone() },
-            ],
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("provider_kind", format!("{provider_kind:?}")));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
         )
         .await;
         let _ = publish_log(
@@ -1448,20 +2015,55 @@ impl Svc {
             return Ok(());
         }
 
+        let mut signature_value = String::new();
+        let mut signature_url = String::new();
+        let mut signature_public_key = String::new();
+        if let Some(record) = signature_record.as_ref() {
+            signature_url = record.signature_url.clone();
+            signature_public_key = record.public_key.clone();
+            if verify_hash {
+                match verify_signature_if_configured(&archive_path, Some(record)).await {
+                    Ok(Some(sig)) => signature_value = sig,
+                    Ok(None) => {}
+                    Err(err) => {
+                        let err_detail = job_error_detail(
+                            ErrorCode::ToolchainInstallFailed,
+                            "signature verification failed",
+                            err,
+                            &job_id,
+                        );
+                        let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                        return Ok(());
+                    }
+                }
+            } else if !record.signature.trim().is_empty() {
+                signature_value = normalize_signature_value(&record.signature);
+            }
+        }
+
         let _ = publish_progress(
             &mut job_client,
             &job_id,
             45,
             "downloaded",
-            vec![KeyValue { key: "archive_path".into(), value: archive_path.to_string_lossy().to_string() }],
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric(
+                    "archive_path",
+                    archive_path.to_string_lossy().to_string(),
+                ));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
         )
         .await;
-
-        let install_root = if install_root.trim().is_empty() {
-            default_install_root()
-        } else {
-            expand_user(&install_root)
-        };
 
         let provider_dir = install_root.join(&provider.name);
         if let Err(err) = fs::create_dir_all(&provider_dir) {
@@ -1499,7 +2101,26 @@ impl Svc {
             return Ok(());
         }
 
-        let _ = publish_progress(&mut job_client, &job_id, 65, "extracting", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            65,
+            "extracting",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("archive_path", archive_path.to_string_lossy().to_string()));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
         if let Err(err) = extract_archive(&archive_path, &temp_dir, Some(&cancel_rx)).await {
             if err.code() == tonic::Code::Cancelled {
                 let _ = publish_log(&mut job_client, &job_id, "Install cancelled during extract\n").await;
@@ -1537,6 +2158,11 @@ impl Svc {
             sha256: artifact.sha256.clone(),
             installed_at_unix_millis: installed_at.unix_millis,
             cached_path,
+            host: host.clone(),
+            artifact_size_bytes: artifact.size_bytes,
+            signature: signature_value,
+            signature_url,
+            signature_public_key,
         };
         if let Err(err) = write_provenance(&temp_dir, &prov) {
             let _ = fs::remove_dir_all(&temp_dir);
@@ -1550,7 +2176,25 @@ impl Svc {
             return Ok(());
         }
 
-        let _ = publish_progress(&mut job_client, &job_id, 85, "finalizing", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            85,
+            "finalizing",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
         if let Err(err) = finalize_install(&temp_dir, &final_dir) {
             let _ = fs::remove_dir_all(&temp_dir);
             let err_detail = job_error_detail(
@@ -1580,7 +2224,25 @@ impl Svc {
         save_state_best_effort(&st);
         drop(st);
 
-        let _ = publish_progress(&mut job_client, &job_id, 100, "completed", vec![]).await;
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            100,
+            "completed",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("install_path", final_dir.display()));
+                metrics
+            },
+        )
+        .await;
         let _ = publish_completed(
             &mut job_client,
             &job_id,
@@ -1590,6 +2252,738 @@ impl Svc {
                 KeyValue { key: "provider".into(), value: provider.name },
                 KeyValue { key: "version".into(), value: version },
                 KeyValue { key: "install_path".into(), value: final_dir.to_string_lossy().to_string() },
+            ],
+        )
+        .await;
+
+        Ok(())
+    }
+
+    async fn run_uninstall_job(
+        &self,
+        job_id: String,
+        toolchain_id: String,
+        remove_cached_artifact: bool,
+        force: bool,
+    ) -> Result<(), Status> {
+        let mut job_client = connect_job().await?;
+        let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+
+        if job_is_cancelled(&mut job_client, &job_id).await {
+            let _ = publish_log(&mut job_client, &job_id, "Uninstall cancelled before start\n").await;
+            return Ok(());
+        }
+
+        let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
+        let _ = publish_log(&mut job_client, &job_id, "Starting toolchain uninstall\n").await;
+
+        let (entry, cached_path, keep_paths, early_error) = {
+            let st = self.state.lock().await;
+            let entry = st
+                .installed
+                .iter()
+                .find(|item| item.toolchain_id.as_ref().map(|id| id.value.as_str()) == Some(toolchain_id.as_str()))
+                .cloned();
+            if entry.is_none() {
+                let err_detail = job_error_detail(
+                    ErrorCode::NotFound,
+                    "toolchain not found",
+                    format!("toolchain_id={toolchain_id}"),
+                    &job_id,
+                );
+                (None, None, Vec::new(), Some(err_detail))
+            } else if toolchain_referenced_by_sets(&st.toolchain_sets, &toolchain_id) && !force {
+                let err_detail = job_error_detail(
+                    ErrorCode::InvalidArgument,
+                    "toolchain is referenced by a toolchain set",
+                    "use force to remove references".into(),
+                    &job_id,
+                );
+                (None, None, Vec::new(), Some(err_detail))
+            } else {
+                let entry = entry.unwrap();
+                let cached_path = cached_path_for_entry(&entry);
+                let mut keep_paths = Vec::new();
+                for item in st.installed.iter() {
+                    if item.toolchain_id.as_ref().map(|id| id.value.as_str())
+                        == Some(toolchain_id.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(path) = cached_path_for_entry(item) {
+                        keep_paths.push(path);
+                    }
+                }
+                (Some(entry), cached_path, keep_paths, None)
+            }
+        };
+
+        if let Some(err_detail) = early_error {
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+        let entry = match entry {
+            Some(entry) => entry,
+            None => return Ok(()),
+        };
+
+        if cancel_requested(Some(&cancel_rx)) {
+            let _ = publish_log(&mut job_client, &job_id, "Uninstall cancelled\n").await;
+            return Ok(());
+        }
+
+        let install_path = PathBuf::from(entry.install_path.clone());
+        if install_path.exists() {
+            if let Err(err) = fs::remove_dir_all(&install_path) {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainUninstallFailed,
+                    "failed to remove install directory",
+                    err.to_string(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        } else {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                &format!("Install path missing: {}\n", install_path.display()),
+            )
+            .await;
+        }
+
+        let mut cached_removed = false;
+        let mut cached_skipped = false;
+        if remove_cached_artifact {
+            if let Some(path) = cached_path {
+                if keep_paths.iter().any(|keep| keep == &path) {
+                    cached_skipped = true;
+                } else if path.exists() {
+                    if let Err(err) = fs::remove_file(&path) {
+                        let _ = publish_log(
+                            &mut job_client,
+                            &job_id,
+                            &format!("Failed to remove cached artifact {}: {err}\n", path.display()),
+                        )
+                        .await;
+                    } else {
+                        cached_removed = true;
+                    }
+                }
+            }
+        }
+
+        let mut st = self.state.lock().await;
+        if force {
+            let removed_sets = scrub_toolchain_from_sets(&mut st.toolchain_sets, &toolchain_id);
+            if let Some(active) = st.active_set_id.clone() {
+                if removed_sets.iter().any(|id| id == &active) {
+                    st.active_set_id = None;
+                }
+            }
+        }
+        st.installed.retain(|item| item.toolchain_id.as_ref().map(|id| id.value.as_str()) != Some(toolchain_id.as_str()));
+        save_state_best_effort(&st);
+        drop(st);
+
+        let mut outputs = vec![
+            KeyValue { key: "toolchain_id".into(), value: toolchain_id.clone() },
+            KeyValue { key: "install_path".into(), value: entry.install_path.clone() },
+        ];
+        if cached_removed {
+            outputs.push(KeyValue { key: "cached_artifact_removed".into(), value: "true".into() });
+        } else if cached_skipped {
+            outputs.push(KeyValue { key: "cached_artifact_removed".into(), value: "false".into() });
+            outputs.push(KeyValue { key: "cached_artifact_in_use".into(), value: "true".into() });
+        }
+
+        let _ = publish_completed(
+            &mut job_client,
+            &job_id,
+            "Toolchain uninstalled",
+            outputs,
+        )
+        .await;
+
+        Ok(())
+    }
+
+    async fn run_update_job(
+        &self,
+        job_id: String,
+        toolchain_id: String,
+        target_version: String,
+        verify_hash: bool,
+        remove_cached_artifact: bool,
+    ) -> Result<(), Status> {
+        let mut job_client = connect_job().await?;
+        let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+
+        if job_is_cancelled(&mut job_client, &job_id).await {
+            let _ = publish_log(&mut job_client, &job_id, "Update cancelled before start\n").await;
+            return Ok(());
+        }
+
+        let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
+        let _ = publish_log(&mut job_client, &job_id, "Starting toolchain update\n").await;
+
+        if target_version.trim().is_empty() {
+            let err_detail = job_error_detail(
+                ErrorCode::InvalidArgument,
+                "target version is required",
+                "".into(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let (current, install_root, early_error) = {
+            let st = self.state.lock().await;
+            let entry = st
+                .installed
+                .iter()
+                .find(|item| item.toolchain_id.as_ref().map(|id| id.value.as_str()) == Some(toolchain_id.as_str()))
+                .cloned();
+            if let Some(entry) = entry {
+                let install_root = install_root_for_entry(&entry);
+                (Some(entry), install_root, None)
+            } else {
+                let err_detail = job_error_detail(
+                    ErrorCode::NotFound,
+                    "toolchain not found",
+                    format!("toolchain_id={toolchain_id}"),
+                    &job_id,
+                );
+                (None, default_install_root(), Some(err_detail))
+            }
+        };
+
+        if let Some(err_detail) = early_error {
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+        let current = match current {
+            Some(entry) => entry,
+            None => return Ok(()),
+        };
+
+        let current_version = version_from_installed(&current).unwrap_or_default();
+        if current_version == target_version {
+            let err_detail = job_error_detail(
+                ErrorCode::InvalidArgument,
+                "target version matches installed version",
+                current_version,
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let provider_id = match provider_id_from_installed(&current) {
+            Some(id) => id,
+            None => {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainUpdateFailed,
+                    "installed toolchain missing provider id",
+                    "".into(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        };
+
+        let host = host_key().unwrap_or_else(|| "unknown".into());
+        let fixtures = fixtures_dir();
+        if fixtures.is_none() && host == "unknown" {
+            let host_raw = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainIncompatibleHost,
+                "unsupported host for toolchain artifacts",
+                host_raw,
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let available = match find_available(&self.catalog, &provider_id, &target_version, &host, fixtures.as_deref()) {
+            Some(item) => item,
+            None => {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainUpdateFailed,
+                    "requested toolchain version not found",
+                    format!("provider_id={provider_id} version={target_version}"),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        };
+
+        let provider = match available.provider.clone() {
+            Some(p) => p,
+            None => {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainUpdateFailed,
+                    "unknown provider_id",
+                    provider_id.clone(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        };
+
+        let artifact = available
+            .artifact
+            .clone()
+            .unwrap_or(ToolchainArtifact {
+                url: "".into(),
+                sha256: "".into(),
+                size_bytes: 0,
+            });
+
+        if artifact.url.is_empty() {
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "artifact url missing",
+                "".into(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let signature_record = catalog_artifact_for_provenance(
+            &self.catalog,
+            &provider_id,
+            &target_version,
+            &artifact.url,
+            &artifact.sha256,
+        )
+        .and_then(|artifact| signature_record_from_catalog(&artifact));
+        if !verify_hash && signature_record.is_some() {
+            warn!("Skipping signature verification for provider {}", provider.name);
+        }
+
+        let provider_kind = ToolchainKind::try_from(provider.kind).unwrap_or(ToolchainKind::Unspecified);
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            10,
+            "resolve artifact",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &target_version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("provider_kind", format!("{provider_kind:?}")));
+                metrics.push(metric("toolchain_id", &toolchain_id));
+                metrics.push(metric("current_version", &current_version));
+                metrics.push(metric("target_version", &target_version));
+                metrics.push(metric("remove_cached", remove_cached_artifact));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
+
+        let archive_path = match ensure_artifact_local(&artifact, verify_hash, Some(&cancel_rx)).await {
+            Ok(path) => path,
+            Err(err) if err.code() == tonic::Code::Cancelled => {
+                let _ = publish_log(&mut job_client, &job_id, "Update cancelled during download\n").await;
+                return Ok(());
+            }
+            Err(err) => {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainUpdateFailed,
+                    "failed to fetch or verify artifact",
+                    err.message().to_string(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        };
+
+        let mut signature_value = String::new();
+        let mut signature_url = String::new();
+        let mut signature_public_key = String::new();
+        if let Some(record) = signature_record.as_ref() {
+            signature_url = record.signature_url.clone();
+            signature_public_key = record.public_key.clone();
+            if verify_hash {
+                match verify_signature_if_configured(&archive_path, Some(record)).await {
+                    Ok(Some(sig)) => signature_value = sig,
+                    Ok(None) => {}
+                    Err(err) => {
+                        let err_detail = job_error_detail(
+                            ErrorCode::ToolchainUpdateFailed,
+                            "signature verification failed",
+                            err,
+                            &job_id,
+                        );
+                        let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                        return Ok(());
+                    }
+                }
+            } else if !record.signature.trim().is_empty() {
+                signature_value = normalize_signature_value(&record.signature);
+            }
+        }
+
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            45,
+            "downloaded",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &target_version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("toolchain_id", &toolchain_id));
+                metrics.push(metric("current_version", &current_version));
+                metrics.push(metric("target_version", &target_version));
+                metrics.push(metric("remove_cached", remove_cached_artifact));
+                metrics.push(metric("archive_path", archive_path.to_string_lossy().to_string()));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
+
+        let provider_dir = install_root.join(&provider.name);
+        if let Err(err) = fs::create_dir_all(&provider_dir) {
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "failed to create install root",
+                err.to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let final_dir = provider_dir.join(&target_version);
+        if final_dir.exists() {
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "target version already installed",
+                final_dir.to_string_lossy().to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let temp_dir = provider_dir.join(format!(".tmp-{}", Uuid::new_v4()));
+        if let Err(err) = fs::create_dir_all(&temp_dir) {
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "failed to create temp dir",
+                err.to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            65,
+            "extracting",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &target_version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("toolchain_id", &toolchain_id));
+                metrics.push(metric("current_version", &current_version));
+                metrics.push(metric("target_version", &target_version));
+                metrics.push(metric("archive_path", archive_path.to_string_lossy().to_string()));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
+        if let Err(err) = extract_archive(&archive_path, &temp_dir, Some(&cancel_rx)).await {
+            if err.code() == tonic::Code::Cancelled {
+                let _ = publish_log(&mut job_client, &job_id, "Update cancelled during extract\n").await;
+                let _ = fs::remove_dir_all(&temp_dir);
+                return Ok(());
+            }
+            let _ = fs::remove_dir_all(&temp_dir);
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "failed to extract archive",
+                err.message().to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let installed_at = now_ts();
+        let cached_path = if is_remote_url(&artifact.url) {
+            archive_path.to_string_lossy().to_string()
+        } else {
+            String::new()
+        };
+        let prov = Provenance {
+            provider_id: provider_id.clone(),
+            provider_name: provider.name.clone(),
+            version: target_version.clone(),
+            source_url: artifact.url.clone(),
+            sha256: artifact.sha256.clone(),
+            installed_at_unix_millis: installed_at.unix_millis,
+            cached_path,
+            host: host.clone(),
+            artifact_size_bytes: artifact.size_bytes,
+            signature: signature_value,
+            signature_url,
+            signature_public_key,
+        };
+        if let Err(err) = write_provenance(&temp_dir, &prov) {
+            let _ = fs::remove_dir_all(&temp_dir);
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "failed to write provenance",
+                err.to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            85,
+            "finalizing",
+            {
+                let mut metrics = toolchain_base_metrics(
+                    &provider_id,
+                    &provider.name,
+                    &target_version,
+                    verify_hash,
+                    &host,
+                    Some(&artifact),
+                );
+                metrics.push(metric("toolchain_id", &toolchain_id));
+                metrics.push(metric("current_version", &current_version));
+                metrics.push(metric("target_version", &target_version));
+                metrics.push(metric("install_root", install_root.display()));
+                metrics
+            },
+        )
+        .await;
+        if let Err(err) = finalize_install(&temp_dir, &final_dir) {
+            let _ = fs::remove_dir_all(&temp_dir);
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainUpdateFailed,
+                "failed to finalize install",
+                err.message().to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+            return Ok(());
+        }
+
+        let new_toolchain_id = format!("tc-{}", Uuid::new_v4());
+        let installed = InstalledToolchain {
+            toolchain_id: Some(Id { value: new_toolchain_id.clone() }),
+            provider: Some(provider.clone()),
+            version: available.version.clone(),
+            install_path: final_dir.to_string_lossy().to_string(),
+            verified: verify_hash,
+            installed_at: Some(installed_at),
+            source_url: artifact.url,
+            sha256: artifact.sha256,
+        };
+
+        let mut removed_old_install = false;
+        if !current.install_path.trim().is_empty() {
+            let old_path = PathBuf::from(&current.install_path);
+            if old_path.exists() {
+                if let Err(err) = fs::remove_dir_all(&old_path) {
+                    let _ = publish_log(
+                        &mut job_client,
+                        &job_id,
+                        &format!("Failed to remove old install path {}: {err}\n", old_path.display()),
+                    )
+                    .await;
+                } else {
+                    removed_old_install = true;
+                }
+            }
+        }
+
+        let mut cached_removed = false;
+        if remove_cached_artifact {
+            let cached_path = cached_path_for_entry(&current);
+            let keep_paths = {
+                let st = self.state.lock().await;
+                st.installed
+                    .iter()
+                    .filter(|item| item.toolchain_id.as_ref().map(|id| id.value.as_str()) != Some(toolchain_id.as_str()))
+                    .filter_map(cached_path_for_entry)
+                    .collect::<Vec<_>>()
+            };
+            if let Some(path) = cached_path {
+                if !keep_paths.iter().any(|keep| keep == &path) && path.exists() {
+                    if fs::remove_file(&path).is_ok() {
+                        cached_removed = true;
+                    }
+                }
+            }
+        }
+
+        let mut st = self.state.lock().await;
+        st.installed.push(installed);
+        replace_toolchain_in_sets(&mut st.toolchain_sets, &toolchain_id, &new_toolchain_id);
+        st.installed.retain(|item| item.toolchain_id.as_ref().map(|id| id.value.as_str()) != Some(toolchain_id.as_str()));
+        save_state_best_effort(&st);
+        drop(st);
+
+        let mut outputs = vec![
+            KeyValue { key: "old_toolchain_id".into(), value: toolchain_id.clone() },
+            KeyValue { key: "new_toolchain_id".into(), value: new_toolchain_id.clone() },
+            KeyValue { key: "old_version".into(), value: current_version },
+            KeyValue { key: "new_version".into(), value: target_version.clone() },
+            KeyValue { key: "install_path".into(), value: final_dir.to_string_lossy().to_string() },
+        ];
+        if removed_old_install {
+            outputs.push(KeyValue { key: "old_install_removed".into(), value: "true".into() });
+        }
+        if cached_removed {
+            outputs.push(KeyValue { key: "cached_artifact_removed".into(), value: "true".into() });
+        }
+
+        let _ = publish_completed(
+            &mut job_client,
+            &job_id,
+            "Toolchain updated",
+            outputs,
+        )
+        .await;
+
+        Ok(())
+    }
+
+    async fn run_cache_cleanup_job(
+        &self,
+        job_id: String,
+        dry_run: bool,
+        remove_all: bool,
+    ) -> Result<(), Status> {
+        let mut job_client = connect_job().await?;
+        let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+
+        if job_is_cancelled(&mut job_client, &job_id).await {
+            let _ = publish_log(&mut job_client, &job_id, "Cleanup cancelled before start\n").await;
+            return Ok(());
+        }
+
+        let _ = publish_state(&mut job_client, &job_id, JobState::Running).await;
+        let _ = publish_log(&mut job_client, &job_id, "Starting toolchain cache cleanup\n").await;
+
+        let download_dir = download_dir();
+        if !download_dir.exists() {
+            let _ = publish_completed(
+                &mut job_client,
+                &job_id,
+                "Toolchain cache cleanup complete",
+                vec![
+                    KeyValue { key: "removed_count".into(), value: "0".into() },
+                    KeyValue { key: "removed_bytes".into(), value: "0".into() },
+                    KeyValue { key: "dry_run".into(), value: dry_run.to_string() },
+                ],
+            )
+            .await;
+            return Ok(());
+        }
+
+        let keep_paths = if remove_all {
+            Vec::new()
+        } else {
+            let st = self.state.lock().await;
+            cached_paths_for_installed(&st.installed)
+        };
+
+        let mut removed_count = 0u64;
+        let mut removed_bytes = 0u64;
+        let mut scanned = 0u64;
+
+        let entries = match fs::read_dir(&download_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainCacheCleanupFailed,
+                    "failed to read download directory",
+                    err.to_string(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        };
+
+        for entry in entries.flatten() {
+            if cancel_requested(Some(&cancel_rx)) {
+                let _ = publish_log(&mut job_client, &job_id, "Cleanup cancelled\n").await;
+                return Ok(());
+            }
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            scanned += 1;
+            if !remove_all && keep_paths.iter().any(|keep| keep == &path) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if !dry_run {
+                if let Err(err) = fs::remove_file(&path) {
+                    let _ = publish_log(
+                        &mut job_client,
+                        &job_id,
+                        &format!("Failed to remove {}: {err}\n", path.display()),
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            removed_count += 1;
+            removed_bytes += size;
+        }
+
+        let _ = publish_completed(
+            &mut job_client,
+            &job_id,
+            "Toolchain cache cleanup complete",
+            vec![
+                KeyValue { key: "removed_count".into(), value: removed_count.to_string() },
+                KeyValue { key: "removed_bytes".into(), value: removed_bytes.to_string() },
+                KeyValue { key: "scanned".into(), value: scanned.to_string() },
+                KeyValue { key: "dry_run".into(), value: dry_run.to_string() },
+                KeyValue { key: "remove_all".into(), value: remove_all.to_string() },
             ],
         )
         .await;
@@ -1925,7 +3319,74 @@ impl ToolchainService for Svc {
             return Ok(Response::new(resp));
         }
 
-        if entry.source_url.is_empty() {
+        let provenance = match read_provenance(&prov_path) {
+            Ok(prov) => prov,
+            Err(err) => {
+                entry.verified = false;
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainVerifyFailed,
+                    "failed to read provenance",
+                    err.to_string(),
+                    &job_id,
+                );
+                let resp = VerifyToolchainResponse {
+                    verified: false,
+                    error: Some(err_detail),
+                    job_id: Some(Id { value: job_id.clone() }),
+                };
+                save_state_best_effort(&st);
+                drop(st);
+                let _ = publish_failed(&mut job_client, &job_id, resp.error.clone().unwrap()).await;
+                return Ok(Response::new(resp));
+            }
+        };
+
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            10,
+            "loading provenance",
+            vec![
+                metric("toolchain_id", &id),
+                metric("install_path", &entry.install_path),
+                metric("provenance_path", prov_path.display()),
+                metric("provider_id", &provenance.provider_id),
+                metric("version", &provenance.version),
+            ],
+        )
+        .await;
+
+        if let Err(err) = verify_provenance_entry(entry, &provenance, &self.catalog) {
+            entry.verified = false;
+            let err_detail = job_error_detail(
+                ErrorCode::ToolchainVerifyFailed,
+                "provenance validation failed",
+                err,
+                &job_id,
+            );
+            let resp = VerifyToolchainResponse {
+                verified: false,
+                error: Some(err_detail),
+                job_id: Some(Id { value: job_id.clone() }),
+            };
+            save_state_best_effort(&st);
+            drop(st);
+            let _ = publish_failed(&mut job_client, &job_id, resp.error.clone().unwrap()).await;
+            return Ok(Response::new(resp));
+        }
+
+        let source_url = if entry.source_url.trim().is_empty() {
+            provenance.source_url.clone()
+        } else {
+            entry.source_url.clone()
+        };
+        let sha256 = if entry.sha256.trim().is_empty() {
+            provenance.sha256.clone()
+        } else {
+            entry.sha256.clone()
+        };
+
+        if source_url.is_empty() {
             entry.verified = false;
             let err_detail = job_error_detail(
                 ErrorCode::ToolchainVerifyFailed,
@@ -1944,6 +3405,21 @@ impl ToolchainService for Svc {
             return Ok(Response::new(resp));
         }
 
+        let signature_record = signature_record_from_provenance(&provenance).or_else(|| {
+            if is_remote_url(&source_url) {
+                catalog_artifact_for_provenance(
+                    &self.catalog,
+                    &provenance.provider_id,
+                    &provenance.version,
+                    &source_url,
+                    &sha256,
+                )
+                .and_then(|artifact| signature_record_from_catalog(&artifact))
+            } else {
+                None
+            }
+        });
+
         if cancel_requested(Some(&cancel_rx)) {
             let _ = publish_log(&mut job_client, &job_id, "Verification cancelled\n").await;
             return Ok(Response::new(VerifyToolchainResponse {
@@ -1959,14 +3435,56 @@ impl ToolchainService for Svc {
         }
 
         let artifact = ToolchainArtifact {
-            url: entry.source_url.clone(),
-            sha256: entry.sha256.clone(),
+            url: source_url.clone(),
+            sha256: sha256.clone(),
             size_bytes: 0,
         };
 
         drop(st);
 
+        let _ = publish_progress(
+            &mut job_client,
+            &job_id,
+            45,
+            "fetching artifact",
+            vec![
+                metric("toolchain_id", &id),
+                metric("artifact_url", &artifact.url),
+                metric("artifact_sha256", &artifact.sha256),
+            ],
+        )
+        .await;
+
         let verify_result = ensure_artifact_local(&artifact, true, Some(&cancel_rx)).await;
+
+        if let Ok(local_path) = &verify_result {
+            let _ = publish_progress(
+                &mut job_client,
+                &job_id,
+                80,
+                "verifying artifact",
+                vec![
+                    metric("toolchain_id", &id),
+                    metric("artifact_path", local_path.to_string_lossy().to_string()),
+                    metric("artifact_sha256", &artifact.sha256),
+                ],
+            )
+            .await;
+        }
+
+        let signature_result = match &verify_result {
+            Ok(local_path) => verify_signature_if_configured(local_path, signature_record.as_ref()).await,
+            Err(_) => Ok(None),
+        };
+        let signature_error = signature_result
+            .as_ref()
+            .err()
+            .map(|err| job_error_detail(
+                ErrorCode::ToolchainVerifyFailed,
+                "signature verification failed",
+                err.clone(),
+                &job_id,
+            ));
 
         let mut st = self.state.lock().await;
         let entry = st
@@ -2003,14 +3521,8 @@ impl ToolchainService for Svc {
                     .map(|p| ToolchainKind::try_from(p.kind).unwrap_or(ToolchainKind::Unspecified))
                     .unwrap_or(ToolchainKind::Unspecified);
 
-                if let Err(msg) = validate_toolchain_layout(kind, Path::new(&entry.install_path)) {
+                if let Some(err_detail) = signature_error.clone() {
                     entry.verified = false;
-                    let err_detail = job_error_detail(
-                        ErrorCode::ToolchainVerifyFailed,
-                        "post-install validation failed",
-                        msg,
-                        &job_id,
-                    );
                     publish_failure = Some(err_detail.clone());
                     VerifyToolchainResponse {
                         verified: false,
@@ -2018,15 +3530,58 @@ impl ToolchainService for Svc {
                         job_id: Some(Id { value: job_id.clone() }),
                     }
                 } else {
-                    entry.verified = true;
-                    publish_success = Some((
-                        local_path.to_string_lossy().to_string(),
-                        entry.install_path.clone(),
-                    ));
-                    VerifyToolchainResponse {
-                        verified: true,
-                        error: None,
-                        job_id: Some(Id { value: job_id.clone() }),
+                    let mut size_mismatch: Option<ErrorDetail> = None;
+                    if provenance.artifact_size_bytes > 0 {
+                        if let Ok(meta) = fs::metadata(&local_path) {
+                            if meta.len() != provenance.artifact_size_bytes {
+                                entry.verified = false;
+                                let err_detail = job_error_detail(
+                                    ErrorCode::ToolchainVerifyFailed,
+                                    "artifact size mismatch",
+                                    format!(
+                                        "expected={} actual={}",
+                                        provenance.artifact_size_bytes,
+                                        meta.len()
+                                    ),
+                                    &job_id,
+                                );
+                                size_mismatch = Some(err_detail);
+                            }
+                        }
+                    }
+
+                    if let Some(err_detail) = size_mismatch {
+                        publish_failure = Some(err_detail.clone());
+                        VerifyToolchainResponse {
+                            verified: false,
+                            error: Some(err_detail),
+                            job_id: Some(Id { value: job_id.clone() }),
+                        }
+                    } else if let Err(msg) = validate_toolchain_layout(kind, Path::new(&entry.install_path)) {
+                        entry.verified = false;
+                        let err_detail = job_error_detail(
+                            ErrorCode::ToolchainVerifyFailed,
+                            "post-install validation failed",
+                            msg,
+                            &job_id,
+                        );
+                        publish_failure = Some(err_detail.clone());
+                        VerifyToolchainResponse {
+                            verified: false,
+                            error: Some(err_detail),
+                            job_id: Some(Id { value: job_id.clone() }),
+                        }
+                    } else {
+                        entry.verified = true;
+                        publish_success = Some((
+                            local_path.to_string_lossy().to_string(),
+                            entry.install_path.clone(),
+                        ));
+                        VerifyToolchainResponse {
+                            verified: true,
+                            error: None,
+                            job_id: Some(Id { value: job_id.clone() }),
+                        }
                     }
                 }
             }
@@ -2071,7 +3626,13 @@ impl ToolchainService for Svc {
                 &job_id,
                 100,
                 "verified",
-                vec![KeyValue { key: "artifact_path".into(), value: artifact_path }],
+                vec![
+                    metric("toolchain_id", &id),
+                    metric("artifact_path", &artifact_path),
+                    metric("install_path", &install_path),
+                    metric("provider_id", &provenance.provider_id),
+                    metric("version", &provenance.version),
+                ],
             )
             .await;
             let _ = publish_completed(
@@ -2087,6 +3648,157 @@ impl ToolchainService for Svc {
         }
 
         Ok(Response::new(resp))
+    }
+
+    async fn update_toolchain(
+        &self,
+        request: Request<UpdateToolchainRequest>,
+    ) -> Result<Response<UpdateToolchainResponse>, Status> {
+        let req = request.into_inner();
+        let toolchain_id = req
+            .toolchain_id
+            .ok_or_else(|| Status::invalid_argument("toolchain_id is required"))?
+            .value;
+
+        let mut job_client = connect_job().await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "toolchain.update",
+                vec![
+                    KeyValue { key: "toolchain_id".into(), value: toolchain_id.clone() },
+                    KeyValue { key: "version".into(), value: req.version.clone() },
+                    KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
+                    KeyValue { key: "remove_cached".into(), value: req.remove_cached_artifact.to_string() },
+                ],
+            )
+            .await?
+        } else {
+            job_id
+        };
+
+        let svc = self.clone();
+        let job_id_for_spawn = job_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = svc
+                .run_update_job(
+                    job_id_for_spawn.clone(),
+                    toolchain_id,
+                    req.version,
+                    req.verify_hash,
+                    req.remove_cached_artifact,
+                )
+                .await
+            {
+                warn!("update job {} failed to run: {}", job_id_for_spawn, err);
+            }
+        });
+
+        Ok(Response::new(UpdateToolchainResponse {
+            job_id: Some(Id { value: job_id }),
+        }))
+    }
+
+    async fn uninstall_toolchain(
+        &self,
+        request: Request<UninstallToolchainRequest>,
+    ) -> Result<Response<UninstallToolchainResponse>, Status> {
+        let req = request.into_inner();
+        let toolchain_id = req
+            .toolchain_id
+            .ok_or_else(|| Status::invalid_argument("toolchain_id is required"))?
+            .value;
+
+        let mut job_client = connect_job().await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "toolchain.uninstall",
+                vec![
+                    KeyValue { key: "toolchain_id".into(), value: toolchain_id.clone() },
+                    KeyValue { key: "remove_cached".into(), value: req.remove_cached_artifact.to_string() },
+                    KeyValue { key: "force".into(), value: req.force.to_string() },
+                ],
+            )
+            .await?
+        } else {
+            job_id
+        };
+
+        let svc = self.clone();
+        let job_id_for_spawn = job_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = svc
+                .run_uninstall_job(
+                    job_id_for_spawn.clone(),
+                    toolchain_id,
+                    req.remove_cached_artifact,
+                    req.force,
+                )
+                .await
+            {
+                warn!("uninstall job {} failed to run: {}", job_id_for_spawn, err);
+            }
+        });
+
+        Ok(Response::new(UninstallToolchainResponse {
+            job_id: Some(Id { value: job_id }),
+        }))
+    }
+
+    async fn cleanup_toolchain_cache(
+        &self,
+        request: Request<CleanupToolchainCacheRequest>,
+    ) -> Result<Response<CleanupToolchainCacheResponse>, Status> {
+        let req = request.into_inner();
+
+        let mut job_client = connect_job().await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "toolchain.cleanup_cache",
+                vec![
+                    KeyValue { key: "dry_run".into(), value: req.dry_run.to_string() },
+                    KeyValue { key: "remove_all".into(), value: req.remove_all.to_string() },
+                ],
+            )
+            .await?
+        } else {
+            job_id
+        };
+
+        let svc = self.clone();
+        let job_id_for_spawn = job_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = svc
+                .run_cache_cleanup_job(job_id_for_spawn.clone(), req.dry_run, req.remove_all)
+                .await
+            {
+                warn!("cache cleanup job {} failed to run: {}", job_id_for_spawn, err);
+            }
+        });
+
+        Ok(Response::new(CleanupToolchainCacheResponse {
+            job_id: Some(Id { value: job_id }),
+        }))
     }
 
     async fn create_toolchain_set(
