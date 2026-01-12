@@ -1,4 +1,12 @@
-use std::{path::Path, sync::{Arc, mpsc}, thread, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc},
+    thread,
+    time::{Duration, SystemTime},
+};
 
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient,
@@ -8,23 +16,31 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     target_service_client::TargetServiceClient,
     toolchain_service_client::ToolchainServiceClient,
-    BuildRequest, BuildVariant, CancelJobRequest, CreateProjectRequest, CreateToolchainSetRequest,
-    ExportSupportBundleRequest, ExportEvidenceBundleRequest, GetActiveToolchainSetRequest,
-    GetCuttlefishStatusRequest, GetDefaultTargetRequest, Id, InstallApkRequest, InstallCuttlefishRequest,
-    InstallToolchainRequest, KeyValue, LaunchRequest, ListAvailableRequest, ListInstalledRequest,
-    ListProvidersRequest, ListRecentProjectsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListRunsRequest, ListToolchainSetsRequest, OpenProjectRequest, Pagination, ResolveCuttlefishBuildRequest,
-    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest,
-    StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest, StreamLogcatRequest, ToolchainKind,
+    Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildVariant, CancelJobRequest,
+    CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
+    ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
+    GetCuttlefishStatusRequest, GetDefaultTargetRequest, GetJobRequest, Id, InstallApkRequest,
+    InstallCuttlefishRequest, InstallToolchainRequest, Job, JobEvent, JobEventKind, JobFilter,
+    JobHistoryFilter, JobState, KeyValue, LaunchRequest, ListJobHistoryRequest, ListJobsRequest,
+    ListArtifactsRequest, ListAvailableRequest, ListInstalledRequest, ListProvidersRequest,
+    ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ResolveCuttlefishBuildRequest,
+    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
+    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
+    StreamLogcatRequest, Timestamp, ToolchainKind, UninstallToolchainRequest, UpdateToolchainRequest,
     VerifyToolchainRequest,
 };
 use futures_util::StreamExt;
 use gtk4 as gtk;
 use gtk::gio::prelude::FileExt;
 use gtk::prelude::*;
+use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 
-#[derive(Clone, Debug)]
+const UI_CONFIG_FILE: &str = "ui-config.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 struct AppConfig {
     job_addr: String,
     toolchain_addr: String,
@@ -32,19 +48,112 @@ struct AppConfig {
     build_addr: String,
     targets_addr: String,
     observe_addr: String,
+    last_job_type: String,
+    last_job_params: String,
+    last_job_project_id: String,
+    last_job_target_id: String,
+    last_job_toolchain_set_id: String,
+    last_job_id: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             job_addr: std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into()),
-            toolchain_addr: std::env::var("AADK_TOOLCHAIN_ADDR").unwrap_or_else(|_| "127.0.0.1:50052".into()),
-            project_addr: std::env::var("AADK_PROJECT_ADDR").unwrap_or_else(|_| "127.0.0.1:50053".into()),
-            build_addr: std::env::var("AADK_BUILD_ADDR").unwrap_or_else(|_| "127.0.0.1:50054".into()),
-            targets_addr: std::env::var("AADK_TARGETS_ADDR").unwrap_or_else(|_| "127.0.0.1:50055".into()),
-            observe_addr: std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".into()),
+            toolchain_addr: std::env::var("AADK_TOOLCHAIN_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50052".into()),
+            project_addr: std::env::var("AADK_PROJECT_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50053".into()),
+            build_addr: std::env::var("AADK_BUILD_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50054".into()),
+            targets_addr: std::env::var("AADK_TARGETS_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50055".into()),
+            observe_addr: std::env::var("AADK_OBSERVE_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50056".into()),
+            last_job_type: String::new(),
+            last_job_params: String::new(),
+            last_job_project_id: String::new(),
+            last_job_target_id: String::new(),
+            last_job_toolchain_set_id: String::new(),
+            last_job_id: String::new(),
         }
     }
+}
+
+impl AppConfig {
+    fn load() -> Self {
+        let mut cfg = AppConfig::default();
+        let path = ui_config_path();
+        match fs::read_to_string(&path) {
+            Ok(data) => match serde_json::from_str::<AppConfig>(&data) {
+                Ok(file_cfg) => {
+                    if std::env::var("AADK_JOB_ADDR").is_err() && !file_cfg.job_addr.is_empty() {
+                        cfg.job_addr = file_cfg.job_addr;
+                    }
+                    if std::env::var("AADK_TOOLCHAIN_ADDR").is_err()
+                        && !file_cfg.toolchain_addr.is_empty()
+                    {
+                        cfg.toolchain_addr = file_cfg.toolchain_addr;
+                    }
+                    if std::env::var("AADK_PROJECT_ADDR").is_err() && !file_cfg.project_addr.is_empty() {
+                        cfg.project_addr = file_cfg.project_addr;
+                    }
+                    if std::env::var("AADK_BUILD_ADDR").is_err() && !file_cfg.build_addr.is_empty() {
+                        cfg.build_addr = file_cfg.build_addr;
+                    }
+                    if std::env::var("AADK_TARGETS_ADDR").is_err() && !file_cfg.targets_addr.is_empty() {
+                        cfg.targets_addr = file_cfg.targets_addr;
+                    }
+                    if std::env::var("AADK_OBSERVE_ADDR").is_err() && !file_cfg.observe_addr.is_empty() {
+                        cfg.observe_addr = file_cfg.observe_addr;
+                    }
+                    cfg.last_job_type = file_cfg.last_job_type;
+                    cfg.last_job_params = file_cfg.last_job_params;
+                    cfg.last_job_project_id = file_cfg.last_job_project_id;
+                    cfg.last_job_target_id = file_cfg.last_job_target_id;
+                    cfg.last_job_toolchain_set_id = file_cfg.last_job_toolchain_set_id;
+                    cfg.last_job_id = file_cfg.last_job_id;
+                }
+                Err(err) => {
+                    eprintln!("Failed to parse {}: {err}", path.display());
+                }
+            },
+            Err(err) => {
+                if err.kind() != io::ErrorKind::NotFound {
+                    eprintln!("Failed to read {}: {err}", path.display());
+                }
+            }
+        }
+        cfg
+    }
+
+    fn save(&self) -> io::Result<()> {
+        write_json_atomic(&ui_config_path(), self)
+    }
+}
+
+fn data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local/share/aadk")
+    } else {
+        PathBuf::from("/tmp/aadk")
+    }
+}
+
+fn ui_config_path() -> PathBuf {
+    data_dir().join("state").join(UI_CONFIG_FILE)
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec_pretty(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[derive(Clone, Default)]
@@ -52,16 +161,99 @@ struct AppState {
     current_job_id: Option<String>,
 }
 
+#[derive(Serialize)]
+struct UiLogExport {
+    exported_at_unix_millis: i64,
+    job_id: String,
+    config: AppConfig,
+    job: Option<JobSummary>,
+    events: Vec<LogExportEvent>,
+}
+
+#[derive(Serialize)]
+struct JobSummary {
+    job_id: String,
+    job_type: String,
+    state: String,
+    created_at_unix_millis: i64,
+    started_at_unix_millis: Option<i64>,
+    finished_at_unix_millis: Option<i64>,
+    display_name: String,
+    correlation_id: String,
+    project_id: String,
+    target_id: String,
+    toolchain_set_id: String,
+}
+
+#[derive(Serialize)]
+struct LogExportEvent {
+    at_unix_millis: i64,
+    kind: String,
+    summary: String,
+    data: Option<String>,
+}
+
 #[derive(Debug)]
 enum UiCommand {
-    HomeStartDemo { cfg: AppConfig },
+    HomeStartJob {
+        cfg: AppConfig,
+        job_type: String,
+        params_raw: String,
+        project_id: String,
+        target_id: String,
+        toolchain_set_id: String,
+    },
+    HomeWatchJob { cfg: AppConfig, job_id: String },
     HomeCancelCurrent { cfg: AppConfig },
+    JobsList {
+        cfg: AppConfig,
+        job_types: String,
+        states: String,
+        created_after: String,
+        created_before: String,
+        finished_after: String,
+        finished_before: String,
+        page_size: u32,
+        page_token: String,
+    },
+    JobsHistory {
+        cfg: AppConfig,
+        job_id: String,
+        kinds: String,
+        after: String,
+        before: String,
+        page_size: u32,
+        page_token: String,
+    },
+    JobsExportLogs {
+        cfg: AppConfig,
+        job_id: String,
+        output_path: String,
+    },
     ToolchainListProviders { cfg: AppConfig },
     ToolchainListAvailable { cfg: AppConfig, provider_id: String },
     ToolchainInstall { cfg: AppConfig, provider_id: String, version: String, verify: bool },
     ToolchainListInstalled { cfg: AppConfig, kind: ToolchainKind },
     ToolchainListSets { cfg: AppConfig },
     ToolchainVerifyInstalled { cfg: AppConfig },
+    ToolchainUpdate {
+        cfg: AppConfig,
+        toolchain_id: String,
+        version: String,
+        verify: bool,
+        remove_cached: bool,
+    },
+    ToolchainUninstall {
+        cfg: AppConfig,
+        toolchain_id: String,
+        remove_cached: bool,
+        force: bool,
+    },
+    ToolchainCleanupCache {
+        cfg: AppConfig,
+        dry_run: bool,
+        remove_all: bool,
+    },
     ToolchainCreateSet {
         cfg: AppConfig,
         sdk_toolchain_id: Option<String>,
@@ -118,8 +310,17 @@ enum UiCommand {
         cfg: AppConfig,
         project_ref: String,
         variant: BuildVariant,
+        variant_name: String,
+        module: String,
+        tasks: Vec<String>,
         clean_first: bool,
         gradle_args: Vec<KeyValue>,
+    },
+    BuildListArtifacts {
+        cfg: AppConfig,
+        project_ref: String,
+        variant: BuildVariant,
+        filter: ArtifactFilter,
     },
 }
 
@@ -127,6 +328,10 @@ enum UiCommand {
 enum AppEvent {
     Log { page: &'static str, line: String },
     SetCurrentJob { job_id: Option<String> },
+    HomeResetStatus,
+    HomeState { state: String },
+    HomeProgress { progress: String },
+    HomeResult { result: String },
     SetLastBuildApk { apk_path: String },
     SetCuttlefishBuildId { build_id: String },
     ProjectTemplates { templates: Vec<ProjectTemplateOption> },
@@ -151,7 +356,7 @@ fn build_ui(app: &gtk::Application) {
         .default_height(700)
         .build();
 
-    let cfg = Arc::new(std::sync::Mutex::new(AppConfig::default()));
+    let cfg = Arc::new(std::sync::Mutex::new(AppConfig::load()));
     let state = Arc::new(std::sync::Mutex::new(AppState::default()));
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>();
@@ -195,6 +400,7 @@ fn build_ui(app: &gtk::Application) {
 
     // Pages
     let home = page_home(cfg.clone(), cmd_tx.clone());
+    let jobs_history = page_jobs_history(cfg.clone(), cmd_tx.clone());
     let toolchains = page_toolchains(cfg.clone(), cmd_tx.clone());
     let projects = page_projects(cfg.clone(), cmd_tx.clone(), &window);
     let targets = page_targets(cfg.clone(), cmd_tx.clone(), &window);
@@ -203,6 +409,7 @@ fn build_ui(app: &gtk::Application) {
     let settings = page_settings(cfg.clone());
 
     stack.add_titled(&home.page.container, Some("home"), "Home");
+    stack.add_titled(&jobs_history.container, Some("jobs"), "Job History");
     stack.add_titled(&toolchains.container, Some("toolchains"), "Toolchains");
     stack.add_titled(&projects.page.container, Some("projects"), "Projects");
     stack.add_titled(&targets.page.container, Some("targets"), "Targets");
@@ -212,11 +419,13 @@ fn build_ui(app: &gtk::Application) {
 
     // Clone page handles for event routing closure.
     let home_page_for_events = home.page.clone();
+    let jobs_for_events = jobs_history.clone();
     let toolchains_for_events = toolchains.clone();
     let projects_for_events = projects.clone();
     let targets_for_events = targets.clone();
     let console_for_events = console.clone();
     let evidence_for_events = evidence.clone();
+    let cfg_for_events = cfg.clone();
 
     // Event routing: drain worker events on the GTK thread.
     let state_for_events = state.clone();
@@ -226,6 +435,7 @@ fn build_ui(app: &gtk::Application) {
                 Ok(ev) => match ev {
                     AppEvent::Log { page, line } => match page {
                         "home" => home_page_for_events.append(&line),
+                        "jobs" => jobs_for_events.append(&line),
                         "toolchains" => toolchains_for_events.append(&line),
                         "projects" => projects_for_events.append(&line),
                         "targets" => targets_for_events.append(&line),
@@ -234,7 +444,28 @@ fn build_ui(app: &gtk::Application) {
                         _ => {}
                     },
                     AppEvent::SetCurrentJob { job_id } => {
-                        state_for_events.lock().unwrap().current_job_id = job_id;
+                        let mut state = state_for_events.lock().unwrap();
+                        state.current_job_id = job_id;
+                        let job_id = state.current_job_id.clone();
+                        drop(state);
+                        home_page_for_events.set_job_id(job_id.as_deref());
+                        let mut cfg = cfg_for_events.lock().unwrap();
+                        cfg.last_job_id = job_id.unwrap_or_default();
+                        if let Err(err) = cfg.save() {
+                            eprintln!("Failed to persist UI config: {err}");
+                        }
+                    }
+                    AppEvent::HomeResetStatus => {
+                        home_page_for_events.reset_status();
+                    }
+                    AppEvent::HomeState { state } => {
+                        home_page_for_events.set_state(&state);
+                    }
+                    AppEvent::HomeProgress { progress } => {
+                        home_page_for_events.set_progress(&progress);
+                    }
+                    AppEvent::HomeResult { result } => {
+                        home_page_for_events.set_result(&result);
                     }
                     AppEvent::SetLastBuildApk { apk_path } => {
                         targets_for_events.set_apk_path(&apk_path);
@@ -307,6 +538,36 @@ impl Page {
 struct HomePage {
     page: Page,
     cancel_btn: gtk::Button,
+    job_id_label: gtk::Label,
+    state_label: gtk::Label,
+    progress_label: gtk::Label,
+    result_label: gtk::Label,
+}
+
+impl HomePage {
+    fn set_job_id(&self, job_id: Option<&str>) {
+        let label = job_id.unwrap_or("-");
+        self.job_id_label.set_text(&format!("job_id: {label}"));
+    }
+
+    fn set_state(&self, state: &str) {
+        self.state_label.set_text(&format!("state: {state}"));
+    }
+
+    fn set_progress(&self, progress: &str) {
+        self.progress_label.set_text(&format!("progress: {progress}"));
+    }
+
+    fn set_result(&self, result: &str) {
+        self.result_label.set_text(&format!("result: {result}"));
+    }
+
+    fn reset_status(&self) {
+        self.set_job_id(None);
+        self.set_state("-");
+        self.set_progress("-");
+        self.set_result("-");
+    }
 }
 
 #[derive(Clone)]
@@ -431,24 +692,446 @@ fn make_page(title: &str) -> Page {
     Page { container, buffer, textview }
 }
 
+const KNOWN_JOB_TYPES: &[&str] = &[
+    "demo.job",
+    "project.create",
+    "build.run",
+    "toolchain.install",
+    "toolchain.verify",
+    "targets.install",
+    "targets.launch",
+    "targets.stop",
+    "targets.cuttlefish.install",
+    "targets.cuttlefish.start",
+    "targets.cuttlefish.stop",
+    "observe.support_bundle",
+    "observe.evidence_bundle",
+];
+
 fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> HomePage {
-    let page = make_page("Home — JobService demo (broadcast + replay)");
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let page = make_page("Jobs — start + status");
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
-    let start_btn = gtk::Button::with_label("Start demo");
-    let cancel_btn = gtk::Button::with_label("Cancel job");
+    let form = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
 
-    row.append(&start_btn);
-    row.append(&cancel_btn);
+    let job_type_label = gtk::Label::builder().label("Job type").xalign(0.0).build();
+    let job_type_entry = gtk::Entry::builder()
+        .placeholder_text("job type")
+        .hexpand(true)
+        .build();
+    let job_type_combo = gtk::ComboBoxText::new();
+    for job_type in KNOWN_JOB_TYPES {
+        job_type_combo.append(Some(job_type), job_type);
+    }
 
-    page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+    let params_label = gtk::Label::builder()
+        .label("Params (key=value per line)")
+        .xalign(0.0)
+        .build();
+    let params_scroller = gtk::ScrolledWindow::builder()
+        .min_content_height(80)
+        .hexpand(true)
+        .build();
+    let params_view = gtk::TextView::builder()
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::None)
+        .build();
+    params_scroller.set_child(Some(&params_view));
 
-    start_btn.connect_clicked(move |_| {
+    let project_id_label = gtk::Label::builder().label("Project id").xalign(0.0).build();
+    let project_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional project id")
+        .hexpand(true)
+        .build();
+
+    let target_id_label = gtk::Label::builder().label("Target id").xalign(0.0).build();
+    let target_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional target id")
+        .hexpand(true)
+        .build();
+
+    let toolchain_id_label = gtk::Label::builder().label("Toolchain set id").xalign(0.0).build();
+    let toolchain_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional toolchain set id")
+        .hexpand(true)
+        .build();
+
+    form.attach(&job_type_label, 0, 0, 1, 1);
+    form.attach(&job_type_entry, 1, 0, 1, 1);
+    form.attach(&job_type_combo, 2, 0, 1, 1);
+    form.attach(&params_label, 0, 1, 1, 1);
+    form.attach(&params_scroller, 1, 1, 2, 1);
+    form.attach(&project_id_label, 0, 2, 1, 1);
+    form.attach(&project_id_entry, 1, 2, 2, 1);
+    form.attach(&target_id_label, 0, 3, 1, 1);
+    form.attach(&target_id_entry, 1, 3, 2, 1);
+    form.attach(&toolchain_id_label, 0, 4, 1, 1);
+    form.attach(&toolchain_id_entry, 1, 4, 2, 1);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let start_btn = gtk::Button::with_label("Start job");
+    let cancel_btn = gtk::Button::with_label("Cancel current");
+    let watch_label = gtk::Label::builder().label("Watch job").xalign(0.0).build();
+    let watch_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let watch_btn = gtk::Button::with_label("Watch");
+
+    buttons.append(&start_btn);
+    buttons.append(&cancel_btn);
+    buttons.append(&watch_label);
+    buttons.append(&watch_entry);
+    buttons.append(&watch_btn);
+
+    let status_frame = gtk::Frame::builder().label("Status").build();
+    let status_grid = gtk::Grid::builder()
+        .row_spacing(4)
+        .column_spacing(8)
+        .build();
+    let job_id_label = gtk::Label::builder().label("job_id: -").xalign(0.0).build();
+    let state_label = gtk::Label::builder().label("state: -").xalign(0.0).build();
+    let progress_label = gtk::Label::builder().label("progress: -").xalign(0.0).build();
+    let result_label = gtk::Label::builder().label("result: -").xalign(0.0).build();
+
+    status_grid.attach(&job_id_label, 0, 0, 1, 1);
+    status_grid.attach(&state_label, 0, 1, 1, 1);
+    status_grid.attach(&progress_label, 0, 2, 1, 1);
+    status_grid.attach(&result_label, 0, 3, 1, 1);
+    status_frame.set_child(Some(&status_grid));
+
+    controls.append(&form);
+    controls.append(&buttons);
+    controls.append(&status_frame);
+
+    page.container
+        .insert_child_after(&controls, Some(&page.container.first_child().unwrap()));
+
+    {
         let cfg = cfg.lock().unwrap().clone();
-        cmd_tx.send(UiCommand::HomeStartDemo { cfg }).ok();
+        if !cfg.last_job_type.is_empty() {
+            job_type_entry.set_text(&cfg.last_job_type);
+            job_type_combo.set_active_id(Some(&cfg.last_job_type));
+        } else {
+            job_type_combo.set_active(Some(0));
+            if let Some(text) = job_type_combo.active_text() {
+                job_type_entry.set_text(&text);
+            }
+        }
+        if !cfg.last_job_params.is_empty() {
+            params_view
+                .buffer()
+                .set_text(&cfg.last_job_params);
+        }
+        if !cfg.last_job_project_id.is_empty() {
+            project_id_entry.set_text(&cfg.last_job_project_id);
+        }
+        if !cfg.last_job_target_id.is_empty() {
+            target_id_entry.set_text(&cfg.last_job_target_id);
+        }
+        if !cfg.last_job_toolchain_set_id.is_empty() {
+            toolchain_id_entry.set_text(&cfg.last_job_toolchain_set_id);
+        }
+        if !cfg.last_job_id.is_empty() {
+            watch_entry.set_text(&cfg.last_job_id);
+        }
+    }
+
+    let job_type_entry_select = job_type_entry.clone();
+    job_type_combo.connect_changed(move |combo| {
+        if let Some(text) = combo.active_text() {
+            job_type_entry_select.set_text(&text);
+        }
     });
 
-    HomePage { page, cancel_btn }
+    let cfg_start = cfg.clone();
+    let cmd_tx_start = cmd_tx.clone();
+    let params_view_start = params_view.clone();
+    let job_type_entry_start = job_type_entry.clone();
+    let project_id_entry_start = project_id_entry.clone();
+    let target_id_entry_start = target_id_entry.clone();
+    let toolchain_id_entry_start = toolchain_id_entry.clone();
+    start_btn.connect_clicked(move |_| {
+        let job_type = job_type_entry_start.text().to_string();
+        let params_raw = text_view_text(&params_view_start);
+        let project_id = project_id_entry_start.text().to_string();
+        let target_id = target_id_entry_start.text().to_string();
+        let toolchain_set_id = toolchain_id_entry_start.text().to_string();
+
+        {
+            let mut cfg = cfg_start.lock().unwrap();
+            cfg.last_job_type = job_type.clone();
+            cfg.last_job_params = params_raw.clone();
+            cfg.last_job_project_id = project_id.clone();
+            cfg.last_job_target_id = target_id.clone();
+            cfg.last_job_toolchain_set_id = toolchain_set_id.clone();
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+
+        let cfg = cfg_start.lock().unwrap().clone();
+        cmd_tx_start
+            .send(UiCommand::HomeStartJob {
+                cfg,
+                job_type,
+                params_raw,
+                project_id,
+                target_id,
+                toolchain_set_id,
+            })
+            .ok();
+    });
+
+    let cfg_watch = cfg.clone();
+    let cmd_tx_watch = cmd_tx.clone();
+    let watch_entry_copy = watch_entry.clone();
+    watch_btn.connect_clicked(move |_| {
+        let job_id = watch_entry_copy.text().to_string();
+        if job_id.trim().is_empty() {
+            return;
+        }
+        {
+            let mut cfg = cfg_watch.lock().unwrap();
+            cfg.last_job_id = job_id.clone();
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+        let cfg = cfg_watch.lock().unwrap().clone();
+        cmd_tx_watch
+            .send(UiCommand::HomeWatchJob { cfg, job_id })
+            .ok();
+    });
+
+    HomePage {
+        page,
+        cancel_btn,
+        job_id_label,
+        state_label,
+        progress_label,
+        result_label,
+    }
+}
+
+fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
+    let page = make_page("Job history — list + drill-down");
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+    let list_frame = gtk::Frame::builder().label("List jobs").build();
+    let list_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let job_types_entry = gtk::Entry::builder()
+        .placeholder_text("job types (comma/space)")
+        .hexpand(true)
+        .build();
+    let states_entry = gtk::Entry::builder()
+        .placeholder_text("states (queued,running,success,failed,cancelled)")
+        .hexpand(true)
+        .build();
+    let created_after_entry = gtk::Entry::builder()
+        .placeholder_text("created after (unix ms)")
+        .hexpand(true)
+        .build();
+    let created_before_entry = gtk::Entry::builder()
+        .placeholder_text("created before (unix ms)")
+        .hexpand(true)
+        .build();
+    let finished_after_entry = gtk::Entry::builder()
+        .placeholder_text("finished after (unix ms)")
+        .hexpand(true)
+        .build();
+    let finished_before_entry = gtk::Entry::builder()
+        .placeholder_text("finished before (unix ms)")
+        .hexpand(true)
+        .build();
+    let page_size_entry = gtk::Entry::builder().text("50").hexpand(true).build();
+    let page_token_entry = gtk::Entry::builder()
+        .placeholder_text("page token")
+        .hexpand(true)
+        .build();
+
+    let list_btn = gtk::Button::with_label("List jobs");
+
+    list_grid.attach(&gtk::Label::new(Some("Job types")), 0, 0, 1, 1);
+    list_grid.attach(&job_types_entry, 1, 0, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("States")), 0, 1, 1, 1);
+    list_grid.attach(&states_entry, 1, 1, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Created after")), 0, 2, 1, 1);
+    list_grid.attach(&created_after_entry, 1, 2, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Created before")), 0, 3, 1, 1);
+    list_grid.attach(&created_before_entry, 1, 3, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Finished after")), 0, 4, 1, 1);
+    list_grid.attach(&finished_after_entry, 1, 4, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Finished before")), 0, 5, 1, 1);
+    list_grid.attach(&finished_before_entry, 1, 5, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Page size")), 0, 6, 1, 1);
+    list_grid.attach(&page_size_entry, 1, 6, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Page token")), 0, 7, 1, 1);
+    list_grid.attach(&page_token_entry, 1, 7, 1, 1);
+    list_grid.attach(&list_btn, 1, 8, 1, 1);
+
+    list_frame.set_child(Some(&list_grid));
+
+    let history_frame = gtk::Frame::builder().label("Job history").build();
+    let history_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let kinds_entry = gtk::Entry::builder()
+        .placeholder_text("kinds (state,progress,log,completed,failed)")
+        .hexpand(true)
+        .build();
+    let after_entry = gtk::Entry::builder()
+        .placeholder_text("after (unix ms)")
+        .hexpand(true)
+        .build();
+    let before_entry = gtk::Entry::builder()
+        .placeholder_text("before (unix ms)")
+        .hexpand(true)
+        .build();
+    let history_page_size_entry = gtk::Entry::builder().text("200").hexpand(true).build();
+    let history_page_token_entry = gtk::Entry::builder()
+        .placeholder_text("page token")
+        .hexpand(true)
+        .build();
+    let output_path_entry = gtk::Entry::builder()
+        .placeholder_text("export output path (optional)")
+        .hexpand(true)
+        .build();
+
+    let list_history_btn = gtk::Button::with_label("List history");
+    let export_btn = gtk::Button::with_label("Export logs");
+
+    history_grid.attach(&gtk::Label::new(Some("Job id")), 0, 0, 1, 1);
+    history_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("Kinds")), 0, 1, 1, 1);
+    history_grid.attach(&kinds_entry, 1, 1, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("After")), 0, 2, 1, 1);
+    history_grid.attach(&after_entry, 1, 2, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("Before")), 0, 3, 1, 1);
+    history_grid.attach(&before_entry, 1, 3, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("Page size")), 0, 4, 1, 1);
+    history_grid.attach(&history_page_size_entry, 1, 4, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("Page token")), 0, 5, 1, 1);
+    history_grid.attach(&history_page_token_entry, 1, 5, 1, 1);
+    history_grid.attach(&gtk::Label::new(Some("Output path")), 0, 6, 1, 1);
+    history_grid.attach(&output_path_entry, 1, 6, 1, 1);
+    history_grid.attach(&list_history_btn, 1, 7, 1, 1);
+    history_grid.attach(&export_btn, 1, 8, 1, 1);
+
+    history_frame.set_child(Some(&history_grid));
+
+    controls.append(&list_frame);
+    controls.append(&history_frame);
+
+    page.container
+        .insert_child_after(&controls, Some(&page.container.first_child().unwrap()));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_type.is_empty() {
+            job_types_entry.set_text(&cfg.last_job_type);
+        }
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+    }
+
+    let cfg_list = cfg.clone();
+    let cmd_tx_list = cmd_tx.clone();
+    let job_types_entry_list = job_types_entry.clone();
+    let states_entry_list = states_entry.clone();
+    let created_after_entry_list = created_after_entry.clone();
+    let created_before_entry_list = created_before_entry.clone();
+    let finished_after_entry_list = finished_after_entry.clone();
+    let finished_before_entry_list = finished_before_entry.clone();
+    let page_size_entry_list = page_size_entry.clone();
+    let page_token_entry_list = page_token_entry.clone();
+    list_btn.connect_clicked(move |_| {
+        let page_size = page_size_entry_list.text().parse::<u32>().unwrap_or(50);
+        let cfg = cfg_list.lock().unwrap().clone();
+        cmd_tx_list
+            .send(UiCommand::JobsList {
+                cfg,
+                job_types: job_types_entry_list.text().to_string(),
+                states: states_entry_list.text().to_string(),
+                created_after: created_after_entry_list.text().to_string(),
+                created_before: created_before_entry_list.text().to_string(),
+                finished_after: finished_after_entry_list.text().to_string(),
+                finished_before: finished_before_entry_list.text().to_string(),
+                page_size,
+                page_token: page_token_entry_list.text().to_string(),
+            })
+            .ok();
+    });
+
+    let cfg_history = cfg.clone();
+    let cmd_tx_history = cmd_tx.clone();
+    let job_id_entry_history = job_id_entry.clone();
+    let kinds_entry_history = kinds_entry.clone();
+    let after_entry_history = after_entry.clone();
+    let before_entry_history = before_entry.clone();
+    let history_page_size_entry_history = history_page_size_entry.clone();
+    let history_page_token_entry_history = history_page_token_entry.clone();
+    list_history_btn.connect_clicked(move |_| {
+        let page_size = history_page_size_entry_history.text().parse::<u32>().unwrap_or(200);
+        let job_id = job_id_entry_history.text().to_string();
+        {
+            let mut cfg = cfg_history.lock().unwrap();
+            cfg.last_job_id = job_id.clone();
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+        let cfg = cfg_history.lock().unwrap().clone();
+        cmd_tx_history
+            .send(UiCommand::JobsHistory {
+                cfg,
+                job_id,
+                kinds: kinds_entry_history.text().to_string(),
+                after: after_entry_history.text().to_string(),
+                before: before_entry_history.text().to_string(),
+                page_size,
+                page_token: history_page_token_entry_history.text().to_string(),
+            })
+            .ok();
+    });
+
+    let cfg_export = cfg.clone();
+    let cmd_tx_export = cmd_tx.clone();
+    let job_id_entry_export = job_id_entry.clone();
+    let output_path_entry_export = output_path_entry.clone();
+    export_btn.connect_clicked(move |_| {
+        let job_id = job_id_entry_export.text().to_string();
+        {
+            let mut cfg = cfg_export.lock().unwrap();
+            cfg.last_job_id = job_id.clone();
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+        let cfg = cfg_export.lock().unwrap().clone();
+        cmd_tx_export
+            .send(UiCommand::JobsExportLogs {
+                cfg,
+                job_id,
+                output_path: output_path_entry_export.text().to_string(),
+            })
+            .ok();
+    });
+
+    page
 }
 
 const PROVIDER_SDK_ID: &str = "provider-android-sdk-custom";
@@ -499,6 +1182,56 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     row2.append(&list_installed);
     row2.append(&verify_installed);
 
+    let maintenance_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let toolchain_id_entry = gtk::Entry::builder()
+        .placeholder_text("Toolchain id")
+        .hexpand(true)
+        .build();
+    let update_version_entry = gtk::Entry::builder()
+        .placeholder_text("Update version")
+        .hexpand(true)
+        .build();
+    let verify_update_check = gtk::CheckButton::with_label("Verify hash");
+    verify_update_check.set_active(true);
+    let remove_cached_check = gtk::CheckButton::with_label("Remove cached artifact");
+    let force_uninstall_check = gtk::CheckButton::with_label("Force");
+    let update_btn = gtk::Button::with_label("Update");
+    let uninstall_btn = gtk::Button::with_label("Uninstall");
+    let cleanup_btn = gtk::Button::with_label("Cleanup cache");
+    let dry_run_check = gtk::CheckButton::with_label("Dry run");
+    dry_run_check.set_active(true);
+    let remove_all_check = gtk::CheckButton::with_label("Remove all cached");
+
+    let label_toolchain_id = gtk::Label::builder().label("Toolchain id").xalign(0.0).build();
+    let label_update_version = gtk::Label::builder().label("Target version").xalign(0.0).build();
+    let label_cache = gtk::Label::builder().label("Cache cleanup").xalign(0.0).build();
+
+    maintenance_grid.attach(&label_toolchain_id, 0, 0, 1, 1);
+    maintenance_grid.attach(&toolchain_id_entry, 1, 0, 1, 1);
+    maintenance_grid.attach(&label_update_version, 0, 1, 1, 1);
+    maintenance_grid.attach(&update_version_entry, 1, 1, 1, 1);
+
+    let maintenance_options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    maintenance_options.append(&verify_update_check);
+    maintenance_options.append(&remove_cached_check);
+    maintenance_options.append(&force_uninstall_check);
+    maintenance_grid.attach(&maintenance_options, 1, 2, 1, 1);
+
+    let maintenance_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    maintenance_actions.append(&update_btn);
+    maintenance_actions.append(&uninstall_btn);
+    maintenance_grid.attach(&maintenance_actions, 1, 3, 1, 1);
+
+    let cache_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    cache_actions.append(&cleanup_btn);
+    cache_actions.append(&dry_run_check);
+    cache_actions.append(&remove_all_check);
+    maintenance_grid.attach(&label_cache, 0, 4, 1, 1);
+    maintenance_grid.attach(&cache_actions, 1, 4, 1, 1);
+
     let set_grid = gtk::Grid::builder()
         .row_spacing(8)
         .column_spacing(8)
@@ -546,6 +1279,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     actions.append(&row1);
     actions.append(&version_grid);
     actions.append(&row2);
+    actions.append(&maintenance_grid);
     actions.append(&set_grid);
     page.container.insert_child_after(&actions, Some(&page.container.first_child().unwrap()));
 
@@ -639,6 +1373,57 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
         let cfg = cfg_verify_installed.lock().unwrap().clone();
         cmd_tx_verify_installed
             .send(UiCommand::ToolchainVerifyInstalled { cfg })
+            .ok();
+    });
+
+    let cfg_update = cfg.clone();
+    let cmd_tx_update = cmd_tx.clone();
+    let toolchain_id_entry_update = toolchain_id_entry.clone();
+    let update_version_entry_update = update_version_entry.clone();
+    let verify_update_check_update = verify_update_check.clone();
+    let remove_cached_check_update = remove_cached_check.clone();
+    update_btn.connect_clicked(move |_| {
+        let cfg = cfg_update.lock().unwrap().clone();
+        cmd_tx_update
+            .send(UiCommand::ToolchainUpdate {
+                cfg,
+                toolchain_id: toolchain_id_entry_update.text().to_string(),
+                version: update_version_entry_update.text().to_string(),
+                verify: verify_update_check_update.is_active(),
+                remove_cached: remove_cached_check_update.is_active(),
+            })
+            .ok();
+    });
+
+    let cfg_uninstall = cfg.clone();
+    let cmd_tx_uninstall = cmd_tx.clone();
+    let toolchain_id_entry_uninstall = toolchain_id_entry.clone();
+    let remove_cached_check_uninstall = remove_cached_check.clone();
+    let force_uninstall_check_uninstall = force_uninstall_check.clone();
+    uninstall_btn.connect_clicked(move |_| {
+        let cfg = cfg_uninstall.lock().unwrap().clone();
+        cmd_tx_uninstall
+            .send(UiCommand::ToolchainUninstall {
+                cfg,
+                toolchain_id: toolchain_id_entry_uninstall.text().to_string(),
+                remove_cached: remove_cached_check_uninstall.is_active(),
+                force: force_uninstall_check_uninstall.is_active(),
+            })
+            .ok();
+    });
+
+    let cfg_cleanup = cfg.clone();
+    let cmd_tx_cleanup = cmd_tx.clone();
+    let dry_run_check_cleanup = dry_run_check.clone();
+    let remove_all_check_cleanup = remove_all_check.clone();
+    cleanup_btn.connect_clicked(move |_| {
+        let cfg = cfg_cleanup.lock().unwrap().clone();
+        cmd_tx_cleanup
+            .send(UiCommand::ToolchainCleanupCache {
+                cfg,
+                dry_run: dry_run_check_cleanup.is_active(),
+                remove_all: remove_all_check_cleanup.is_active(),
+            })
             .ok();
     });
 
@@ -1295,6 +2080,18 @@ fn page_console(
         .hexpand(true)
         .build();
     let project_browse = gtk::Button::with_label("Browse...");
+    let module_entry = gtk::Entry::builder()
+        .placeholder_text("Module (optional, e.g. app or :app)")
+        .hexpand(true)
+        .build();
+    let variant_name_entry = gtk::Entry::builder()
+        .placeholder_text("Variant name override (e.g. demoDebug)")
+        .hexpand(true)
+        .build();
+    let tasks_entry = gtk::Entry::builder()
+        .placeholder_text("Tasks (comma/space separated, e.g. assembleDebug lint)")
+        .hexpand(true)
+        .build();
     let args_entry = gtk::Entry::builder()
         .placeholder_text("Gradle args, e.g. --stacktrace -Pfoo=bar")
         .hexpand(true)
@@ -1308,7 +2105,10 @@ fn page_console(
     let run = gtk::Button::with_label("Build");
 
     let label_project = gtk::Label::builder().label("Project").xalign(0.0).build();
+    let label_module = gtk::Label::builder().label("Module").xalign(0.0).build();
     let label_variant = gtk::Label::builder().label("Variant").xalign(0.0).build();
+    let label_variant_name = gtk::Label::builder().label("Variant name").xalign(0.0).build();
+    let label_tasks = gtk::Label::builder().label("Tasks").xalign(0.0).build();
     let label_args = gtk::Label::builder().label("Gradle args").xalign(0.0).build();
 
     form.attach(&label_project, 0, 0, 1, 1);
@@ -1317,21 +2117,87 @@ fn page_console(
     project_row.append(&project_browse);
     form.attach(&project_row, 1, 0, 1, 1);
 
-    form.attach(&label_variant, 0, 1, 1, 1);
-    form.attach(&variant_combo, 1, 1, 1, 1);
+    form.attach(&label_module, 0, 1, 1, 1);
+    form.attach(&module_entry, 1, 1, 1, 1);
 
-    form.attach(&label_args, 0, 2, 1, 1);
-    form.attach(&args_entry, 1, 2, 1, 1);
+    form.attach(&label_variant, 0, 2, 1, 1);
+    form.attach(&variant_combo, 1, 2, 1, 1);
+
+    form.attach(&label_variant_name, 0, 3, 1, 1);
+    form.attach(&variant_name_entry, 1, 3, 1, 1);
+
+    form.attach(&label_tasks, 0, 4, 1, 1);
+    form.attach(&tasks_entry, 1, 4, 1, 1);
+
+    form.attach(&label_args, 0, 5, 1, 1);
+    form.attach(&args_entry, 1, 5, 1, 1);
 
     let options_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     options_row.append(&clean_check);
-    form.attach(&options_row, 1, 3, 1, 1);
+    form.attach(&options_row, 1, 6, 1, 1);
 
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     action_row.append(&run);
-    form.attach(&action_row, 1, 4, 1, 1);
+    form.attach(&action_row, 1, 7, 1, 1);
 
     page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
+
+    let artifacts_label = gtk::Label::builder()
+        .label("Artifacts (filters)")
+        .xalign(0.0)
+        .build();
+
+    let artifact_form = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let artifact_modules_entry = gtk::Entry::builder()
+        .placeholder_text("Modules filter (comma/space separated)")
+        .hexpand(true)
+        .build();
+    let artifact_variant_entry = gtk::Entry::builder()
+        .placeholder_text("Variant filter (leave empty to use dropdown)")
+        .hexpand(true)
+        .build();
+    let artifact_types_entry = gtk::Entry::builder()
+        .placeholder_text("Types: apk,aab,aar,mapping,test")
+        .hexpand(true)
+        .build();
+    let artifact_name_entry = gtk::Entry::builder()
+        .placeholder_text("Name contains")
+        .hexpand(true)
+        .build();
+    let artifact_path_entry = gtk::Entry::builder()
+        .placeholder_text("Path contains")
+        .hexpand(true)
+        .build();
+
+    let list_artifacts = gtk::Button::with_label("List artifacts");
+
+    let label_artifact_modules = gtk::Label::builder().label("Modules").xalign(0.0).build();
+    let label_artifact_variant = gtk::Label::builder().label("Variant").xalign(0.0).build();
+    let label_artifact_types = gtk::Label::builder().label("Types").xalign(0.0).build();
+    let label_artifact_name = gtk::Label::builder().label("Name contains").xalign(0.0).build();
+    let label_artifact_path = gtk::Label::builder().label("Path contains").xalign(0.0).build();
+
+    artifact_form.attach(&label_artifact_modules, 0, 0, 1, 1);
+    artifact_form.attach(&artifact_modules_entry, 1, 0, 1, 1);
+    artifact_form.attach(&label_artifact_variant, 0, 1, 1, 1);
+    artifact_form.attach(&artifact_variant_entry, 1, 1, 1, 1);
+    artifact_form.attach(&label_artifact_types, 0, 2, 1, 1);
+    artifact_form.attach(&artifact_types_entry, 1, 2, 1, 1);
+    artifact_form.attach(&label_artifact_name, 0, 3, 1, 1);
+    artifact_form.attach(&artifact_name_entry, 1, 3, 1, 1);
+    artifact_form.attach(&label_artifact_path, 0, 4, 1, 1);
+    artifact_form.attach(&artifact_path_entry, 1, 4, 1, 1);
+
+    let list_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    list_row.append(&list_artifacts);
+    artifact_form.attach(&list_row, 1, 5, 1, 1);
+
+    page.container.insert_child_after(&artifacts_label, Some(&form));
+    page.container.insert_child_after(&artifact_form, Some(&artifacts_label));
 
     let parent_window = parent.clone();
     let project_entry_browse = project_entry.clone();
@@ -1369,12 +2235,18 @@ fn page_console(
     let cfg_run = cfg.clone();
     let cmd_tx_run = cmd_tx.clone();
     let project_entry_run = project_entry.clone();
+    let module_entry_run = module_entry.clone();
+    let variant_name_entry_run = variant_name_entry.clone();
+    let tasks_entry_run = tasks_entry.clone();
     let args_entry_run = args_entry.clone();
     let variant_combo_run = variant_combo.clone();
     let clean_check_run = clean_check.clone();
     run.connect_clicked(move |_| {
         let cfg = cfg_run.lock().unwrap().clone();
         let project_ref = project_entry_run.text().to_string();
+        let module = module_entry_run.text().to_string();
+        let variant_name = variant_name_entry_run.text().to_string();
+        let tasks = parse_list_tokens(&tasks_entry_run.text());
         let gradle_args = parse_gradle_args(&args_entry_run.text());
         let variant = match variant_combo_run.selected() {
             1 => BuildVariant::Release,
@@ -1386,8 +2258,51 @@ fn page_console(
                 cfg,
                 project_ref,
                 variant,
+                variant_name,
+                module,
+                tasks,
                 clean_first,
                 gradle_args,
+            })
+            .ok();
+    });
+
+    let cfg_list = cfg.clone();
+    let cmd_tx_list = cmd_tx.clone();
+    let project_entry_list = project_entry.clone();
+    let variant_combo_list = variant_combo.clone();
+    let artifact_modules_entry_list = artifact_modules_entry.clone();
+    let artifact_variant_entry_list = artifact_variant_entry.clone();
+    let artifact_types_entry_list = artifact_types_entry.clone();
+    let artifact_name_entry_list = artifact_name_entry.clone();
+    let artifact_path_entry_list = artifact_path_entry.clone();
+    list_artifacts.connect_clicked(move |_| {
+        let cfg = cfg_list.lock().unwrap().clone();
+        let project_ref = project_entry_list.text().to_string();
+        let variant = match variant_combo_list.selected() {
+            1 => BuildVariant::Release,
+            _ => BuildVariant::Debug,
+        };
+        let modules = parse_list_tokens(&artifact_modules_entry_list.text());
+        let variant_filter = artifact_variant_entry_list.text().trim().to_string();
+        let types = parse_artifact_types(&artifact_types_entry_list.text());
+        let name_contains = artifact_name_entry_list.text().trim().to_string();
+        let path_contains = artifact_path_entry_list.text().trim().to_string();
+
+        let filter = ArtifactFilter {
+            modules,
+            variant: variant_filter,
+            types: types.into_iter().map(|t| t as i32).collect(),
+            name_contains,
+            path_contains,
+        };
+
+        cmd_tx_list
+            .send(UiCommand::BuildListArtifacts {
+                cfg,
+                project_ref,
+                variant,
+                filter,
             })
             .ok();
     });
@@ -1518,22 +2433,88 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     };
 
     let cfg1 = cfg.clone();
-    add_row(0, "JobService", cfg.lock().unwrap().job_addr.clone(), Box::new(move |v| cfg1.lock().unwrap().job_addr = v));
+    add_row(
+        0,
+        "JobService",
+        cfg.lock().unwrap().job_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg1.lock().unwrap();
+            cfg.job_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     let cfg2 = cfg.clone();
-    add_row(1, "ToolchainService", cfg.lock().unwrap().toolchain_addr.clone(), Box::new(move |v| cfg2.lock().unwrap().toolchain_addr = v));
+    add_row(
+        1,
+        "ToolchainService",
+        cfg.lock().unwrap().toolchain_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg2.lock().unwrap();
+            cfg.toolchain_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     let cfg3 = cfg.clone();
-    add_row(2, "ProjectService", cfg.lock().unwrap().project_addr.clone(), Box::new(move |v| cfg3.lock().unwrap().project_addr = v));
+    add_row(
+        2,
+        "ProjectService",
+        cfg.lock().unwrap().project_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg3.lock().unwrap();
+            cfg.project_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     let cfg4 = cfg.clone();
-    add_row(3, "BuildService", cfg.lock().unwrap().build_addr.clone(), Box::new(move |v| cfg4.lock().unwrap().build_addr = v));
+    add_row(
+        3,
+        "BuildService",
+        cfg.lock().unwrap().build_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg4.lock().unwrap();
+            cfg.build_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     let cfg5 = cfg.clone();
-    add_row(4, "TargetService", cfg.lock().unwrap().targets_addr.clone(), Box::new(move |v| cfg5.lock().unwrap().targets_addr = v));
+    add_row(
+        4,
+        "TargetService",
+        cfg.lock().unwrap().targets_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg5.lock().unwrap();
+            cfg.targets_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     let cfg6 = cfg.clone();
-    add_row(5, "ObserveService", cfg.lock().unwrap().observe_addr.clone(), Box::new(move |v| cfg6.lock().unwrap().observe_addr = v));
+    add_row(
+        5,
+        "ObserveService",
+        cfg.lock().unwrap().observe_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg6.lock().unwrap();
+            cfg.observe_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
 
     page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
     page
@@ -1549,36 +2530,369 @@ fn parse_gradle_args(raw: &str) -> Vec<KeyValue> {
         .collect()
 }
 
+fn text_view_text(view: &gtk::TextView) -> String {
+    let buffer = view.buffer();
+    let start = buffer.start_iter();
+    let end = buffer.end_iter();
+    buffer.text(&start, &end, false).to_string()
+}
+
+fn parse_list_tokens(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn parse_kv_lines(raw: &str) -> Vec<KeyValue> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (key, value) = match trimmed.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => (trimmed, ""),
+            };
+            if key.is_empty() {
+                None
+            } else {
+                Some(KeyValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn to_optional_id(raw: &str) -> Option<Id> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(Id {
+            value: trimmed.to_string(),
+        })
+    }
+}
+
+fn kv_pairs(items: &[KeyValue]) -> String {
+    items
+        .iter()
+        .map(|kv| format!("{}={}", kv.key, kv.value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_job_states(raw: &str) -> (Vec<i32>, Vec<String>) {
+    let mut states = Vec::new();
+    let mut unknown = Vec::new();
+    for token in parse_list_tokens(raw) {
+        let state = match token.to_ascii_lowercase().as_str() {
+            "queued" => Some(JobState::Queued),
+            "running" => Some(JobState::Running),
+            "success" | "succeeded" => Some(JobState::Success),
+            "failed" | "failure" => Some(JobState::Failed),
+            "cancelled" | "canceled" => Some(JobState::Cancelled),
+            _ => None,
+        };
+        if let Some(state) = state {
+            states.push(state as i32);
+        } else {
+            unknown.push(token);
+        }
+    }
+    (states, unknown)
+}
+
+fn parse_job_event_kinds(raw: &str) -> (Vec<i32>, Vec<String>) {
+    let mut kinds = Vec::new();
+    let mut unknown = Vec::new();
+    for token in parse_list_tokens(raw) {
+        let kind = match token.to_ascii_lowercase().as_str() {
+            "state" | "state_changed" => Some(JobEventKind::StateChanged),
+            "progress" => Some(JobEventKind::Progress),
+            "log" | "logs" => Some(JobEventKind::Log),
+            "completed" | "complete" => Some(JobEventKind::Completed),
+            "failed" | "failure" => Some(JobEventKind::Failed),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            kinds.push(kind as i32);
+        } else {
+            unknown.push(token);
+        }
+    }
+    (kinds, unknown)
+}
+
+fn parse_optional_millis(raw: &str) -> Result<Option<i64>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| format!("invalid unix millis: {trimmed}"))
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+impl JobSummary {
+    fn from_proto(job: &Job) -> Self {
+        let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
+        Self {
+            job_id: job.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            job_type: job.job_type.clone(),
+            state: format!("{state:?}"),
+            created_at_unix_millis: job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default(),
+            started_at_unix_millis: job.started_at.as_ref().map(|ts| ts.unix_millis),
+            finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
+            display_name: job.display_name.clone(),
+            correlation_id: job.correlation_id.clone(),
+            project_id: job.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            target_id: job.target_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+impl LogExportEvent {
+    fn from_proto(event: &JobEvent) -> Self {
+        let at_unix_millis = event.at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+        match event.payload.as_ref() {
+            Some(JobPayload::StateChanged(state)) => {
+                let state = JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
+                Self {
+                    at_unix_millis,
+                    kind: "state_changed".into(),
+                    summary: format!("{state:?}"),
+                    data: None,
+                }
+            }
+            Some(JobPayload::Progress(progress)) => {
+                if let Some(p) = progress.progress.as_ref() {
+                    let metrics = kv_pairs(&p.metrics);
+                    let summary = if metrics.is_empty() {
+                        format!("{}% {}", p.percent, p.phase)
+                    } else {
+                        format!("{}% {} ({metrics})", p.percent, p.phase)
+                    };
+                    Self {
+                        at_unix_millis,
+                        kind: "progress".into(),
+                        summary,
+                        data: None,
+                    }
+                } else {
+                    Self {
+                        at_unix_millis,
+                        kind: "progress".into(),
+                        summary: "missing progress payload".into(),
+                        data: None,
+                    }
+                }
+            }
+            Some(JobPayload::Log(log)) => {
+                if let Some(chunk) = log.chunk.as_ref() {
+                    let summary = format!("stream={} truncated={}", chunk.stream, chunk.truncated);
+                    let data = Some(String::from_utf8_lossy(&chunk.data).to_string());
+                    Self {
+                        at_unix_millis,
+                        kind: "log".into(),
+                        summary,
+                        data,
+                    }
+                } else {
+                    Self {
+                        at_unix_millis,
+                        kind: "log".into(),
+                        summary: "missing log chunk".into(),
+                        data: None,
+                    }
+                }
+            }
+            Some(JobPayload::Completed(completed)) => {
+                let outputs = kv_pairs(&completed.outputs);
+                let summary = if outputs.is_empty() {
+                    completed.summary.clone()
+                } else {
+                    format!("{} ({outputs})", completed.summary)
+                };
+                Self {
+                    at_unix_millis,
+                    kind: "completed".into(),
+                    summary,
+                    data: None,
+                }
+            }
+            Some(JobPayload::Failed(failed)) => {
+                let summary = failed
+                    .error
+                    .as_ref()
+                    .map(|err| format!("{} ({})", err.message, err.code))
+                    .unwrap_or_else(|| "failed".into());
+                Self {
+                    at_unix_millis,
+                    kind: "failed".into(),
+                    summary,
+                    data: None,
+                }
+            }
+            None => Self {
+                at_unix_millis,
+                kind: "unknown".into(),
+                summary: "missing payload".into(),
+                data: None,
+            },
+        }
+    }
+}
+
+fn job_event_lines(event: &JobEvent) -> Vec<String> {
+    let export = LogExportEvent::from_proto(event);
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} {}: {}\n",
+        export.at_unix_millis, export.kind, export.summary
+    ));
+    if let Some(data) = export.data {
+        if data.ends_with('\n') {
+            lines.push(data);
+        } else {
+            lines.push(format!("{data}\n"));
+        }
+    }
+    lines
+}
+
+fn format_job_row(job: &Job) -> String {
+    let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+    let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
+    let created = job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    let finished = job.finished_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    format!(
+        "- {} type={} state={:?} created={} finished={} display={}\n",
+        job_id,
+        job.job_type,
+        state,
+        created,
+        finished,
+        job.display_name
+    )
+}
+
+fn parse_artifact_types(raw: &str) -> Vec<ArtifactType> {
+    parse_list_tokens(raw)
+        .into_iter()
+        .filter_map(|token| match token.to_ascii_lowercase().as_str() {
+            "apk" => Some(ArtifactType::Apk),
+            "aab" | "bundle" => Some(ArtifactType::Aab),
+            "aar" => Some(ArtifactType::Aar),
+            "mapping" | "mapping.txt" => Some(ArtifactType::Mapping),
+            "test" | "tests" | "test_result" | "test-results" => Some(ArtifactType::TestResult),
+            _ => None,
+        })
+        .collect()
+}
+
+fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::Apk => "apk",
+        ArtifactType::Aab => "aab",
+        ArtifactType::Aar => "aar",
+        ArtifactType::Mapping => "mapping",
+        ArtifactType::TestResult => "test_result",
+        ArtifactType::Unspecified => "unspecified",
+    }
+}
+
+fn metadata_value<'a>(items: &'a [KeyValue], key: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .find(|item| item.key == key)
+        .map(|item| item.value.as_str())
+}
+
+fn format_artifact_line(artifact: &Artifact) -> String {
+    let kind = ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+    let module = metadata_value(&artifact.metadata, "module").unwrap_or("-");
+    let variant = metadata_value(&artifact.metadata, "variant").unwrap_or("-");
+    let task = metadata_value(&artifact.metadata, "task").unwrap_or("-");
+    format!(
+        "- [{}] {} module={} variant={} task={} size={} path={}\n",
+        artifact_type_label(kind),
+        artifact.name,
+        module,
+        variant,
+        task,
+        artifact.size_bytes,
+        artifact.path
+    )
+}
+
 async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::Sender<AppEvent>) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
-        UiCommand::HomeStartDemo { cfg } => {
+        UiCommand::HomeStartJob {
+            cfg,
+            job_type,
+            params_raw,
+            project_id,
+            target_id,
+            toolchain_set_id,
+        } => {
+            ui.send(AppEvent::HomeResetStatus).ok();
             ui.send(AppEvent::Log { page: "home", line: format!("Connecting to JobService at {}\n", cfg.job_addr) }).ok();
+
+            let job_type = job_type.trim().to_string();
+            if job_type.is_empty() {
+                ui.send(AppEvent::Log { page: "home", line: "job_type is required\n".into() }).ok();
+                return Ok(());
+            }
 
             let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
             let resp = client.start_job(StartJobRequest {
-                job_type: "demo.job".into(),
-                params: vec![],
-                project_id: None,
-                target_id: None,
-                toolchain_set_id: None,
+                job_type: job_type.clone(),
+                params: parse_kv_lines(&params_raw),
+                project_id: to_optional_id(&project_id),
+                target_id: to_optional_id(&target_id),
+                toolchain_set_id: to_optional_id(&toolchain_set_id),
             }).await?.into_inner();
 
             let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
+            if job_id.is_empty() {
+                ui.send(AppEvent::Log { page: "home", line: "StartJob returned empty job_id\n".into() }).ok();
+                return Ok(());
+            }
             worker_state.current_job_id = Some(job_id.clone());
             ui.send(AppEvent::SetCurrentJob { job_id: Some(job_id.clone()) }).ok();
-            ui.send(AppEvent::Log { page: "home", line: format!("Started demo job: {job_id}\n") }).ok();
+            ui.send(AppEvent::Log { page: "home", line: format!("Started job: {job_id} ({job_type})\n") }).ok();
+            ui.send(AppEvent::HomeState { state: "Queued".into() }).ok();
 
-            let mut stream = client.stream_job_events(StreamJobEventsRequest {
-                job_id: Some(Id { value: job_id.clone() }),
-                include_history: true,
-            }).await?.into_inner();
+            stream_job_events_home(&cfg.job_addr, &job_id, ui.clone()).await?;
+        }
 
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(evt) => ui.send(AppEvent::Log { page: "home", line: format!("event: {:?}\n", evt.payload) }).ok(),
-                    Err(s) => { ui.send(AppEvent::Log { page: "home", line: format!("stream error: {s}\n") }).ok(); break; }
-                };
+        UiCommand::HomeWatchJob { cfg, job_id } => {
+            let job_id = job_id.trim().to_string();
+            if job_id.is_empty() {
+                ui.send(AppEvent::Log { page: "home", line: "job_id is required to watch\n".into() }).ok();
+                return Ok(());
             }
+            ui.send(AppEvent::HomeResetStatus).ok();
+            worker_state.current_job_id = Some(job_id.clone());
+            ui.send(AppEvent::SetCurrentJob { job_id: Some(job_id.clone()) }).ok();
+            ui.send(AppEvent::Log { page: "home", line: format!("Watching job: {job_id}\n") }).ok();
+
+            stream_job_events_home(&cfg.job_addr, &job_id, ui.clone()).await?;
         }
 
         UiCommand::HomeCancelCurrent { cfg } => {
@@ -1588,6 +2902,185 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 let resp = client.cancel_job(CancelJobRequest { job_id: Some(Id { value: job_id.clone() }) }).await?.into_inner();
                 ui.send(AppEvent::Log { page: "home", line: format!("Cancel accepted: {}\n", resp.accepted) }).ok();
             }
+        }
+
+        UiCommand::JobsList {
+            cfg,
+            job_types,
+            states,
+            created_after,
+            created_before,
+            finished_after,
+            finished_before,
+            page_size,
+            page_token,
+        } => {
+            ui.send(AppEvent::Log { page: "jobs", line: format!("Listing jobs via {}\n", cfg.job_addr) }).ok();
+            let (state_filters, unknown_states) = parse_job_states(&states);
+            if !unknown_states.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: format!("Unknown states: {}\n", unknown_states.join(", ")) }).ok();
+            }
+            let created_after = match parse_optional_millis(&created_after) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let created_before = match parse_optional_millis(&created_before) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let finished_after = match parse_optional_millis(&finished_after) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let finished_before = match parse_optional_millis(&finished_before) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            let filter = JobFilter {
+                job_types: parse_list_tokens(&job_types),
+                states: state_filters,
+                created_after: created_after.map(|ms| Timestamp { unix_millis: ms }),
+                created_before: created_before.map(|ms| Timestamp { unix_millis: ms }),
+                finished_after: finished_after.map(|ms| Timestamp { unix_millis: ms }),
+                finished_before: finished_before.map(|ms| Timestamp { unix_millis: ms }),
+            };
+
+            let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
+            let resp = client
+                .list_jobs(ListJobsRequest {
+                    page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                    filter: Some(filter),
+                })
+                .await?
+                .into_inner();
+
+            if resp.jobs.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: "No jobs found.\n".into() }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "jobs", line: format!("Jobs ({})\n", resp.jobs.len()) }).ok();
+                for job in &resp.jobs {
+                    ui.send(AppEvent::Log { page: "jobs", line: format_job_row(job) }).ok();
+                }
+            }
+            if let Some(page_info) = resp.page_info {
+                if !page_info.next_page_token.is_empty() {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                }
+            }
+        }
+
+        UiCommand::JobsHistory {
+            cfg,
+            job_id,
+            kinds,
+            after,
+            before,
+            page_size,
+            page_token,
+        } => {
+            let job_id = job_id.trim().to_string();
+            if job_id.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: "job_id is required for history\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page: "jobs", line: format!("Listing job history for {job_id} via {}\n", cfg.job_addr) }).ok();
+            let (kind_filters, unknown_kinds) = parse_job_event_kinds(&kinds);
+            if !unknown_kinds.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: format!("Unknown kinds: {}\n", unknown_kinds.join(", ")) }).ok();
+            }
+            let after = match parse_optional_millis(&after) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let before = match parse_optional_millis(&before) {
+                Ok(value) => value,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("{err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            let filter = JobHistoryFilter {
+                kinds: kind_filters,
+                after: after.map(|ms| Timestamp { unix_millis: ms }),
+                before: before.map(|ms| Timestamp { unix_millis: ms }),
+            };
+
+            let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
+            let resp = client
+                .list_job_history(ListJobHistoryRequest {
+                    job_id: Some(Id { value: job_id.clone() }),
+                    page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                    filter: Some(filter),
+                })
+                .await?
+                .into_inner();
+
+            if resp.events.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: "No events found.\n".into() }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "jobs", line: format!("Events ({})\n", resp.events.len()) }).ok();
+                for event in &resp.events {
+                    for line in job_event_lines(event) {
+                        ui.send(AppEvent::Log { page: "jobs", line }).ok();
+                    }
+                }
+            }
+            if let Some(page_info) = resp.page_info {
+                if !page_info.next_page_token.is_empty() {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                }
+            }
+        }
+
+        UiCommand::JobsExportLogs { cfg, job_id, output_path } => {
+            let job_id = job_id.trim().to_string();
+            if job_id.is_empty() {
+                ui.send(AppEvent::Log { page: "jobs", line: "job_id is required for export\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page: "jobs", line: format!("Exporting logs for {job_id}\n") }).ok();
+
+            let path = if output_path.trim().is_empty() {
+                default_export_path("ui-job-export", &job_id)
+            } else {
+                PathBuf::from(output_path)
+            };
+
+            let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
+            let job = match client.get_job(GetJobRequest { job_id: Some(Id { value: job_id.clone() }) }).await {
+                Ok(resp) => resp.into_inner().job,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("GetJob failed: {err}\n") }).ok();
+                    None
+                }
+            };
+            let events = collect_job_history(&mut client, &job_id).await?;
+            let export = UiLogExport {
+                exported_at_unix_millis: now_millis(),
+                job_id: job_id.clone(),
+                config: cfg.clone(),
+                job: job.as_ref().map(JobSummary::from_proto),
+                events: events.iter().map(LogExportEvent::from_proto).collect(),
+            };
+            write_json_atomic(&path, &export)?;
+            ui.send(AppEvent::Log { page: "jobs", line: format!("Exported logs to {}\n", path.display()) }).ok();
         }
 
         UiCommand::ToolchainListProviders { cfg } => {
@@ -1642,6 +3135,89 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Install job queued: {job_id}\n") }).ok();
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "toolchains", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
+        }
+
+        UiCommand::ToolchainUpdate { cfg, toolchain_id, version, verify, remove_cached } => {
+            let toolchain_id = toolchain_id.trim().to_string();
+            let version = version.trim().to_string();
+            if toolchain_id.is_empty() || version.is_empty() {
+                ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain update requires toolchain id and version.\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Updating {toolchain_id} to {version} (verify={verify})\n") }).ok();
+            let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
+            let resp = client.update_toolchain(UpdateToolchainRequest {
+                toolchain_id: Some(Id { value: toolchain_id }),
+                version,
+                verify_hash: verify,
+                remove_cached_artifact: remove_cached,
+                job_id: None,
+            }).await?.into_inner();
+
+            let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Update job queued: {job_id}\n") }).ok();
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "toolchains", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
+        }
+
+        UiCommand::ToolchainUninstall { cfg, toolchain_id, remove_cached, force } => {
+            let toolchain_id = toolchain_id.trim().to_string();
+            if toolchain_id.is_empty() {
+                ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain uninstall requires toolchain id.\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Uninstalling {toolchain_id} (force={force})\n") }).ok();
+            let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
+            let resp = client.uninstall_toolchain(UninstallToolchainRequest {
+                toolchain_id: Some(Id { value: toolchain_id }),
+                remove_cached_artifact: remove_cached,
+                force,
+                job_id: None,
+            }).await?.into_inner();
+
+            let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Uninstall job queued: {job_id}\n") }).ok();
+            if !job_id.is_empty() {
+                let job_addr = cfg.job_addr.clone();
+                let ui_stream = ui.clone();
+                let ui_err = ui.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page: "toolchains", line: format!("job stream error ({job_id}): {err}\n") });
+                    }
+                });
+            }
+        }
+
+        UiCommand::ToolchainCleanupCache { cfg, dry_run, remove_all } => {
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Cleaning cache via {} (dry_run={dry_run}, remove_all={remove_all})\n", cfg.toolchain_addr) }).ok();
+            let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
+            let resp = client.cleanup_toolchain_cache(CleanupToolchainCacheRequest {
+                dry_run,
+                remove_all,
+                job_id: None,
+            }).await?.into_inner();
+
+            let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Cleanup job queued: {job_id}\n") }).ok();
             if !job_id.is_empty() {
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
@@ -2520,7 +4096,16 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::BuildRun { cfg, project_ref, variant, clean_first, gradle_args } => {
+        UiCommand::BuildRun {
+            cfg,
+            project_ref,
+            variant,
+            variant_name,
+            module,
+            tasks,
+            clean_first,
+            gradle_args,
+        } => {
             if project_ref.trim().is_empty() {
                 ui.send(AppEvent::Log { page: "console", line: "Project path or id is required.\n".into() }).ok();
                 return Ok(());
@@ -2535,6 +4120,9 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 clean_first,
                 gradle_args,
                 job_id: None,
+                module,
+                variant_name,
+                tasks,
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -2558,6 +4146,179 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     let _ = ui_err.send(AppEvent::Log { page: "console", line: format!("job stream error ({job_id}): {err}\n") });
                 }
             });
+        }
+
+        UiCommand::BuildListArtifacts {
+            cfg,
+            project_ref,
+            variant,
+            filter,
+        } => {
+            if project_ref.trim().is_empty() {
+                ui.send(AppEvent::Log { page: "console", line: "Project path or id is required.\n".into() }).ok();
+                return Ok(());
+            }
+
+            ui.send(AppEvent::Log { page: "console", line: format!("Listing artifacts via {}\n", cfg.build_addr) }).ok();
+            let mut client = BuildServiceClient::new(connect(&cfg.build_addr).await?);
+            let resp = match client.list_artifacts(ListArtifactsRequest {
+                project_id: Some(Id { value: project_ref.trim().to_string() }),
+                variant: variant as i32,
+                filter: Some(filter),
+            }).await {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "console", line: format!("List artifacts failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            if resp.artifacts.is_empty() {
+                ui.send(AppEvent::Log { page: "console", line: "No artifacts found.\n".into() }).ok();
+                return Ok(());
+            }
+
+            let total = resp.artifacts.len();
+            let mut by_module: BTreeMap<String, Vec<Artifact>> = BTreeMap::new();
+            for artifact in resp.artifacts {
+                let module = metadata_value(&artifact.metadata, "module").unwrap_or("");
+                let label = if module.trim().is_empty() {
+                    "<root>".to_string()
+                } else {
+                    module.to_string()
+                };
+                by_module.entry(label).or_default().push(artifact);
+            }
+
+            ui.send(AppEvent::Log { page: "console", line: format!("Artifacts ({total})\n") }).ok();
+            for (module, artifacts) in by_module {
+                ui.send(AppEvent::Log { page: "console", line: format!("Module: {module}\n") }).ok();
+                for artifact in artifacts {
+                    ui.send(AppEvent::Log { page: "console", line: format_artifact_line(&artifact) }).ok();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn default_export_path(prefix: &str, job_id: &str) -> PathBuf {
+    let ts = now_millis();
+    data_dir()
+        .join("state")
+        .join(format!("{prefix}-{job_id}-{ts}.json"))
+}
+
+async fn collect_job_history(
+    client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> Result<Vec<JobEvent>, Box<dyn std::error::Error>> {
+    let mut events = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = client
+            .list_job_history(ListJobHistoryRequest {
+                job_id: Some(Id {
+                    value: job_id.to_string(),
+                }),
+                page: Some(Pagination {
+                    page_size: 200,
+                    page_token: page_token.clone(),
+                }),
+                filter: None,
+            })
+            .await?
+            .into_inner();
+        events.extend(resp.events);
+        let next_token = resp
+            .page_info
+            .map(|page_info| page_info.next_page_token)
+            .unwrap_or_default();
+        if next_token.is_empty() {
+            break;
+        }
+        page_token = next_token;
+    }
+    Ok(events)
+}
+
+async fn stream_job_events_home(
+    addr: &str,
+    job_id: &str,
+    ui: mpsc::Sender<AppEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(addr).await?);
+    let mut stream = client
+        .stream_job_events(StreamJobEventsRequest {
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
+            include_history: true,
+        })
+        .await?
+        .into_inner();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(evt) => {
+                if let Some(payload) = evt.payload.as_ref() {
+                    match payload {
+                        JobPayload::StateChanged(state) => {
+                            let state = JobState::try_from(state.new_state)
+                                .unwrap_or(JobState::Unspecified);
+                            ui.send(AppEvent::HomeState { state: format!("{state:?}") }).ok();
+                            if matches!(
+                                state,
+                                JobState::Success | JobState::Failed | JobState::Cancelled
+                            ) {
+                                ui.send(AppEvent::HomeResult { result: format!("{state:?}") }).ok();
+                            }
+                        }
+                        JobPayload::Progress(progress) => {
+                            if let Some(p) = progress.progress.as_ref() {
+                                ui.send(AppEvent::HomeProgress {
+                                    progress: format!("{}% {}", p.percent, p.phase),
+                                }).ok();
+                            }
+                        }
+                        JobPayload::Completed(completed) => {
+                            ui.send(AppEvent::HomeState { state: "Success".into() }).ok();
+                            ui.send(AppEvent::HomeResult { result: completed.summary.clone() }).ok();
+                        }
+                        JobPayload::Failed(failed) => {
+                            let message = failed
+                                .error
+                                .as_ref()
+                                .map(|err| err.message.clone())
+                                .unwrap_or_else(|| "failed".into());
+                            ui.send(AppEvent::HomeState { state: "Failed".into() }).ok();
+                            ui.send(AppEvent::HomeResult { result: message }).ok();
+                        }
+                        JobPayload::Log(_) => {}
+                    }
+                }
+                for line in job_event_lines(&evt) {
+                    ui.send(AppEvent::Log { page: "home", line }).ok();
+                }
+                if let Some(JobPayload::Completed(_)) = evt.payload.as_ref() {
+                    break;
+                }
+                if let Some(JobPayload::Failed(_)) = evt.payload.as_ref() {
+                    break;
+                }
+                if let Some(JobPayload::StateChanged(state)) = evt.payload.as_ref() {
+                    let state = JobState::try_from(state.new_state)
+                        .unwrap_or(JobState::Unspecified);
+                    if matches!(state, JobState::Cancelled) {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                ui.send(AppEvent::Log { page: "home", line: format!("job stream error: {err}\n") }).ok();
+                break;
+            }
         }
     }
 
