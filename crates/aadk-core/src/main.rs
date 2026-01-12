@@ -10,11 +10,30 @@ use aadk_proto::aadk::v1::{
 use tokio::sync::{broadcast, mpsc, Mutex, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const HISTORY_CAPACITY: usize = 2048;
+
+fn is_known_job_type(job_type: &str) -> bool {
+    matches!(
+        job_type,
+        "demo.job"
+            | "project.create"
+            | "build.run"
+            | "toolchain.install"
+            | "toolchain.verify"
+            | "targets.install"
+            | "targets.launch"
+            | "targets.stop"
+            | "targets.cuttlefish.install"
+            | "targets.cuttlefish.start"
+            | "targets.cuttlefish.stop"
+            | "observe.support_bundle"
+            | "observe.evidence_bundle"
+    )
+}
 
 fn now_ts() -> Timestamp {
     let ms = std::time::SystemTime::now()
@@ -195,7 +214,15 @@ impl JobService for JobSvc {
         request: Request<StartJobRequest>,
     ) -> Result<Response<StartJobResponse>, Status> {
         let req = request.into_inner();
-        let job_type = if req.job_type.is_empty() { "demo.job" } else { req.job_type.as_str() };
+        let job_type = req.job_type.trim();
+        if job_type.is_empty() {
+            return Err(Status::invalid_argument("job_type is required"));
+        }
+        if !is_known_job_type(job_type) {
+            return Err(Status::invalid_argument(format!(
+                "unknown job_type: {job_type}"
+            )));
+        }
         let display_name = if job_type == "demo.job" { "Demo Job" } else { job_type };
 
         let job_id = Uuid::new_v4().to_string();
@@ -232,9 +259,6 @@ impl JobService for JobSvc {
             tokio::spawn(async move {
                 svc.demo_job_runner(job_id_clone, cancel_rx).await;
             });
-        } else {
-            warn!("Unknown job_type '{job_type}'. Only 'demo.job' is implemented in this scaffold.");
-            // Leave it queued.
         }
 
         Ok(Response::new(StartJobResponse {
@@ -267,6 +291,13 @@ impl JobService for JobSvc {
         };
 
         let inner = rec.lock().await;
+        let state = JobState::try_from(inner.job.state).unwrap_or(JobState::Unspecified);
+        if matches!(
+            state,
+            JobState::Success | JobState::Failed | JobState::Cancelled
+        ) {
+            return Ok(Response::new(CancelJobResponse { accepted: false }));
+        }
         let _ = inner.cancel_tx.send(true);
         drop(inner);
 

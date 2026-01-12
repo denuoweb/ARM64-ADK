@@ -22,8 +22,8 @@ Update this file whenever JobService behavior changes or when commits touching t
   - watch::Sender<bool> for cancellation
 - StreamJobEvents replays history (optional) and then forwards live events.
 - publish_job_event updates job state on StateChanged/Completed/Failed payloads before broadcasting.
-- start_job defaults job_type to "demo.job" and runs a scripted demo runner; unknown job types are
-  currently left queued with a warning.
+- start_job requires a non-empty job_type, rejects unknown types, and runs the demo runner only
+  for demo.job (other services own their worker execution).
 
 ## Data flow and dependencies
 - ToolchainService, BuildService, TargetService, and ObserveService are expected to create jobs
@@ -34,9 +34,6 @@ Update this file whenever JobService behavior changes or when commits touching t
 - AADK_JOB_ADDR sets the bind address (default 127.0.0.1:50051).
 
 ## Prioritized TODO checklist by service
-- P0: Replace demo-only job flow with real job dispatch (build/toolchain/targets/observe). main.rs (line 193)
-- P0: Propagate cancellation to actual workers, not just demo jobs. main.rs (line 118) main.rs (line 257)
 - P1: Persist job state/history across restarts. main.rs (line 35)
-- P1: Return explicit errors for unknown job types instead of leaving them queued. main.rs (line 236)
 - P2: Add retention/cleanup policy for job history. main.rs (line 84)
 - P2: Expand progress/metrics payloads per job type. main.rs (line 100)
