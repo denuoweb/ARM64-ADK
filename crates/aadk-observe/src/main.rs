@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     io,
     io::Write,
@@ -27,6 +27,7 @@ use uuid::Uuid;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 const STATE_FILE_NAME: &str = "observe.json";
+const JOB_STATE_FILE_NAME: &str = "jobs.json";
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_RUNS: usize = 200;
 const DEFAULT_BUNDLE_RETENTION_DAYS: u64 = 30;
@@ -69,6 +70,41 @@ struct RunRecordEntry {
 struct SummaryEntry {
     key: String,
     value: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct JobHistoryFile {
+    jobs: Vec<JobHistoryEntry>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct JobHistoryEntry {
+    job_id: String,
+    history: Vec<JobHistoryEvent>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct JobHistoryEvent {
+    payload: Option<JobHistoryPayload>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum JobHistoryPayload {
+    Log { chunk: Option<JobLogChunk> },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct JobLogChunk {
+    stream: String,
+    data: Vec<u8>,
+    truncated: bool,
 }
 
 #[derive(Clone)]
@@ -128,8 +164,16 @@ fn data_dir() -> PathBuf {
     }
 }
 
+fn state_dir() -> PathBuf {
+    data_dir().join("state")
+}
+
 fn state_file_path() -> PathBuf {
-    data_dir().join("state").join(STATE_FILE_NAME)
+    state_dir().join(STATE_FILE_NAME)
+}
+
+fn job_state_file_path() -> PathBuf {
+    state_dir().join(JOB_STATE_FILE_NAME)
 }
 
 fn bundles_dir() -> PathBuf {
@@ -529,6 +573,13 @@ async fn publish_progress(
     .await
 }
 
+fn metric(key: &str, value: impl ToString) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
 async fn publish_log(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -645,6 +696,134 @@ fn gather_env() -> BTreeMap<String, String> {
     map
 }
 
+fn add_state_file(items: &mut Vec<BundleItem>, file_name: &str) {
+    items.push(BundleItem::File {
+        source: state_dir().join(file_name),
+        name: format!("state/{file_name}"),
+    });
+}
+
+fn sanitize_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "_".into()
+    } else {
+        out
+    }
+}
+
+fn load_job_history() -> Option<JobHistoryFile> {
+    let path = job_state_file_path();
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!("Failed to read {}: {}", path.display(), err);
+            }
+            return None;
+        }
+    };
+    match serde_json::from_str::<JobHistoryFile>(&data) {
+        Ok(file) => Some(file),
+        Err(err) => {
+            warn!("Failed to parse {}: {}", path.display(), err);
+            None
+        }
+    }
+}
+
+fn log_readme(message: String) -> BundleItem {
+    BundleItem::Generated {
+        name: "logs/README.txt".into(),
+        contents: message.into_bytes(),
+    }
+}
+
+fn collect_log_items(run_id: &str, runs_snapshot: &[RunRecordEntry]) -> Vec<BundleItem> {
+    let Some(run) = runs_snapshot.iter().find(|item| item.run_id == run_id) else {
+        return vec![log_readme(format!(
+            "No run record found for run_id {run_id}\n"
+        ))];
+    };
+    if run.job_ids.is_empty() {
+        return vec![log_readme(format!(
+            "Run {run_id} has no recorded job ids\n"
+        ))];
+    }
+
+    let file = match load_job_history() {
+        Some(file) => file,
+        None => {
+            return vec![log_readme(format!(
+                "Job history file {} not available\n",
+                job_state_file_path().display()
+            ))];
+        }
+    };
+
+    let job_set: HashSet<String> = run.job_ids.iter().cloned().collect();
+    let mut logs: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
+
+    for job in file.jobs {
+        if !job_set.contains(&job.job_id) {
+            continue;
+        }
+        for event in job.history {
+            let Some(JobHistoryPayload::Log { chunk }) = event.payload else {
+                continue;
+            };
+            let Some(chunk) = chunk else {
+                continue;
+            };
+            let stream = if chunk.stream.trim().is_empty() {
+                "log".to_string()
+            } else {
+                chunk.stream
+            };
+            logs.entry(job.job_id.clone())
+                .or_default()
+                .entry(stream)
+                .or_default()
+                .extend_from_slice(&chunk.data);
+        }
+    }
+
+    if logs.is_empty() {
+        return vec![log_readme(format!(
+            "No job logs found in {} for run {run_id}\n",
+            job_state_file_path().display()
+        ))];
+    }
+
+    let mut items = Vec::new();
+    for (job_id, streams) in logs {
+        let job_dir = sanitize_segment(&job_id);
+        for (stream, data) in streams {
+            if data.is_empty() {
+                continue;
+            }
+            let stream_name = sanitize_segment(&stream);
+            items.push(BundleItem::Generated {
+                name: format!("logs/{job_dir}/{stream_name}.log"),
+                contents: data,
+            });
+        }
+    }
+    if items.is_empty() {
+        items.push(log_readme(format!(
+            "Job logs were empty for run {run_id}\n"
+        )));
+    }
+    items
+}
+
 fn make_manifest(
     bundle_type: &str,
     run_id: Option<String>,
@@ -684,9 +863,12 @@ fn support_bundle_plan(
         let env_json = serde_json::to_vec_pretty(&env)
             .map_err(|e| Status::internal(format!("env serialization failed: {e}")))?;
         items.push(BundleItem::Generated {
-            name: "env.json".into(),
+            name: "config/env.json".into(),
             contents: env_json,
         });
+        add_state_file(&mut items, "projects.json");
+        add_state_file(&mut items, "builds.json");
+        add_state_file(&mut items, "targets.json");
     }
 
     if req.include_recent_runs {
@@ -695,7 +877,7 @@ fn support_bundle_plan(
         } else {
             req.recent_runs_limit as usize
         };
-        let slice = runs_snapshot.into_iter().take(limit).collect::<Vec<_>>();
+        let slice = runs_snapshot.iter().cloned().take(limit).collect::<Vec<_>>();
         let runs_json = serde_json::to_vec_pretty(&slice)
             .map_err(|e| Status::internal(format!("runs serialization failed: {e}")))?;
         items.push(BundleItem::Generated {
@@ -713,10 +895,7 @@ fn support_bundle_plan(
     }
 
     if req.include_logs {
-        items.push(BundleItem::Generated {
-            name: "logs_placeholder.txt".into(),
-            contents: b"No logs collected yet.\n".to_vec(),
-        });
+        items.extend(collect_log_items(run_id, &runs_snapshot));
     }
 
     Ok(BundlePlan { output_path, items })
@@ -771,6 +950,26 @@ async fn update_run_state(
     save_state(&st)
 }
 
+fn support_bundle_metrics(
+    run_id: &str,
+    output_path: &Path,
+    req: &ExportSupportBundleRequest,
+) -> Vec<KeyValue> {
+    vec![
+        metric("run_id", run_id),
+        metric("output_path", output_path.display()),
+        metric("include_logs", req.include_logs),
+        metric("include_config", req.include_config),
+        metric("include_toolchain_provenance", req.include_toolchain_provenance),
+        metric("include_recent_runs", req.include_recent_runs),
+        metric("recent_runs_limit", req.recent_runs_limit),
+    ]
+}
+
+fn evidence_bundle_metrics(run_id: &str, output_path: &Path) -> Vec<KeyValue> {
+    vec![metric("run_id", run_id), metric("output_path", output_path.display())]
+}
+
 async fn run_support_bundle_job(
     mut job_client: JobServiceClient<Channel>,
     state: Arc<Mutex<State>>,
@@ -798,12 +997,13 @@ async fn run_support_bundle_job(
     )
     .await?;
 
+    let base_metrics = support_bundle_metrics(&run_id, &output_path, &req);
     publish_progress(
         &mut job_client,
         &job_id,
         10,
         "collecting metadata",
-        vec![],
+        base_metrics.clone(),
     )
     .await?;
 
@@ -851,7 +1051,9 @@ async fn run_support_bundle_job(
         return Ok(());
     }
 
-    publish_progress(&mut job_client, &job_id, 60, "writing bundle", vec![]).await?;
+    let mut write_metrics = base_metrics.clone();
+    write_metrics.push(metric("item_count", plan.items.len()));
+    publish_progress(&mut job_client, &job_id, 60, "writing bundle", write_metrics).await?;
 
     match write_zip_bundle(plan) {
         Ok(_) => {}
@@ -929,7 +1131,8 @@ async fn run_evidence_bundle_job(
     )
     .await?;
 
-    publish_progress(&mut job_client, &job_id, 25, "loading run", vec![]).await?;
+    let base_metrics = evidence_bundle_metrics(&run_id, &output_path);
+    publish_progress(&mut job_client, &job_id, 25, "loading run", base_metrics.clone()).await?;
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled\n").await;
@@ -973,7 +1176,9 @@ async fn run_evidence_bundle_job(
         return Ok(());
     }
 
-    publish_progress(&mut job_client, &job_id, 70, "writing bundle", vec![]).await?;
+    let mut write_metrics = base_metrics.clone();
+    write_metrics.push(metric("item_count", plan.items.len()));
+    publish_progress(&mut job_client, &job_id, 70, "writing bundle", write_metrics).await?;
 
     match write_zip_bundle(plan) {
         Ok(_) => {}

@@ -17,11 +17,13 @@ Update this file whenever observe behavior changes or when commits touching this
 - export_support_bundle creates a JobService job, writes a zip bundle under
   ~/.local/share/aadk/bundles, and streams progress/log events.
 - export_evidence_bundle does the same for a single run id.
+- Bundle export progress metrics include run_id/output_path plus include flags and item counts.
 - ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs.
 - Runs capture project/target/toolchain ids when provided for filtering.
 - Bundle retention prunes old zip files and tmp-* directories by age/count.
-- Bundle contents include a manifest, optional env/config capture, optional toolchain state, and
-  optional recent run snapshots. Log collection is currently a placeholder file.
+- Bundle contents include a manifest, config snapshots (env + state files), optional toolchain
+  state, optional recent run snapshots, and job log capture from JobService history
+  (`~/.local/share/aadk/state/jobs.json`).
 
 ## Data flow and dependencies
 - Uses JobService for bundle jobs and event streaming.
@@ -34,4 +36,3 @@ Update this file whenever observe behavior changes or when commits touching this
 - AADK_OBSERVE_TMP_RETENTION_HOURS controls tmp directory retention (default 24, 0 disables).
 
 ## Prioritized TODO checklist by service
-- P1: Replace placeholder log/config collection with real files. main.rs (line 24)
