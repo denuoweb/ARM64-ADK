@@ -1804,7 +1804,7 @@ fn page_targets(
         .build();
     let apk_browse = gtk::Button::with_label("Browse...");
     let app_id_entry = gtk::Entry::builder()
-        .text("com.example.sampleprog")
+        .text("com.example.sampleconsole")
         .hexpand(true)
         .build();
     let activity_entry = gtk::Entry::builder()

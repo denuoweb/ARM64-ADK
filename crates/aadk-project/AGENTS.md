@@ -18,6 +18,8 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - State is persisted in ~/.local/share/aadk/state/projects.json and cached in-memory.
 - list_templates loads a JSON registry from AADK_PROJECT_TEMPLATES (or templates/registry.json),
   skipping invalid entries.
+- templates/registry.json currently includes the Sample Console template (tmpl-sample-console)
+  pointing at SampleConsole/ for the bundled Android sample.
 - create_project scaffolds files from the template directory, streams job progress/logs to
   JobService, and persists metadata in .aadk/project.json plus the recent list.
 - create_project progress metrics include project/template metadata plus copied/total files.

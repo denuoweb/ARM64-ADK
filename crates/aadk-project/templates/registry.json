@@ -1,10 +1,10 @@
 {
   "templates": [
     {
-      "template_id": "tmpl-sample-prog",
-      "name": "SampleProg",
-      "description": "Sample Android Gradle project shipped in this repo.",
-      "path": "../../../SampleProg",
+      "template_id": "tmpl-sample-console",
+      "name": "Sample Console",
+      "description": "Sample Console Android Gradle project shipped in this repo.",
+      "path": "../../../SampleConsole",
       "defaults": [
         { "key": "minSdk", "value": "24" },
         { "key": "compileSdk", "value": "35" }
