@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io,
     net::SocketAddr,
@@ -30,6 +31,8 @@ const PROJECT_META_NAME: &str = "project.json";
 const TEMPLATE_ENV: &str = "AADK_PROJECT_TEMPLATES";
 const MAX_RECENTS: usize = 50;
 const DEFAULT_PAGE_SIZE: usize = 25;
+const MIN_SDK_KEY: &str = "minSdk";
+const COMPILE_SDK_KEY: &str = "compileSdk";
 
 #[derive(Default)]
 struct State {
@@ -92,6 +95,25 @@ struct TemplateDefault {
 }
 
 #[derive(Debug)]
+struct TemplateDefaultsError {
+    message: String,
+    details: String,
+}
+
+#[derive(Clone)]
+struct ResolvedTemplateDefaults {
+    min_sdk: String,
+    compile_sdk: String,
+    entries: Vec<TemplateDefault>,
+}
+
+#[derive(Default)]
+struct ParsedTemplateDefaults {
+    min_sdk: Option<String>,
+    compile_sdk: Option<String>,
+}
+
+#[derive(Debug)]
 enum CopyUpdate {
     Total(u64),
     File { copied: u64, total: u64 },
@@ -107,6 +129,7 @@ struct CreateRequestParts {
     path: PathBuf,
     template_id: String,
     toolchain_set_id: Option<String>,
+    resolved_defaults: ResolvedTemplateDefaults,
 }
 
 fn default_schema_version() -> u32 {
@@ -263,15 +286,14 @@ impl TemplateEntry {
             && !self.path.trim().is_empty()
     }
 
-    fn to_proto(&self) -> Template {
+    fn to_proto_with_defaults(&self, defaults: &[TemplateDefault]) -> Template {
         Template {
             template_id: Some(Id {
                 value: self.template_id.clone(),
             }),
             name: self.name.clone(),
             description: self.description.clone(),
-            defaults: self
-                .defaults
+            defaults: defaults
                 .iter()
                 .map(|item| KeyValue {
                     key: item.key.clone(),
@@ -317,8 +339,15 @@ impl TemplateRegistry {
         Ok(Self { base_dir, templates })
     }
 
-    fn list(&self) -> Vec<Template> {
-        self.templates.iter().map(TemplateEntry::to_proto).collect()
+    fn list_with_defaults(&self) -> Result<Vec<Template>, Status> {
+        let mut templates = Vec::new();
+        for template in &self.templates {
+            let path = self.resolve_path(template);
+            let resolved = resolve_template_defaults(template, &path, &[])
+                .map_err(|err| Status::failed_precondition(format!("{}: {}", err.message, err.details)))?;
+            templates.push(template.to_proto_with_defaults(&resolved.entries));
+        }
+        Ok(templates)
     }
 
     fn find(&self, template_id: &str) -> Option<TemplateEntry> {
@@ -336,6 +365,230 @@ impl TemplateRegistry {
             self.base_dir.join(raw)
         }
     }
+}
+
+fn template_defaults_error(message: &str, details: impl ToString) -> TemplateDefaultsError {
+    TemplateDefaultsError {
+        message: message.to_string(),
+        details: details.to_string(),
+    }
+}
+
+fn normalize_sdk_value(key: &str, raw: Option<&str>) -> Result<String, TemplateDefaultsError> {
+    let Some(raw) = raw else {
+        return Err(template_defaults_error(
+            "template defaults missing required key",
+            format!("missing {key}"),
+        ));
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(template_defaults_error(
+            "template defaults missing required key",
+            format!("empty {key}"),
+        ));
+    }
+    let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return Err(template_defaults_error(
+            "template defaults invalid",
+            format!("{key} must be numeric (got '{trimmed}')"),
+        ));
+    }
+    Ok(digits)
+}
+
+fn parse_value_after_keyword(input: &str) -> Option<String> {
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.peek() {
+        if ch.is_whitespace() || *ch == '=' || *ch == '(' {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    let mut token = String::new();
+    let Some(first) = chars.next() else {
+        return None;
+    };
+    if first == '"' || first == '\'' {
+        for ch in chars {
+            if ch == first {
+                break;
+            }
+            token.push(ch);
+        }
+    } else {
+        token.push(first);
+        for ch in chars {
+            if ch.is_whitespace() || ch == ')' || ch == ',' {
+                break;
+            }
+            token.push(ch);
+        }
+    }
+
+    let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+fn find_sdk_value(contents: &str, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let mut search = contents;
+        while let Some(index) = search.find(key) {
+            let after = &search[index + key.len()..];
+            if let Some(value) = parse_value_after_keyword(after) {
+                return Some(value);
+            }
+            search = after;
+        }
+    }
+    None
+}
+
+fn collect_gradle_files(
+    root: &Path,
+    template: &TemplateEntry,
+    files: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            if template.exclude_dirs.iter().any(|item| item == &name) {
+                continue;
+            }
+            collect_gradle_files(&path, template, files)?;
+        } else if file_type.is_file() {
+            if template.exclude_files.iter().any(|item| item == &name) {
+                continue;
+            }
+            if name == "build.gradle" || name == "build.gradle.kts" {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_template_defaults_from_gradle(
+    template_path: &Path,
+    template: &TemplateEntry,
+) -> ParsedTemplateDefaults {
+    let mut parsed = ParsedTemplateDefaults::default();
+    let mut files = Vec::new();
+    if collect_gradle_files(template_path, template, &mut files).is_err() {
+        return parsed;
+    }
+
+    for file in files {
+        let Ok(contents) = fs::read_to_string(&file) else {
+            continue;
+        };
+        if parsed.min_sdk.is_none() {
+            parsed.min_sdk = find_sdk_value(&contents, &["minSdk", "minSdkVersion"]);
+        }
+        if parsed.compile_sdk.is_none() {
+            parsed.compile_sdk = find_sdk_value(&contents, &["compileSdk", "compileSdkVersion"]);
+        }
+        if parsed.min_sdk.is_some() && parsed.compile_sdk.is_some() {
+            break;
+        }
+    }
+    parsed
+}
+
+fn resolve_template_defaults(
+    template: &TemplateEntry,
+    template_path: &Path,
+    params: &[KeyValue],
+) -> Result<ResolvedTemplateDefaults, TemplateDefaultsError> {
+    let mut values: HashMap<String, String> = HashMap::new();
+    let mut keys: Vec<String> = Vec::new();
+
+    for item in &template.defaults {
+        if item.key.trim().is_empty() {
+            continue;
+        }
+        if !values.contains_key(&item.key) {
+            keys.push(item.key.clone());
+        }
+        values.insert(item.key.clone(), item.value.clone());
+    }
+
+    for item in params {
+        let key = item.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let key = key.to_string();
+        if !values.contains_key(&key) {
+            keys.push(key.clone());
+        }
+        values.insert(key, item.value.clone());
+    }
+
+    if !values.contains_key(MIN_SDK_KEY) || !values.contains_key(COMPILE_SDK_KEY) {
+        let parsed = parse_template_defaults_from_gradle(template_path, template);
+        if !values.contains_key(MIN_SDK_KEY) {
+            if let Some(value) = parsed.min_sdk {
+                values.insert(MIN_SDK_KEY.to_string(), value);
+                keys.push(MIN_SDK_KEY.to_string());
+            }
+        }
+        if !values.contains_key(COMPILE_SDK_KEY) {
+            if let Some(value) = parsed.compile_sdk {
+                values.insert(COMPILE_SDK_KEY.to_string(), value);
+                keys.push(COMPILE_SDK_KEY.to_string());
+            }
+        }
+    }
+
+    let min_sdk = normalize_sdk_value(MIN_SDK_KEY, values.get(MIN_SDK_KEY).map(|v| v.as_str()))?;
+    let compile_sdk =
+        normalize_sdk_value(COMPILE_SDK_KEY, values.get(COMPILE_SDK_KEY).map(|v| v.as_str()))?;
+    values.insert(MIN_SDK_KEY.to_string(), min_sdk.clone());
+    values.insert(COMPILE_SDK_KEY.to_string(), compile_sdk.clone());
+
+    let mut entries = Vec::new();
+    let mut seen = HashMap::new();
+    for key in keys {
+        if seen.insert(key.clone(), true).is_some() {
+            continue;
+        }
+        if let Some(value) = values.get(&key) {
+            entries.push(TemplateDefault {
+                key,
+                value: value.clone(),
+            });
+        }
+    }
+
+    if !entries.iter().any(|item| item.key == MIN_SDK_KEY) {
+        entries.push(TemplateDefault {
+            key: MIN_SDK_KEY.to_string(),
+            value: min_sdk.clone(),
+        });
+    }
+    if !entries.iter().any(|item| item.key == COMPILE_SDK_KEY) {
+        entries.push(TemplateDefault {
+            key: COMPILE_SDK_KEY.to_string(),
+            value: compile_sdk.clone(),
+        });
+    }
+
+    Ok(ResolvedTemplateDefaults {
+        min_sdk,
+        compile_sdk,
+        entries,
+    })
 }
 
 impl Svc {
@@ -722,6 +975,12 @@ fn project_progress_metrics(
         metric("template_id", &req.template_id),
         metric("template_name", &template.name),
     ];
+    if !req.resolved_defaults.min_sdk.trim().is_empty() {
+        metrics.push(metric("min_sdk", &req.resolved_defaults.min_sdk));
+    }
+    if !req.resolved_defaults.compile_sdk.trim().is_empty() {
+        metrics.push(metric("compile_sdk", &req.resolved_defaults.compile_sdk));
+    }
     if let Some(toolchain_set_id) = req.toolchain_set_id.as_ref() {
         if !toolchain_set_id.trim().is_empty() {
             metrics.push(metric("toolchain_set_id", toolchain_set_id));
@@ -916,6 +1175,14 @@ async fn run_create_job(
                 key: "project_path".into(),
                 value: req.path.to_string_lossy().to_string(),
             },
+            KeyValue {
+                key: "min_sdk".into(),
+                value: req.resolved_defaults.min_sdk.clone(),
+            },
+            KeyValue {
+                key: "compile_sdk".into(),
+                value: req.resolved_defaults.compile_sdk.clone(),
+            },
         ],
     )
     .await?;
@@ -931,7 +1198,7 @@ impl ProjectService for Svc {
     ) -> Result<Response<ListTemplatesResponse>, Status> {
         let registry = TemplateRegistry::load()?;
         Ok(Response::new(ListTemplatesResponse {
-            templates: registry.list(),
+            templates: registry.list_with_defaults()?,
         }))
     }
 
@@ -970,6 +1237,11 @@ impl ProjectService for Svc {
             )));
         }
 
+        let resolved_defaults =
+            resolve_template_defaults(&template, &template_path, &req.params).map_err(|err| {
+                Status::failed_precondition(format!("{}: {}", err.message, err.details))
+            })?;
+
         let project_id = format!("proj-{}", Uuid::new_v4());
         let mut job_client = connect_job().await?;
         let params = vec![
@@ -984,6 +1256,14 @@ impl ProjectService for Svc {
             KeyValue {
                 key: "path".into(),
                 value: project_path.to_string_lossy().to_string(),
+            },
+            KeyValue {
+                key: "min_sdk".into(),
+                value: resolved_defaults.min_sdk.clone(),
+            },
+            KeyValue {
+                key: "compile_sdk".into(),
+                value: resolved_defaults.compile_sdk.clone(),
             },
         ];
         let job_id = start_job(
@@ -1001,6 +1281,7 @@ impl ProjectService for Svc {
             path: project_path,
             template_id: template_id.clone(),
             toolchain_set_id: req.toolchain_set_id.map(|id| id.value),
+            resolved_defaults,
         };
 
         let state = self.state.clone();

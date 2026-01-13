@@ -17,12 +17,15 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - Implementation lives in crates/aadk-project/src/main.rs with a tonic server.
 - State is persisted in ~/.local/share/aadk/state/projects.json and cached in-memory.
 - list_templates loads a JSON registry from AADK_PROJECT_TEMPLATES (or templates/registry.json),
-  skipping invalid entries.
+  skipping invalid entries and validating resolved defaults.
+- Template defaults (minSdk/compileSdk) are resolved from registry defaults, request params, and
+  Gradle files; schema errors are returned when required defaults are missing/invalid.
 - templates/registry.json currently includes the Sample Console template (tmpl-sample-console)
   pointing at SampleConsole/ for the bundled Android sample.
 - create_project scaffolds files from the template directory, streams job progress/logs to
   JobService, and persists metadata in .aadk/project.json plus the recent list.
-- create_project progress metrics include project/template metadata plus copied/total files.
+- create_project progress metrics include project/template metadata plus copied/total files and
+  resolved minSdk/compileSdk values.
 - open_project reads .aadk/project.json when present, otherwise generates metadata and persists it.
 - list_recent_projects pages through the persisted recent list with page tokens.
 - get_project resolves a project by id for authoritative build resolution.
@@ -37,4 +40,3 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - AADK_PROJECT_ADDR sets the bind address (default 127.0.0.1:50053).
 
 ## Prioritized TODO checklist by service
-- P2: Add template defaults resolution (minSdk/compileSdk) with schema errors. main.rs (line 32)
