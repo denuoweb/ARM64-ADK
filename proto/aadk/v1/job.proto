@@ -95,6 +95,7 @@ message JobFilter {
   Timestamp created_before = 4;
   Timestamp finished_after = 5;
   Timestamp finished_before = 6;
+  string correlation_id = 7;
 }
 
 message JobHistoryFilter {
@@ -109,6 +110,7 @@ message StartJobRequest {
   Id project_id = 3;
   Id target_id = 4;
   Id toolchain_set_id = 5;
+  string correlation_id = 6;
 }
 
 message StartJobResponse {

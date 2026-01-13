@@ -25,6 +25,8 @@ Update this file whenever proto contracts change or when commits touching this d
 - Added project/target/toolchain_set metadata to observe ExportSupportBundleRequest.
 - Extended build.proto with module/variant/task selection fields, ArtifactType, and ArtifactFilter.
 - Extended toolchain.proto with update/uninstall/cache cleanup RPCs and new toolchain error codes.
+- Added correlation_id to StartJobRequest, JobFilter, and long-running requests to group workflow jobs.
+- Added job_id + correlation_id to CreateProjectRequest for project creation workflows.
 
 ## Code generation
 - Build script: crates/aadk-proto/build.rs

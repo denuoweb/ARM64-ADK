@@ -29,6 +29,8 @@ message CreateProjectRequest {
   Id template_id = 3;
   repeated KeyValue params = 4;
   Id toolchain_set_id = 5;
+  Id job_id = 6;
+  string correlation_id = 7;
 }
 
 message CreateProjectResponse { Id job_id = 1; Id project_id = 2; }

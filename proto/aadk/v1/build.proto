@@ -27,6 +27,7 @@ message BuildRequest {
   string module = 6;
   string variant_name = 7;
   repeated string tasks = 8;
+  string correlation_id = 9;
 }
 
 message BuildResponse { Id job_id = 1; }
