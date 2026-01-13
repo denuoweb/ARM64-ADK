@@ -17,13 +17,17 @@ Update this file whenever BuildService behavior changes or when commits touching
 - Build requests:
   - Validate project_id and resolve to a path using ProjectService GetProject unless the value already looks like a path.
   - Accept module/variant_name/tasks overrides, validate basic formatting, and prefix module tasks as needed.
+  - Load a Gradle model snapshot (init script) to validate module/variant selection and surface
+    compileSdk/minSdk/buildTypes/flavors metadata.
   - Spawn a Gradle process with wrapper checks, GRADLE_USER_HOME defaults, and computed task lists.
   - Publish job state, progress, and logs to JobService.
-- Progress metrics include project/module/variant/tasks/gradle args; finalizing reports artifact_count and artifact_types.
+- Progress metrics include project/module/variant/tasks/gradle args plus minSdk/compileSdk and
+  buildTypes/flavors when available; finalizing reports artifact_count and artifact_types.
 - BuildRequest can include job_id to attach work to an existing JobService job.
 - Persist build/job artifact records in ~/.local/share/aadk/state/builds.json.
 - list_artifacts returns stored artifacts when available, applies ArtifactFilter, and falls back to scanning outputs.
-- Artifact discovery scans build outputs for APK/AAB/AAR/mapping/test results and tags metadata (module/variant/task/type).
+- Artifact discovery scans build outputs for APK/AAB/AAR/mapping/test results, parses output metadata
+  when present, and tags metadata (module/variant/build_type/flavors/abi/density/task/type).
 - Job completion outputs include module/variant/tasks plus artifact path/type entries.
 - Artifact sha256 is populated for stored artifacts.
 
@@ -43,5 +47,3 @@ Update this file whenever BuildService behavior changes or when commits touching
 - Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.
 
 ## Prioritized TODO checklist by service
-- P2: Replace module/variant validation with Gradle model introspection. main.rs (line 655)
-- P2: Improve variant filtering for flavored builds and richer artifact metadata (ABI/density). main.rs (line 1189)

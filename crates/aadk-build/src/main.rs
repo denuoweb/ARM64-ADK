@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     fs,
     io,
     net::SocketAddr,
@@ -35,6 +35,8 @@ const LOG_CHANNEL_CAPACITY: usize = 1024;
 const RECENT_LOG_LIMIT: usize = 200;
 const STATE_FILE_NAME: &str = "builds.json";
 const MAX_BUILD_RECORDS: usize = 200;
+const GRADLE_MODEL_START: &str = "AADK_MODEL_START";
+const GRADLE_MODEL_END: &str = "AADK_MODEL_END";
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,6 +74,39 @@ struct ArtifactRecord {
 struct KeyValueRecord {
     key: String,
     value: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct GradleModel {
+    projects: Vec<GradleProjectModel>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct GradleProjectModel {
+    path: String,
+    name: String,
+    android: Option<GradleAndroidModel>,
+}
+
+#[derive(Default, Deserialize, Clone)]
+#[serde(default)]
+struct GradleAndroidModel {
+    variants: Vec<String>,
+    flavors: Vec<String>,
+    build_types: Vec<String>,
+    compile_sdk: Option<String>,
+    min_sdk: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct BuildModelInfo {
+    build_types: Vec<String>,
+    flavors: Vec<String>,
+    compile_sdk: Option<String>,
+    min_sdk: Option<String>,
+    variants: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -346,6 +381,7 @@ fn build_progress_metrics(
     plan: &BuildPlan,
     req: &BuildRequest,
     args: &[String],
+    model_info: Option<&BuildModelInfo>,
 ) -> Vec<KeyValue> {
     let mut metrics = vec![
         metric("project_id", project_id),
@@ -368,6 +404,21 @@ fn build_progress_metrics(
     if !args.is_empty() {
         metrics.push(metric("gradle_args", args.join(" ")));
         metrics.push(metric("gradle_arg_count", args.len()));
+    }
+
+    if let Some(info) = model_info {
+        if let Some(min_sdk) = info.min_sdk.as_ref() {
+            metrics.push(metric("min_sdk", min_sdk));
+        }
+        if let Some(compile_sdk) = info.compile_sdk.as_ref() {
+            metrics.push(metric("compile_sdk", compile_sdk));
+        }
+        if !info.build_types.is_empty() {
+            metrics.push(metric("build_types", info.build_types.join(",")));
+        }
+        if !info.flavors.is_empty() {
+            metrics.push(metric("flavors", info.flavors.join(",")));
+        }
     }
 
     metrics
@@ -701,11 +752,6 @@ fn module_has_build_file(path: &Path) -> bool {
     path.join("build.gradle").is_file() || path.join("build.gradle.kts").is_file()
 }
 
-fn module_exists(project_path: &Path, module: &str) -> bool {
-    let module_dir = project_path.join(module_path_from_label(module));
-    module_dir.is_dir() && module_has_build_file(&module_dir)
-}
-
 fn normalize_variant_name(value: &str) -> Result<Option<String>, Status> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -867,6 +913,231 @@ fn gradle_user_home() -> Option<PathBuf> {
     Some(data_dir().join("gradle"))
 }
 
+fn gradle_model_script() -> &'static str {
+    r#"
+import groovy.json.JsonOutput
+
+def model = [projects: []]
+gradle.rootProject.allprojects { p ->
+    def entry = [path: p.path, name: p.name]
+    def androidModel = null
+    def pluginIds = [
+        "com.android.application",
+        "com.android.library",
+        "com.android.dynamic-feature",
+        "com.android.test"
+    ]
+    if (pluginIds.any { p.plugins.hasPlugin(it) }) {
+        def android = p.extensions.findByName("android")
+        if (android != null) {
+            def variants = []
+            if (android.hasProperty("applicationVariants")) {
+                android.applicationVariants.all { v -> variants.add(v.name) }
+            }
+            if (android.hasProperty("libraryVariants")) {
+                android.libraryVariants.all { v -> variants.add(v.name) }
+            }
+            if (android.hasProperty("testVariants")) {
+                android.testVariants.all { v -> variants.add(v.name) }
+            }
+            if (android.hasProperty("unitTestVariants")) {
+                android.unitTestVariants.all { v -> variants.add(v.name) }
+            }
+            if (android.hasProperty("testFixturesVariants")) {
+                android.testFixturesVariants.all { v -> variants.add(v.name) }
+            }
+
+            def flavors = []
+            if (android.hasProperty("productFlavors")) {
+                android.productFlavors.all { f -> flavors.add(f.name) }
+            }
+            def buildTypes = []
+            if (android.hasProperty("buildTypes")) {
+                android.buildTypes.all { bt -> buildTypes.add(bt.name) }
+            }
+
+            def compileSdk = null
+            try {
+                compileSdk = android.compileSdkVersion
+                if (compileSdk != null) {
+                    compileSdk = compileSdk.toString()
+                }
+            } catch (Exception ignored) {}
+
+            def minSdk = null
+            try {
+                def min = android.defaultConfig.minSdkVersion
+                if (min != null) {
+                    minSdk = min.apiLevel
+                }
+                if (minSdk != null) {
+                    minSdk = minSdk.toString()
+                }
+            } catch (Exception ignored) {}
+
+            androidModel = [
+                variants: variants,
+                flavors: flavors,
+                build_types: buildTypes,
+                compile_sdk: compileSdk,
+                min_sdk: minSdk
+            ]
+        }
+    }
+    if (androidModel != null) {
+        entry.android = androidModel
+    }
+    model.projects << entry
+}
+println("AADK_MODEL_START")
+println(JsonOutput.toJson(model))
+println("AADK_MODEL_END")
+"#
+}
+
+fn extract_gradle_model_payload(output: &str) -> Result<String, Status> {
+    let start = output
+        .find(GRADLE_MODEL_START)
+        .ok_or_else(|| Status::internal("gradle model output missing start marker"))?;
+    let end = output[start + GRADLE_MODEL_START.len()..]
+        .find(GRADLE_MODEL_END)
+        .ok_or_else(|| Status::internal("gradle model output missing end marker"))?;
+    let json = &output[start + GRADLE_MODEL_START.len()..start + GRADLE_MODEL_START.len() + end];
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Err(Status::internal("gradle model output was empty"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_sdk_string(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+fn normalize_gradle_path(path: &str) -> String {
+    let trimmed = path.trim();
+    trimmed.trim_start_matches(':').replace(':', ":")
+}
+
+fn find_project_for_module<'a>(
+    model: &'a GradleModel,
+    module: &str,
+) -> Option<&'a GradleProjectModel> {
+    let target = normalize_gradle_path(module).to_ascii_lowercase();
+    model.projects.iter().find(|project| {
+        let path = normalize_gradle_path(&project.path).to_ascii_lowercase();
+        if path == target {
+            return true;
+        }
+        let name = project.name.to_ascii_lowercase();
+        name == target
+    })
+}
+
+fn variant_matches_query(value: &str, query: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    let query = query.trim().to_ascii_lowercase();
+    if value.is_empty() || query.is_empty() {
+        return false;
+    }
+    if value == query {
+        return true;
+    }
+    if value.ends_with(&query) {
+        return true;
+    }
+    value.contains(&query)
+}
+
+fn variant_supported(requested: &str, available: &[String]) -> bool {
+    if available.is_empty() {
+        return true;
+    }
+    available.iter().any(|variant| variant_matches_query(variant, requested))
+}
+
+fn build_model_info_for_plan(
+    plan: &BuildPlan,
+    req: &BuildRequest,
+    model: &GradleModel,
+) -> Result<BuildModelInfo, Status> {
+    let tasks_override = !normalized_tasks(&req.tasks).is_empty();
+    let requested_variant = plan.variant.label.clone();
+
+    if let Some(module) = plan.module.as_deref() {
+        let project = find_project_for_module(model, module)
+            .ok_or_else(|| Status::invalid_argument(format!("module not found in Gradle model: {module}")))?;
+        if project.android.is_none() && !tasks_override {
+            return Err(Status::failed_precondition(format!(
+                "module is not an Android project: {module}"
+            )));
+        }
+        let mut info = BuildModelInfo::default();
+        if let Some(android) = project.android.as_ref() {
+            info.build_types = android.build_types.clone();
+            info.flavors = android.flavors.clone();
+            info.compile_sdk = normalize_sdk_string(android.compile_sdk.as_deref());
+            info.min_sdk = normalize_sdk_string(android.min_sdk.as_deref());
+            info.variants = android.variants.clone();
+            if !tasks_override && !variant_supported(&requested_variant, &android.variants) {
+                return Err(Status::invalid_argument(format!(
+                    "variant not found in Gradle model: {requested_variant}"
+                )));
+            }
+        }
+        return Ok(info);
+    }
+
+    let android_projects: Vec<&GradleProjectModel> = model
+        .projects
+        .iter()
+        .filter(|project| project.android.is_some())
+        .collect();
+    if android_projects.is_empty() {
+        if tasks_override {
+            return Ok(BuildModelInfo::default());
+        }
+        return Err(Status::failed_precondition(
+            "no Android projects found in Gradle model",
+        ));
+    }
+
+    if !tasks_override {
+        let mut matches = false;
+        for project in &android_projects {
+            if let Some(android) = project.android.as_ref() {
+                if variant_supported(&requested_variant, &android.variants) {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+        if !matches {
+            return Err(Status::invalid_argument(format!(
+                "variant not found in Gradle model: {requested_variant}"
+            )));
+        }
+    }
+
+    let mut info = BuildModelInfo::default();
+    if let Some(project) = android_projects.first() {
+        if let Some(android) = project.android.as_ref() {
+            info.build_types = android.build_types.clone();
+            info.flavors = android.flavors.clone();
+            info.compile_sdk = normalize_sdk_string(android.compile_sdk.as_deref());
+            info.min_sdk = normalize_sdk_string(android.min_sdk.as_deref());
+            info.variants = android.variants.clone();
+        }
+    }
+    Ok(info)
+}
+
 fn expand_gradle_args(items: &[KeyValue]) -> Vec<String> {
     let mut args = Vec::new();
     for item in items {
@@ -971,6 +1242,65 @@ fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Stat
 
     let child = cmd.spawn().map_err(spawn_error)?;
     Ok(GradleSpawn { child, description })
+}
+
+async fn load_gradle_model(project_dir: &Path) -> Result<GradleModel, Status> {
+    let script_path = std::env::temp_dir().join(format!(
+        "aadk-gradle-model-{}.gradle",
+        now_millis()
+    ));
+    fs::write(&script_path, gradle_model_script())
+        .map_err(|e| Status::internal(format!("failed to write gradle model script: {e}")))?;
+
+    let args = vec![
+        "-q".to_string(),
+        "-I".to_string(),
+        script_path.display().to_string(),
+        "projects".to_string(),
+    ];
+    let spawn = spawn_gradle(project_dir, &args)?;
+    let output = spawn
+        .child
+        .wait_with_output()
+        .await
+        .map_err(|e| Status::internal(format!("failed to run gradle model: {e}")))?;
+
+    let _ = fs::remove_file(&script_path);
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut detail = String::new();
+        if !stdout.trim().is_empty() {
+            detail.push_str("stdout:\n");
+            detail.push_str(stdout.trim());
+            detail.push('\n');
+        }
+        if !stderr.trim().is_empty() {
+            detail.push_str("stderr:\n");
+            detail.push_str(stderr.trim());
+            detail.push('\n');
+        }
+        if detail.trim().is_empty() {
+            detail = format!("exit_code={}", output.status.code().unwrap_or(-1));
+        }
+        return Err(Status::failed_precondition(format!(
+            "gradle model failed: {}",
+            detail.trim()
+        )));
+    }
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        combined.push('\n');
+        combined.push_str(stderr.trim());
+    }
+
+    let payload = extract_gradle_model_payload(&combined)?;
+    let model: GradleModel = serde_json::from_str(&payload)
+        .map_err(|e| Status::internal(format!("failed to parse gradle model: {e}")))?;
+    Ok(model)
 }
 
 async fn read_lines<R>(reader: R, stream: &'static str, tx: mpsc::Sender<LogLine>)
@@ -1176,8 +1506,20 @@ fn artifact_matches_variant(artifact: &Artifact, variant: &str) -> bool {
         return true;
     }
     if let Some(value) = artifact_metadata_value(artifact, "variant") {
-        if value.eq_ignore_ascii_case(trimmed) {
+        if variant_matches_query(value, trimmed) {
             return true;
+        }
+    }
+    if let Some(value) = artifact_metadata_value(artifact, "build_type") {
+        if variant_matches_query(value, trimmed) {
+            return true;
+        }
+    }
+    if let Some(value) = artifact_metadata_value(artifact, "flavors") {
+        for flavor in value.split(',') {
+            if variant_matches_query(flavor, trimmed) {
+                return true;
+            }
         }
     }
     let needle = trimmed.to_lowercase();
@@ -1235,6 +1577,256 @@ fn artifact_matches(artifact: &Artifact, query: &ArtifactQuery) -> bool {
     true
 }
 
+#[derive(Clone, Default)]
+struct OutputMetadataEntry {
+    variant: Option<String>,
+    abi: Option<String>,
+    density: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct OutputMetadataIndex {
+    default_variant: Option<String>,
+    entries: HashMap<String, OutputMetadataEntry>,
+}
+
+fn output_metadata_key(value: &str) -> String {
+    Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn parse_filter_value(filters: Option<&serde_json::Value>) -> (Option<String>, Option<String>) {
+    let mut abi = None;
+    let mut density = None;
+    let Some(filters) = filters.and_then(|value| value.as_array()) else {
+        return (abi, density);
+    };
+    for filter in filters {
+        let filter_type = filter
+            .get("filterType")
+            .or_else(|| filter.get("type"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let value = filter
+            .get("value")
+            .or_else(|| filter.get("identifier"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        if filter_type == "ABI" && !value.is_empty() {
+            abi = Some(value.clone());
+        }
+        if filter_type == "DENSITY" && !value.is_empty() {
+            density = Some(value);
+        }
+    }
+    (abi, density)
+}
+
+fn parse_output_metadata_value(value: &serde_json::Value) -> Option<OutputMetadataIndex> {
+    let mut index = OutputMetadataIndex::default();
+    if let Some(variant) = value.get("variantName").and_then(|v| v.as_str()) {
+        if !variant.trim().is_empty() {
+            index.default_variant = Some(variant.trim().to_string());
+        }
+    }
+    if let Some(elements) = value.get("elements").and_then(|v| v.as_array()) {
+        for element in elements {
+            let output_file = element
+                .get("outputFile")
+                .or_else(|| element.get("path"))
+                .and_then(|v| v.as_str());
+            let Some(output_file) = output_file else {
+                continue;
+            };
+            let (abi, density) = parse_filter_value(element.get("filters"));
+            let entry = OutputMetadataEntry {
+                variant: index.default_variant.clone(),
+                abi,
+                density,
+            };
+            index.entries.insert(output_metadata_key(output_file), entry);
+        }
+        return Some(index);
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            let output_file = item
+                .get("path")
+                .or_else(|| item.get("outputFile"))
+                .and_then(|v| v.as_str());
+            let Some(output_file) = output_file else {
+                continue;
+            };
+            let mut entry = OutputMetadataEntry::default();
+            if let Some(variant) = item
+                .get("apkData")
+                .and_then(|apk| apk.get("variantName"))
+                .and_then(|v| v.as_str())
+            {
+                if !variant.trim().is_empty() {
+                    entry.variant = Some(variant.trim().to_string());
+                }
+            }
+            let (abi, density) = if item.get("apkData").is_some() {
+                parse_filter_value(item.get("apkData").and_then(|apk| apk.get("splits")))
+            } else {
+                parse_filter_value(item.get("filters"))
+            };
+            entry.abi = abi;
+            entry.density = density;
+            index.entries.insert(output_metadata_key(output_file), entry);
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn load_output_metadata_index(path: &Path) -> Option<OutputMetadataIndex> {
+    let data = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&data).ok()?;
+    parse_output_metadata_value(&value)
+}
+
+fn output_metadata_for_path(
+    path: &Path,
+    output_root: &Path,
+    cache: &mut HashMap<PathBuf, OutputMetadataIndex>,
+) -> Option<OutputMetadataIndex> {
+    let mut current = path.parent()?;
+    loop {
+        if let Some(index) = cache.get(current).cloned() {
+            return Some(index);
+        }
+        for candidate in ["output-metadata.json", "output.json"] {
+            let path = current.join(candidate);
+            if path.is_file() {
+                if let Some(index) = load_output_metadata_index(&path) {
+                    cache.insert(current.to_path_buf(), index.clone());
+                    return Some(index);
+                }
+            }
+        }
+        if current == output_root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    None
+}
+
+fn output_metadata_entry_for_path(
+    index: &OutputMetadataIndex,
+    path: &Path,
+) -> Option<OutputMetadataEntry> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    let mut entry = index.entries.get(name).cloned().unwrap_or_default();
+    if entry.variant.is_none() {
+        entry.variant = index.default_variant.clone();
+    }
+    if entry.variant.is_none() && entry.abi.is_none() && entry.density.is_none() {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
+fn infer_variant_from_path(output_root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(output_root).ok()?;
+    let mut components = rel.components();
+    let first = components.next()?;
+    let second = components.next();
+    if second.is_some() {
+        return Some(first.as_os_str().to_string_lossy().to_string());
+    }
+    None
+}
+
+fn infer_variant_from_filename(name: &str, artifact_type: ArtifactType) -> Option<String> {
+    match artifact_type {
+        ArtifactType::Aar => {
+            let stripped = name.strip_suffix(".aar")?;
+            let pos = stripped.rfind('-')?;
+            let variant = stripped[pos + 1..].trim();
+            if variant.is_empty() {
+                None
+            } else {
+                Some(variant.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn split_camel_case(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() && !current.is_empty() {
+            parts.push(current.to_ascii_lowercase());
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        parts.push(current.to_ascii_lowercase());
+    }
+    parts
+}
+
+fn split_variant_components(variant: &str) -> (Option<String>, Vec<String>) {
+    let lower = variant.to_ascii_lowercase();
+    for build_type in ["debug", "release"] {
+        if lower == build_type {
+            return (Some(build_type.to_string()), Vec::new());
+        }
+        if lower.ends_with(build_type) {
+            let prefix_len = lower.len() - build_type.len();
+            let prefix = &variant[..prefix_len];
+            let flavors = split_camel_case(prefix)
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect();
+            return (Some(build_type.to_string()), flavors);
+        }
+    }
+    (None, Vec::new())
+}
+
+fn infer_abi_from_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    for abi in [
+        "arm64-v8a",
+        "armeabi-v7a",
+        "armeabi",
+        "x86_64",
+        "x86",
+        "riscv64",
+    ] {
+        if lower.contains(abi) {
+            return Some(abi.to_string());
+        }
+    }
+    None
+}
+
+fn infer_density_from_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    for density in ["xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi", "ldpi"] {
+        if lower.contains(density) {
+            return Some(density.to_string());
+        }
+    }
+    None
+}
+
 fn collect_artifacts(
     project_path: &Path,
     query: &ArtifactQuery,
@@ -1243,6 +1835,7 @@ fn collect_artifacts(
     let mut artifacts = Vec::new();
     let roots = output_roots_for_modules(project_path, &query.modules);
     let variant_filter = query.variant.as_deref();
+    let mut metadata_cache: HashMap<PathBuf, OutputMetadataIndex> = HashMap::new();
 
     for (module, root) in roots {
         for (artifact_type, output_dir) in output_dirs_for_root(&root) {
@@ -1279,10 +1872,62 @@ fn collect_artifacts(
                         value: module,
                     });
                 }
-                if let Some(dir) = variant_filter {
+                let mut variant = None;
+                let mut abi = None;
+                let mut density = None;
+                if let Some(index) =
+                    output_metadata_for_path(&path, &output_dir, &mut metadata_cache)
+                {
+                    if let Some(entry) = output_metadata_entry_for_path(&index, &path) {
+                        variant = entry.variant;
+                        abi = entry.abi;
+                        density = entry.density;
+                    }
+                }
+                if variant.is_none() {
+                    variant = infer_variant_from_path(&output_dir, &path);
+                }
+                if variant.is_none() {
+                    variant = infer_variant_from_filename(&name, artifact_type);
+                }
+                if variant.is_none() {
+                    variant = variant_filter.map(|value| value.to_string());
+                }
+                if let Some(variant) = variant.as_ref() {
                     metadata.push(KeyValue {
                         key: "variant".into(),
-                        value: dir.into(),
+                        value: variant.clone(),
+                    });
+                    let (build_type, flavors) = split_variant_components(variant);
+                    if let Some(build_type) = build_type {
+                        metadata.push(KeyValue {
+                            key: "build_type".into(),
+                            value: build_type,
+                        });
+                    }
+                    if !flavors.is_empty() {
+                        metadata.push(KeyValue {
+                            key: "flavors".into(),
+                            value: flavors.join(","),
+                        });
+                    }
+                }
+                if abi.is_none() {
+                    abi = infer_abi_from_name(&name);
+                }
+                if density.is_none() {
+                    density = infer_density_from_name(&name);
+                }
+                if let Some(abi) = abi {
+                    metadata.push(KeyValue {
+                        key: "abi".into(),
+                        value: abi,
+                    });
+                }
+                if let Some(density) = density {
+                    metadata.push(KeyValue {
+                        key: "density".into(),
+                        value: density,
                     });
                 }
                 metadata.push(KeyValue {
@@ -1426,18 +2071,32 @@ async fn run_build_job(
         return;
     }
 
-    if let Some(module) = plan.module.as_deref() {
-        if !module_exists(&project_path, module) {
+    let gradle_model = match load_gradle_model(&project_path).await {
+        Ok(model) => model,
+        Err(err) => {
             let detail = job_error_detail(
-                ErrorCode::InvalidArgument,
-                "module not found",
-                format!("module not found or missing build file: {module}"),
+                ErrorCode::BuildFailed,
+                "gradle model failed",
+                err.message().to_string(),
                 &job_id,
             );
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
             return;
         }
-    }
+    };
+    let model_info = match build_model_info_for_plan(&plan, &req, &gradle_model) {
+        Ok(info) => info,
+        Err(err) => {
+            let detail = job_error_detail(
+                ErrorCode::InvalidArgument,
+                "invalid build request",
+                err.message().to_string(),
+                &job_id,
+            );
+            let _ = publish_failed(&mut job_client, &job_id, detail).await;
+            return;
+        }
+    };
 
     let variant = BuildVariant::try_from(req.variant).unwrap_or(BuildVariant::Unspecified);
     let mut args = plan.tasks.clone();
@@ -1456,7 +2115,7 @@ async fn run_build_job(
         &job_id,
         10,
         "preflight",
-        build_progress_metrics(&project_id, &project_path, &plan, &req, &args),
+        build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info)),
     )
     .await;
 
@@ -1541,7 +2200,7 @@ async fn run_build_job(
         &job_id,
         25,
         "gradle running",
-        build_progress_metrics(&project_id, &project_path, &plan, &req, &args),
+        build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info)),
     )
     .await;
 
@@ -1650,6 +2309,30 @@ async fn run_build_job(
                 value: artifacts.len().to_string(),
             },
         ];
+        if let Some(min_sdk) = model_info.min_sdk.as_ref() {
+            outputs.push(KeyValue {
+                key: "min_sdk".into(),
+                value: min_sdk.clone(),
+            });
+        }
+        if let Some(compile_sdk) = model_info.compile_sdk.as_ref() {
+            outputs.push(KeyValue {
+                key: "compile_sdk".into(),
+                value: compile_sdk.clone(),
+            });
+        }
+        if !model_info.build_types.is_empty() {
+            outputs.push(KeyValue {
+                key: "build_types".into(),
+                value: model_info.build_types.join(","),
+            });
+        }
+        if !model_info.flavors.is_empty() {
+            outputs.push(KeyValue {
+                key: "flavors".into(),
+                value: model_info.flavors.join(","),
+            });
+        }
         outputs.push(KeyValue {
             key: "variant".into(),
             value: plan.variant.label.clone(),
@@ -1686,7 +2369,8 @@ async fn run_build_job(
             }
         }
 
-        let mut metrics = build_progress_metrics(&project_id, &project_path, &plan, &req, &args);
+        let mut metrics =
+            build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info));
         metrics.push(metric("artifact_count", artifacts.len()));
         let type_summary = artifact_type_summary(&artifacts);
         if !type_summary.is_empty() {
