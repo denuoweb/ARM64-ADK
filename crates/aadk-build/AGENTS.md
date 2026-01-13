@@ -23,7 +23,8 @@ Update this file whenever BuildService behavior changes or when commits touching
   - Publish job state, progress, and logs to JobService.
 - Progress metrics include project/module/variant/tasks/gradle args plus minSdk/compileSdk and
   buildTypes/flavors when available; finalizing reports artifact_count and artifact_types.
-- BuildRequest can include job_id to attach work to an existing JobService job.
+- BuildRequest can include job_id to attach work to an existing JobService job and correlation_id
+  to group multi-service workflows.
 - Persist build/job artifact records in ~/.local/share/aadk/state/builds.json.
 - list_artifacts returns stored artifacts when available, applies ArtifactFilter, and falls back to scanning outputs.
 - Artifact discovery scans build outputs for APK/AAB/AAR/mapping/test results, parses output metadata
@@ -45,5 +46,6 @@ Update this file whenever BuildService behavior changes or when commits touching
 
 ## Implementation notes
 - Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.
+- Gradle model init script now runs after `projectsEvaluated` to avoid root project access errors.
 
 ## Prioritized TODO checklist by service

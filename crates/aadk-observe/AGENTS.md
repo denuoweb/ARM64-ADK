@@ -18,7 +18,8 @@ Update this file whenever observe behavior changes or when commits touching this
   ~/.local/share/aadk/bundles, and streams progress/log events.
 - export_evidence_bundle does the same for a single run id.
 - Bundle export progress metrics include run_id/output_path plus include flags and item counts.
-- ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs.
+- ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs and
+  correlation_id to group multi-service workflows.
 - Runs capture project/target/toolchain ids when provided for filtering.
 - Bundle retention prunes old zip files and tmp-* directories by age/count.
 - Bundle contents include a manifest, config snapshots (env + state files), optional toolchain

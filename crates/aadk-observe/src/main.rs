@@ -489,6 +489,7 @@ async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
     params: Vec<KeyValue>,
+    correlation_id: &str,
     project_id: Option<String>,
     target_id: Option<String>,
     toolchain_set_id: Option<String>,
@@ -500,6 +501,7 @@ async fn start_job(
             project_id: project_id.map(|value| Id { value }),
             target_id: target_id.map(|value| Id { value }),
             toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
+            correlation_id: correlation_id.to_string(),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -1292,6 +1294,7 @@ impl ObserveService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -1318,6 +1321,7 @@ impl ObserveService for Svc {
                         value: req.recent_runs_limit.to_string(),
                     },
                 ],
+                correlation_id,
                 project_id.clone(),
                 target_id.clone(),
                 toolchain_set_id.clone(),
@@ -1403,6 +1407,7 @@ impl ObserveService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -1411,6 +1416,7 @@ impl ObserveService for Svc {
                     key: "run_id".into(),
                     value: run_id.clone(),
                 }],
+                correlation_id,
                 run_meta.0.clone(),
                 run_meta.1.clone(),
                 run_meta.2.clone(),

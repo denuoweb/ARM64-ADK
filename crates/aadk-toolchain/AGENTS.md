@@ -29,8 +29,10 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   hash verification when needed.
 - Catalog artifacts can supply signature metadata via `signature`, `signature_url`, and
   `signature_public_key` (hex or base64); signatures are recorded in provenance when available.
-- InstallToolchain and VerifyToolchain accept optional job_id to reuse existing JobService jobs.
-- Update/Uninstall/Cleanup cache operations publish JobService events and can reuse job_id.
+- InstallToolchain and VerifyToolchain accept optional job_id to reuse existing JobService jobs,
+  and correlation_id to group multi-step workflows.
+- Update/Uninstall/Cleanup cache operations publish JobService events and can reuse job_id while
+  honoring correlation_id for grouped job streams.
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
   toolchain set id.
 

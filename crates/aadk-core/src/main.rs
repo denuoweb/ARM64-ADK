@@ -435,6 +435,7 @@ fn is_known_job_type(job_type: &str) -> bool {
     matches!(
         job_type,
         "demo.job"
+            | "workflow.pipeline"
             | "project.create"
             | "build.run"
             | "toolchain.install"
@@ -496,6 +497,11 @@ fn job_sort_key(job: &Job) -> i64 {
 fn job_matches_filter(job: &Job, filter: &JobFilter) -> bool {
     if !filter.job_types.is_empty()
         && !filter.job_types.iter().any(|t| t == &job.job_type)
+    {
+        return false;
+    }
+    if !filter.correlation_id.trim().is_empty()
+        && job.correlation_id != filter.correlation_id
     {
         return false;
     }
@@ -953,11 +959,21 @@ impl JobService for JobSvc {
                 "unknown job_type: {job_type}"
             )));
         }
-        let display_name = if job_type == "demo.job" { "Demo Job" } else { job_type };
+        let display_name = match job_type {
+            "demo.job" => "Demo Job",
+            "workflow.pipeline" => "Workflow Pipeline",
+            _ => job_type,
+        };
 
         let job_id = Uuid::new_v4().to_string();
         let (btx, _brx) = broadcast::channel::<JobEvent>(BROADCAST_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let correlation_id = req.correlation_id.trim();
+        let correlation_id = if correlation_id.is_empty() {
+            job_id.clone()
+        } else {
+            correlation_id.to_string()
+        };
 
         let job = Job {
             job_id: Some(Id { value: job_id.clone() }),
@@ -967,7 +983,7 @@ impl JobService for JobSvc {
             started_at: None,
             finished_at: None,
             display_name: display_name.into(),
-            correlation_id: job_id.clone(),
+            correlation_id,
             project_id: req.project_id,
             target_id: req.target_id,
             toolchain_set_id: req.toolchain_set_id,

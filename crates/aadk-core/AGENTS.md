@@ -25,7 +25,9 @@ Update this file whenever JobService behavior changes or when commits touching t
 - ListJobHistory returns paginated job events with optional kind/time filters.
 - publish_job_event updates job state on StateChanged/Completed/Failed payloads before broadcasting.
 - start_job requires a non-empty job_type, rejects unknown types, and runs the demo runner only
-  for demo.job (other services own their worker execution).
+  for demo.job (other services own their worker execution). workflow.pipeline is reserved for
+  orchestrated multi-step flows.
+- StartJob accepts optional correlation_id; ListJobs can filter by correlation_id to group related jobs.
 - demo.job progress emits step/total_steps metrics for UI/CLI validation.
 - Retention trims completed jobs by age/count; active jobs are preserved.
 

@@ -288,6 +288,7 @@ async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
     params: Vec<KeyValue>,
+    correlation_id: &str,
     project_id: Option<Id>,
 ) -> Result<String, Status> {
     let resp = client
@@ -297,6 +298,7 @@ async fn start_job(
             project_id,
             target_id: None,
             toolchain_set_id: None,
+            correlation_id: correlation_id.to_string(),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -917,81 +919,86 @@ fn gradle_model_script() -> &'static str {
     r#"
 import groovy.json.JsonOutput
 
-def model = [projects: []]
-gradle.rootProject.allprojects { p ->
-    def entry = [path: p.path, name: p.name]
-    def androidModel = null
-    def pluginIds = [
-        "com.android.application",
-        "com.android.library",
-        "com.android.dynamic-feature",
-        "com.android.test"
-    ]
-    if (pluginIds.any { p.plugins.hasPlugin(it) }) {
-        def android = p.extensions.findByName("android")
-        if (android != null) {
-            def variants = []
-            if (android.hasProperty("applicationVariants")) {
-                android.applicationVariants.all { v -> variants.add(v.name) }
-            }
-            if (android.hasProperty("libraryVariants")) {
-                android.libraryVariants.all { v -> variants.add(v.name) }
-            }
-            if (android.hasProperty("testVariants")) {
-                android.testVariants.all { v -> variants.add(v.name) }
-            }
-            if (android.hasProperty("unitTestVariants")) {
-                android.unitTestVariants.all { v -> variants.add(v.name) }
-            }
-            if (android.hasProperty("testFixturesVariants")) {
-                android.testFixturesVariants.all { v -> variants.add(v.name) }
-            }
-
-            def flavors = []
-            if (android.hasProperty("productFlavors")) {
-                android.productFlavors.all { f -> flavors.add(f.name) }
-            }
-            def buildTypes = []
-            if (android.hasProperty("buildTypes")) {
-                android.buildTypes.all { bt -> buildTypes.add(bt.name) }
-            }
-
-            def compileSdk = null
-            try {
-                compileSdk = android.compileSdkVersion
-                if (compileSdk != null) {
-                    compileSdk = compileSdk.toString()
-                }
-            } catch (Exception ignored) {}
-
-            def minSdk = null
-            try {
-                def min = android.defaultConfig.minSdkVersion
-                if (min != null) {
-                    minSdk = min.apiLevel
-                }
-                if (minSdk != null) {
-                    minSdk = minSdk.toString()
-                }
-            } catch (Exception ignored) {}
-
-            androidModel = [
-                variants: variants,
-                flavors: flavors,
-                build_types: buildTypes,
-                compile_sdk: compileSdk,
-                min_sdk: minSdk
+gradle.projectsEvaluated {
+    def model = [projects: []]
+    def root = gradle.rootProject
+    if (root != null) {
+        root.allprojects { p ->
+            def entry = [path: p.path, name: p.name]
+            def androidModel = null
+            def pluginIds = [
+                "com.android.application",
+                "com.android.library",
+                "com.android.dynamic-feature",
+                "com.android.test"
             ]
+            if (pluginIds.any { p.plugins.hasPlugin(it) }) {
+                def android = p.extensions.findByName("android")
+                if (android != null) {
+                    def variants = []
+                    if (android.hasProperty("applicationVariants")) {
+                        android.applicationVariants.all { v -> variants.add(v.name) }
+                    }
+                    if (android.hasProperty("libraryVariants")) {
+                        android.libraryVariants.all { v -> variants.add(v.name) }
+                    }
+                    if (android.hasProperty("testVariants")) {
+                        android.testVariants.all { v -> variants.add(v.name) }
+                    }
+                    if (android.hasProperty("unitTestVariants")) {
+                        android.unitTestVariants.all { v -> variants.add(v.name) }
+                    }
+                    if (android.hasProperty("testFixturesVariants")) {
+                        android.testFixturesVariants.all { v -> variants.add(v.name) }
+                    }
+
+                    def flavors = []
+                    if (android.hasProperty("productFlavors")) {
+                        android.productFlavors.all { f -> flavors.add(f.name) }
+                    }
+                    def buildTypes = []
+                    if (android.hasProperty("buildTypes")) {
+                        android.buildTypes.all { bt -> buildTypes.add(bt.name) }
+                    }
+
+                    def compileSdk = null
+                    try {
+                        compileSdk = android.compileSdkVersion
+                        if (compileSdk != null) {
+                            compileSdk = compileSdk.toString()
+                        }
+                    } catch (Exception ignored) {}
+
+                    def minSdk = null
+                    try {
+                        def min = android.defaultConfig.minSdkVersion
+                        if (min != null) {
+                            minSdk = min.apiLevel
+                        }
+                        if (minSdk != null) {
+                            minSdk = minSdk.toString()
+                        }
+                    } catch (Exception ignored) {}
+
+                    androidModel = [
+                        variants: variants,
+                        flavors: flavors,
+                        build_types: buildTypes,
+                        compile_sdk: compileSdk,
+                        min_sdk: minSdk
+                    ]
+                }
+            }
+            if (androidModel != null) {
+                entry.android = androidModel
+            }
+            model.projects << entry
         }
     }
-    if (androidModel != null) {
-        entry.android = androidModel
-    }
-    model.projects << entry
+    println("AADK_MODEL_START")
+    println(JsonOutput.toJson(model))
+    println("AADK_MODEL_END")
 }
-println("AADK_MODEL_START")
-println(JsonOutput.toJson(model))
-println("AADK_MODEL_END")
 "#
 }
 
@@ -2415,6 +2422,7 @@ impl BuildService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             let mut params = vec![
                 KeyValue {
@@ -2442,6 +2450,7 @@ impl BuildService for Svc {
                 &mut job_client,
                 "build.run",
                 params,
+                correlation_id,
                 Some(project_id),
             )
             .await?

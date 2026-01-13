@@ -687,6 +687,7 @@ async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
     params: Vec<KeyValue>,
+    correlation_id: &str,
     project_id: Option<Id>,
 ) -> Result<String, Status> {
     let resp = client
@@ -696,6 +697,7 @@ async fn start_job(
             project_id,
             target_id: None,
             toolchain_set_id: None,
+            correlation_id: correlation_id.to_string(),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -1244,6 +1246,13 @@ impl ProjectService for Svc {
 
         let project_id = format!("proj-{}", Uuid::new_v4());
         let mut job_client = connect_job().await?;
+        let job_id = req
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let params = vec![
             KeyValue {
                 key: "template_id".into(),
@@ -1266,15 +1275,20 @@ impl ProjectService for Svc {
                 value: resolved_defaults.compile_sdk.clone(),
             },
         ];
-        let job_id = start_job(
-            &mut job_client,
-            "project.create",
-            params,
-            Some(Id {
-                value: project_id.clone(),
-            }),
-        )
-        .await?;
+        let job_id = if job_id.is_empty() {
+            start_job(
+                &mut job_client,
+                "project.create",
+                params,
+                correlation_id,
+                Some(Id {
+                    value: project_id.clone(),
+                }),
+            )
+            .await?
+        } else {
+            job_id
+        };
 
         let create = CreateRequestParts {
             name: name.to_string(),

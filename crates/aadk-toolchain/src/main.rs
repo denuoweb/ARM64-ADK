@@ -658,6 +658,7 @@ async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
     params: Vec<KeyValue>,
+    correlation_id: &str,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -666,6 +667,7 @@ async fn start_job(
             project_id: None,
             target_id: None,
             toolchain_set_id: None,
+            correlation_id: correlation_id.to_string(),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -3140,6 +3142,7 @@ impl ToolchainService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -3149,6 +3152,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "version".into(), value: version.clone() },
                     KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
                 ],
+                correlation_id,
             )
             .await?
         } else {
@@ -3208,11 +3212,13 @@ impl ToolchainService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
                 "toolchain.verify",
                 vec![KeyValue { key: "toolchain_id".into(), value: id.clone() }],
+                correlation_id,
             )
             .await?
         } else {
@@ -3667,6 +3673,7 @@ impl ToolchainService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -3677,6 +3684,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
                     KeyValue { key: "remove_cached".into(), value: req.remove_cached_artifact.to_string() },
                 ],
+                correlation_id,
             )
             .await?
         } else {
@@ -3722,6 +3730,7 @@ impl ToolchainService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -3731,6 +3740,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "remove_cached".into(), value: req.remove_cached_artifact.to_string() },
                     KeyValue { key: "force".into(), value: req.force.to_string() },
                 ],
+                correlation_id,
             )
             .await?
         } else {
@@ -3771,6 +3781,7 @@ impl ToolchainService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -3779,6 +3790,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "dry_run".into(), value: req.dry_run.to_string() },
                     KeyValue { key: "remove_all".into(), value: req.remove_all.to_string() },
                 ],
+                correlation_id,
             )
             .await?
         } else {

@@ -1866,6 +1866,7 @@ async fn start_job(
     params: Vec<KeyValue>,
     project_id: Option<Id>,
     target_id: Option<Id>,
+    correlation_id: &str,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -1874,6 +1875,7 @@ async fn start_job(
             project_id,
             target_id,
             toolchain_set_id: None,
+            correlation_id: correlation_id.to_string(),
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -4140,6 +4142,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4147,6 +4150,7 @@ impl TargetService for Svc {
                 vec![KeyValue { key: "apk_path".into(), value: apk_path.clone() }],
                 req.project_id,
                 Some(Id { value: target_id.clone() }),
+                correlation_id,
             )
             .await?
         } else {
@@ -4181,6 +4185,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4188,6 +4193,7 @@ impl TargetService for Svc {
                 vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
                 None,
                 Some(Id { value: target_id.clone() }),
+                correlation_id,
             )
             .await?
         } else {
@@ -4227,6 +4233,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4234,6 +4241,7 @@ impl TargetService for Svc {
                 vec![KeyValue { key: "application_id".into(), value: application_id.clone() }],
                 None,
                 Some(Id { value: target_id.clone() }),
+                correlation_id,
             )
             .await?
         } else {
@@ -4290,6 +4298,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4297,6 +4306,7 @@ impl TargetService for Svc {
                 params,
                 None,
                 None,
+                correlation_id,
             )
             .await?
         } else {
@@ -4365,6 +4375,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4375,6 +4386,7 @@ impl TargetService for Svc {
                 }],
                 None,
                 None,
+                correlation_id,
             )
             .await?
         } else {
@@ -4400,6 +4412,7 @@ impl TargetService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
+        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -4407,6 +4420,7 @@ impl TargetService for Svc {
                 vec![],
                 None,
                 None,
+                correlation_id,
             )
             .await?
         } else {
