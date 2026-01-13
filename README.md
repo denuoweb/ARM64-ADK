@@ -133,16 +133,17 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 
 ### ProjectService (aadk-project)
 - Template registry backed by JSON (`AADK_PROJECT_TEMPLATES` or default registry).
+- Template defaults (minSdk/compileSdk) resolved from registry/Gradle files with schema validation.
 - Create/open project, scaffold files on disk, store metadata and recents.
 - Exposes GetProject for authoritative project resolution.
 
 ### BuildService (aadk-build)
 - Resolves project paths via ProjectService IDs (or accepts direct paths) and persists build/artifact records with module/variant/task selections.
-- Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; supports module/variant/task overrides and streams logs.
-- Scans build outputs for APK/AAB/AAR/mapping/test results, tags metadata (module/variant/task/artifact_type), and supports artifact filters with sha256.
+- Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; validates module/variant via Gradle model introspection and streams logs.
+- Scans build outputs for APK/AAB/AAR/mapping/test results, parses output metadata, tags metadata (module/variant/build_type/flavors/abi/density/task/artifact_type), and supports artifact filters with sha256.
 
 ### TargetService (aadk-targets)
-- Enumerates targets via provider pipeline (ADB + Cuttlefish) and persists default target.
+- Enumerates targets via provider pipeline (ADB + Cuttlefish), normalizes IDs, enriches health metadata, and persists inventory + default target.
 - Install APK, launch/stop app, stream logcat, and manage Cuttlefish; publishes job events.
 
 ### ObserveService (aadk-observe)
@@ -168,8 +169,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Build run/list-artifacts with module/variant/tasks + artifact filters.
 
 ## Extending from here (recommended order)
-1. Enrich TargetService metadata/health, normalize IDs, and add inventory reconciliation.
-2. Add transparency log validation to ToolchainService verification.
+1. Add transparency log validation to ToolchainService verification.
 
 
 ## Development notes

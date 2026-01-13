@@ -72,23 +72,17 @@ Default addresses (override with env vars):
 ## Prioritized TODO checklist by service
 
 ### ProjectService (aadk-project)
-- P2: Add template defaults resolution (minSdk/compileSdk) with schema errors. main.rs (line 32)
 
 ### JobService (aadk-core)
 
 ### ObserveService (aadk-observe)
 
 ### BuildService (aadk-build)
-- P2: Replace module/variant validation with Gradle model introspection. main.rs (line 655)
-- P2: Improve variant filtering for flavored builds and richer artifact metadata (ABI/density). main.rs (line 1189)
 
 ### ToolchainService (aadk-toolchain)
 - P2: Add transparency log validation for toolchain artifacts. main.rs (line 1108)
 
 ### TargetService (aadk-targets)
-- P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
-- P1: Normalize/validate target IDs and address formats consistently. main.rs (line 1050)
-- P2: Add target inventory persistence and reconciliation on startup. main.rs (line 2809)
 
 ### Clients (aadk-ui, aadk-cli)
 Completed job flow expansions are tracked in README.
