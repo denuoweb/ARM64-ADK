@@ -15,15 +15,16 @@ Update this file whenever TargetService behavior changes or when commits touchin
 
 ## Current implementation details
 - Implementation lives in crates/aadk-targets/src/main.rs with a tonic server.
-- list_targets uses a provider pipeline (ADB listing plus Cuttlefish augmentation) and parses
-  adb output into Target records with metadata.
-- default target is persisted under ~/.local/share/aadk/state/targets.json and refreshed from
-  live adb discovery when possible.
+- list_targets uses a provider pipeline (ADB listing plus Cuttlefish augmentation), normalizes
+  target IDs/addresses, enriches metadata/health, and merges persisted inventory for offline targets.
+- default target and target inventory are persisted under ~/.local/share/aadk/state/targets.json
+  and reconciled against live discovery when possible.
 - APK install/launch/stop and logcat are implemented via adb commands.
 - Cuttlefish install can accept per-request branch/target/build_id overrides; build resolution is
   exposed via ResolveCuttlefishBuild.
 - Cuttlefish operations run external commands and report state via JobService events.
-- Job progress metrics include target/app identifiers, adb serials, install/launch inputs, and Cuttlefish env/artifact details.
+- Job progress metrics include target/app identifiers, adb serials, install/launch inputs, and
+  target health/ABI/SDK details plus Cuttlefish env/artifact details.
 - InstallApk, Launch, StopApp, and Cuttlefish job RPCs accept optional job_id for existing jobs.
 - Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
 - Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.
@@ -64,6 +65,3 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_CUTTLEFISH_BRANCH / AADK_CUTTLEFISH_TARGET / AADK_CUTTLEFISH_BUILD_ID
 
 ## Prioritized TODO checklist by service
-- P1: Enrich target metadata/health reporting across providers. main.rs (line 1074)
-- P1: Normalize/validate target IDs and address formats consistently. main.rs (line 1050)
-- P2: Add target inventory persistence and reconciliation on startup. main.rs (line 2809)

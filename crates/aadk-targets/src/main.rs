@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io,
     net::SocketAddr,
@@ -38,15 +39,17 @@ const STATE_FILE_NAME: &str = "targets.json";
 #[derive(Default)]
 struct State {
     default_target: Option<Target>,
+    inventory: Vec<TargetInventoryEntry>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct PersistedState {
     default_target: Option<PersistedTarget>,
+    inventory: Vec<PersistedInventoryEntry>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct PersistedTarget {
     target_id: String,
@@ -59,11 +62,24 @@ struct PersistedTarget {
     details: Vec<PersistedDetail>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct PersistedDetail {
     key: String,
     value: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PersistedInventoryEntry {
+    target: PersistedTarget,
+    last_seen_unix_millis: i64,
+}
+
+#[derive(Clone, Default)]
+struct TargetInventoryEntry {
+    target: PersistedTarget,
+    last_seen_unix_millis: i64,
 }
 
 #[derive(Clone)]
@@ -87,12 +103,16 @@ impl PersistedTarget {
             .map(|id| id.value.trim())
             .filter(|value| !value.is_empty())?
             .to_string();
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return None;
+        }
         Some(Self {
             target_id,
             kind: target.kind,
             display_name: target.display_name.clone(),
             provider: target.provider.clone(),
-            address: target.address.clone(),
+            address: normalize_target_address(&target.address),
             api_level: target.api_level.clone(),
             state: target.state.clone(),
             details: target
@@ -127,12 +147,42 @@ impl PersistedTarget {
     }
 }
 
+impl TargetInventoryEntry {
+    fn from_target(target: &Target, last_seen_unix_millis: i64) -> Option<Self> {
+        let target = PersistedTarget::from_proto(target)?;
+        Some(Self {
+            target,
+            last_seen_unix_millis,
+        })
+    }
+
+    fn to_target(&self, state_override: Option<&str>) -> Target {
+        let mut target = self.target.clone().into_proto();
+        if let Some(state) = state_override {
+            target.state = state.to_string();
+            target.details.push(KeyValue {
+                key: "inventory_state".into(),
+                value: state.to_string(),
+            });
+        }
+        target.details.push(KeyValue {
+            key: "last_seen_unix_millis".into(),
+            value: self.last_seen_unix_millis.to_string(),
+        });
+        target
+    }
+}
+
 fn now_ts() -> Timestamp {
-    let ms = std::time::SystemTime::now()
+    let ms = now_millis();
+    Timestamp { unix_millis: ms }
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64;
-    Timestamp { unix_millis: ms }
+        .as_millis() as i64
 }
 
 fn state_file_path() -> PathBuf {
@@ -155,9 +205,39 @@ fn load_state() -> State {
     let path = state_file_path();
     match fs::read_to_string(&path) {
         Ok(data) => match serde_json::from_str::<PersistedState>(&data) {
-            Ok(parsed) => State {
-                default_target: parsed.default_target.map(PersistedTarget::into_proto),
-            },
+            Ok(parsed) => {
+                let default_target = parsed.default_target.clone();
+                let mut inventory: Vec<TargetInventoryEntry> = parsed
+                    .inventory
+                    .into_iter()
+                    .filter_map(|entry| {
+                        if entry.target.target_id.trim().is_empty() {
+                            None
+                        } else {
+                            Some(TargetInventoryEntry {
+                                target: entry.target,
+                                last_seen_unix_millis: entry.last_seen_unix_millis,
+                            })
+                        }
+                    })
+                    .collect();
+                if let Some(default_target) = default_target.as_ref() {
+                    let key = normalize_target_id_for_compare(&default_target.target_id);
+                    if !inventory
+                        .iter()
+                        .any(|entry| normalize_target_id_for_compare(&entry.target.target_id) == key)
+                    {
+                        inventory.push(TargetInventoryEntry {
+                            target: default_target.clone(),
+                            last_seen_unix_millis: 0,
+                        });
+                    }
+                }
+                State {
+                    default_target: default_target.map(PersistedTarget::into_proto),
+                    inventory,
+                }
+            }
             Err(err) => {
                 warn!("Failed to parse {}: {}", path.display(), err);
                 State::default()
@@ -178,6 +258,14 @@ fn save_state(state: &State) -> io::Result<()> {
             .default_target
             .as_ref()
             .and_then(PersistedTarget::from_proto),
+        inventory: state
+            .inventory
+            .iter()
+            .map(|entry| PersistedInventoryEntry {
+                target: entry.target.clone(),
+                last_seen_unix_millis: entry.last_seen_unix_millis,
+            })
+            .collect(),
     };
     write_json_atomic(&state_file_path(), &persist)
 }
@@ -314,10 +402,20 @@ fn classify_target_kind(serial: &str) -> TargetKind {
     }
 }
 
+fn health_state_from_adb_state(state: &str) -> &'static str {
+    match state {
+        "device" => "online",
+        "unauthorized" => "unauthorized",
+        "offline" => "offline",
+        "recovery" => "recovery",
+        "bootloader" => "bootloader",
+        _ => "unknown",
+    }
+}
+
 #[derive(Default)]
 struct CuttlefishStatus {
     adb_serial: String,
-    adb_state: Option<String>,
     running: bool,
     raw: String,
     details: Vec<(String, String)>,
@@ -568,39 +666,6 @@ fn cuttlefish_images_ready(images_dir: &Path) -> bool {
     images_dir.join("system.img").exists()
         || images_dir.join("super.img").exists()
         || images_dir.join("boot.img").exists()
-}
-
-fn parse_os_release() -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    let Ok(contents) = std::fs::read_to_string("/etc/os-release") else {
-        return out;
-    };
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let mut value = value.trim().to_string();
-            if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                value = value[1..value.len() - 1].to_string();
-            }
-            out.insert(key.trim().to_string(), value);
-        }
-    }
-    out
-}
-
-fn is_debian_like() -> bool {
-    if Path::new("/etc/debian_version").exists() {
-        return true;
-    }
-
-    let info = parse_os_release();
-    let id = info.get("ID").map(|v| v.to_lowercase()).unwrap_or_default();
-    let like = info.get("ID_LIKE").map(|v| v.to_lowercase()).unwrap_or_default();
-    let combined = format!("{id} {like}");
-    combined.contains("debian") || combined.contains("ubuntu")
 }
 
 fn read_env_trimmed(key: &str) -> Option<String> {
@@ -1148,8 +1213,30 @@ fn normalize_adb_addr(addr: &str) -> String {
     addr.to_string()
 }
 
+fn normalize_target_id(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.contains(':') {
+        return normalize_adb_addr(trimmed);
+    }
+    trimmed.to_string()
+}
+
+fn normalize_target_address(value: &str) -> String {
+    normalize_target_id(value)
+}
+
+fn normalize_target_id_for_compare(value: &str) -> String {
+    normalize_target_id(value).to_ascii_lowercase()
+}
+
 fn canonicalize_adb_serial(addr: &str) -> String {
     let addr = addr.trim();
+    if let Some(rest) = addr.strip_prefix("localhost:") {
+        return format!("127.0.0.1:{rest}");
+    }
     if let Some(rest) = addr.strip_prefix("0.0.0.0:") {
         return format!("127.0.0.1:{rest}");
     }
@@ -1188,6 +1275,60 @@ async fn adb_shell(serial: &str, cmd: &str) -> Result<(), AdbFailure> {
     let args = ["-s", serial, "shell", cmd];
     let _ = adb_output(&args).await?;
     Ok(())
+}
+
+fn upsert_detail(details: &mut Vec<KeyValue>, key: &str, value: impl ToString) {
+    let value = value.to_string();
+    if let Some(item) = details.iter_mut().find(|item| item.key == key) {
+        item.value = value;
+    } else {
+        details.push(KeyValue {
+            key: key.to_string(),
+            value,
+        });
+    }
+}
+
+async fn adb_get_prop_timeout(serial: &str, prop: &str) -> Option<String> {
+    let timeout = std::time::Duration::from_secs(2);
+    match tokio::time::timeout(timeout, adb_get_prop(serial, prop)).await {
+        Ok(Ok(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct TargetProps {
+    api_level: Option<String>,
+    release: Option<String>,
+    abi: Option<String>,
+    abi_list: Option<String>,
+    manufacturer: Option<String>,
+    model: Option<String>,
+    device: Option<String>,
+    product: Option<String>,
+    boot_completed: Option<String>,
+}
+
+async fn adb_collect_props(serial: &str) -> TargetProps {
+    TargetProps {
+        api_level: adb_get_prop_timeout(serial, "ro.build.version.sdk").await,
+        release: adb_get_prop_timeout(serial, "ro.build.version.release").await,
+        abi: adb_get_prop_timeout(serial, "ro.product.cpu.abi").await,
+        abi_list: adb_get_prop_timeout(serial, "ro.product.cpu.abilist").await,
+        manufacturer: adb_get_prop_timeout(serial, "ro.product.manufacturer").await,
+        model: adb_get_prop_timeout(serial, "ro.product.model").await,
+        device: adb_get_prop_timeout(serial, "ro.product.device").await,
+        product: adb_get_prop_timeout(serial, "ro.product.name").await,
+        boot_completed: adb_get_prop_timeout(serial, "sys.boot_completed").await,
+    }
 }
 
 fn parse_adb_devices(output: &str, include_offline: bool) -> Vec<Target> {
@@ -1233,7 +1374,8 @@ fn parse_adb_devices(output: &str, include_offline: bool) -> Vec<Target> {
             }
         }
 
-        let display_name = model.clone().unwrap_or_else(|| serial.to_string());
+        let normalized = normalize_target_id(serial);
+        let display_name = model.clone().unwrap_or_else(|| normalized.clone());
         let mut details = Vec::new();
 
         if let Some(value) = product {
@@ -1251,13 +1393,17 @@ fn parse_adb_devices(output: &str, include_offline: bool) -> Vec<Target> {
         for (key, value) in extra {
             details.push(KeyValue { key, value });
         }
+        details.push(KeyValue {
+            key: "adb_state".into(),
+            value: state.into(),
+        });
 
         targets.push(Target {
-            target_id: Some(Id { value: serial.to_string() }),
+            target_id: Some(Id { value: normalized.clone() }),
             kind: classify_target_kind(serial) as i32,
             display_name,
             provider: "adb".into(),
-            address: serial.to_string(),
+            address: normalized,
             api_level: "".into(),
             state: state.into(),
             details,
@@ -1265,6 +1411,67 @@ fn parse_adb_devices(output: &str, include_offline: bool) -> Vec<Target> {
     }
 
     targets
+}
+
+async fn enrich_adb_targets(targets: &mut [Target]) {
+    for target in targets.iter_mut() {
+        if target.provider != "adb" {
+            continue;
+        }
+        let state = target.state.trim().to_string();
+        upsert_detail(
+            &mut target.details,
+            "health_state",
+            health_state_from_adb_state(&state),
+        );
+        if state != "device" {
+            continue;
+        }
+
+        let mut serial = target.address.clone();
+        if serial.trim().is_empty() {
+            serial = target
+                .target_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default();
+        }
+        let serial = canonicalize_adb_serial(&serial);
+        upsert_detail(&mut target.details, "adb_serial", &serial);
+
+        let props = adb_collect_props(&serial).await;
+        if let Some(api_level) = props.api_level.as_ref() {
+            target.api_level = api_level.clone();
+            upsert_detail(&mut target.details, "api_level", api_level);
+        }
+        if let Some(release) = props.release.as_ref() {
+            upsert_detail(&mut target.details, "android_release", release);
+        }
+        if let Some(abi) = props.abi.as_ref() {
+            upsert_detail(&mut target.details, "abi", abi);
+        }
+        if let Some(abi_list) = props.abi_list.as_ref() {
+            upsert_detail(&mut target.details, "abi_list", abi_list);
+        }
+        if let Some(manufacturer) = props.manufacturer.as_ref() {
+            upsert_detail(&mut target.details, "manufacturer", manufacturer);
+        }
+        if let Some(model) = props.model.as_ref() {
+            upsert_detail(&mut target.details, "model", model);
+        }
+        if let Some(device) = props.device.as_ref() {
+            upsert_detail(&mut target.details, "device", device);
+        }
+        if let Some(product) = props.product.as_ref() {
+            upsert_detail(&mut target.details, "product_name", product);
+        }
+        if let Some(boot) = props.boot_completed.as_ref() {
+            upsert_detail(&mut target.details, "boot_completed", boot);
+            if boot != "1" {
+                upsert_detail(&mut target.details, "health_state", "booting");
+            }
+        }
+    }
 }
 
 async fn maybe_cuttlefish_target(
@@ -1288,7 +1495,8 @@ async fn maybe_cuttlefish_target(
 
     let page_size = host_page_size();
     let adb_serial_config = cuttlefish_adb_serial();
-    let normalized_config = normalize_adb_addr(&adb_serial_config);
+    let adb_serial_config_normalized = normalize_target_id(&adb_serial_config);
+    let normalized_config = normalize_target_id_for_compare(&adb_serial_config);
     let mut adb_serial = if status.adb_serial.is_empty() {
         adb_serial_config.clone()
     } else {
@@ -1299,7 +1507,7 @@ async fn maybe_cuttlefish_target(
     if let Some(index) = adb_targets.iter().position(|t| {
         t.target_id
             .as_ref()
-            .map(|i| normalize_adb_addr(&i.value) == normalized_config)
+            .map(|i| normalize_target_id_for_compare(&i.value) == normalized_config)
             .unwrap_or(false)
     }) {
         adb_entry = Some(adb_targets.remove(index));
@@ -1307,6 +1515,8 @@ async fn maybe_cuttlefish_target(
             adb_serial = id.value.clone();
         }
     }
+    let adb_serial_normalized = normalize_target_id(&adb_serial);
+    let adb_serial_canonical = canonicalize_adb_serial(&adb_serial_normalized);
 
     let status_running = status_error.is_none() && status.running;
     let connect_enabled = cuttlefish_connect_enabled();
@@ -1315,9 +1525,9 @@ async fn maybe_cuttlefish_target(
     details.push(KeyValue { key: "cvd_bin".into(), value: cuttlefish_cvd_bin() });
     details.push(KeyValue { key: "launch_cvd_bin".into(), value: cuttlefish_launch_bin() });
     details.push(KeyValue { key: "adb_path".into(), value: adb_path().display().to_string() });
-    details.push(KeyValue { key: "adb_serial".into(), value: adb_serial.clone() });
-    if adb_serial != adb_serial_config {
-        details.push(KeyValue { key: "adb_serial_config".into(), value: adb_serial_config.clone() });
+    details.push(KeyValue { key: "adb_serial".into(), value: adb_serial_normalized.clone() });
+    if adb_serial_normalized != adb_serial_config_normalized {
+        details.push(KeyValue { key: "adb_serial_config".into(), value: adb_serial_config_normalized.clone() });
     }
     if let Some(size) = page_size {
         details.push(KeyValue { key: "host_page_size".into(), value: size.to_string() });
@@ -1357,9 +1567,9 @@ async fn maybe_cuttlefish_target(
     let should_connect = status_running
         && adb_entry.is_none()
         && connect_enabled
-        && adb_serial.contains(':');
+        && adb_serial_canonical.contains(':');
     if should_connect {
-        if let Some(msg) = adb_connect(&adb_serial).await {
+        if let Some(msg) = adb_connect(&adb_serial_canonical).await {
             details.push(KeyValue { key: "adb_connect".into(), value: msg });
         }
     } else if status_error.is_some() {
@@ -1379,7 +1589,7 @@ async fn maybe_cuttlefish_target(
         details.push(KeyValue { key: "adb_state".into(), value: entry.state.clone() });
         Some(entry.state.clone())
     } else if connect_enabled {
-        match adb_get_state(&adb_serial).await {
+        match adb_get_state(&adb_serial_canonical).await {
             Ok(state) => {
                 details.push(KeyValue { key: "adb_state".into(), value: state.clone() });
                 Some(state)
@@ -1394,13 +1604,19 @@ async fn maybe_cuttlefish_target(
     };
 
     if adb_state.as_deref() == Some("device") {
-        if let Ok(value) = adb_get_prop(&adb_serial, "ro.build.version.sdk").await {
+        if let Ok(value) = adb_get_prop(&adb_serial_canonical, "ro.build.version.sdk").await {
             api_level = value.clone();
             details.push(KeyValue { key: "api_level".into(), value });
         }
-        if let Ok(value) = adb_get_prop(&adb_serial, "ro.build.version.release").await {
+        if let Ok(value) = adb_get_prop(&adb_serial_canonical, "ro.build.version.release").await {
             release = value.clone();
             details.push(KeyValue { key: "android_release".into(), value });
+        }
+        if let Some(abi) = adb_get_prop_timeout(&adb_serial_canonical, "ro.product.cpu.abi").await {
+            details.push(KeyValue { key: "abi".into(), value: abi });
+        }
+        if let Some(abi_list) = adb_get_prop_timeout(&adb_serial_canonical, "ro.product.cpu.abilist").await {
+            details.push(KeyValue { key: "abi_list".into(), value: abi_list });
         }
     }
 
@@ -1413,7 +1629,6 @@ async fn maybe_cuttlefish_target(
     } else {
         "stopped".into()
     };
-
     if !include_offline && state != "device" && state != "running" {
         return Ok(None);
     }
@@ -1424,17 +1639,33 @@ async fn maybe_cuttlefish_target(
         }
     }
 
+    let health_state = if state == "device" {
+        "online"
+    } else if state == "running" {
+        "booting"
+    } else if state == "error" {
+        "error"
+    } else if state == "offline" || state == "unauthorized" {
+        health_state_from_adb_state(&state)
+    } else {
+        "stopped"
+    };
+    details.push(KeyValue {
+        key: "health_state".into(),
+        value: health_state.to_string(),
+    });
+
     let display_name = adb_entry
         .as_ref()
         .map(|entry| entry.display_name.clone())
         .unwrap_or_else(|| "Cuttlefish (local)".into());
 
     Ok(Some(Target {
-        target_id: Some(Id { value: adb_serial.clone() }),
+        target_id: Some(Id { value: adb_serial_normalized.clone() }),
         kind: TargetKind::Emulatorlike as i32,
         display_name,
         provider: "cuttlefish".into(),
-        address: adb_serial,
+        address: adb_serial_normalized,
         api_level,
         state,
         details,
@@ -1480,7 +1711,9 @@ async fn list_adb_targets(include_offline: bool) -> Result<Vec<Target>, Status> 
         .await
         .map_err(adb_failure_status)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_adb_devices(&stdout, include_offline))
+    let mut targets = parse_adb_devices(&stdout, include_offline);
+    enrich_adb_targets(&mut targets).await;
+    Ok(targets)
 }
 
 async fn fetch_targets(include_offline: bool) -> Result<Vec<Target>, Status> {
@@ -1497,6 +1730,54 @@ async fn fetch_targets(include_offline: bool) -> Result<Vec<Target>, Status> {
     }
 
     Ok(targets)
+}
+
+fn upsert_inventory_entries(
+    inventory: &mut Vec<TargetInventoryEntry>,
+    targets: &[Target],
+    now: i64,
+) {
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for (idx, entry) in inventory.iter().enumerate() {
+        index.insert(
+            normalize_target_id_for_compare(&entry.target.target_id),
+            idx,
+        );
+    }
+
+    for target in targets {
+        let Some(entry) = TargetInventoryEntry::from_target(target, now) else {
+            continue;
+        };
+        let key = normalize_target_id_for_compare(&entry.target.target_id);
+        if let Some(existing) = index.get(&key).copied() {
+            inventory[existing] = entry;
+        } else {
+            inventory.push(entry);
+        }
+    }
+}
+
+fn merge_inventory_targets(
+    live: &mut Vec<Target>,
+    inventory: &[TargetInventoryEntry],
+    include_offline: bool,
+) {
+    if !include_offline {
+        return;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    for target in live.iter() {
+        if let Some(id) = target.target_id.as_ref() {
+            seen.insert(normalize_target_id_for_compare(&id.value));
+        }
+    }
+    for entry in inventory {
+        let key = normalize_target_id_for_compare(&entry.target.target_id);
+        if !seen.contains(&key) {
+            live.push(entry.to_target(Some("offline")));
+        }
+    }
 }
 
 fn job_addr() -> String {
@@ -1750,23 +2031,36 @@ async fn ensure_target_ready(
     job_id: &str,
     target_id: &str,
 ) -> Option<String> {
-    let canonical = canonicalize_adb_serial(target_id);
+    let normalized = normalize_target_id(target_id);
+    let canonical = canonicalize_adb_serial(&normalized);
     if canonical.contains(':') {
         let _ = adb_connect(&canonical).await;
     }
 
     match adb_get_state(&canonical).await {
         Ok(state) if state == "device" => {
+            let props = adb_collect_props(&canonical).await;
+            let mut metrics = vec![
+                metric("target_id", &normalized),
+                metric("adb_serial", &canonical),
+                metric("state", &state),
+                metric("health_state", "online"),
+            ];
+            if let Some(api_level) = props.api_level.as_ref() {
+                metrics.push(metric("api_level", api_level));
+            }
+            if let Some(release) = props.release.as_ref() {
+                metrics.push(metric("android_release", release));
+            }
+            if let Some(abi) = props.abi.as_ref() {
+                metrics.push(metric("abi", abi));
+            }
             let _ = publish_progress(
                 client,
                 job_id,
                 20,
                 "target online",
-                vec![
-                    metric("target_id", target_id),
-                    metric("adb_serial", &canonical),
-                    metric("state", state),
-                ],
+                metrics,
             )
             .await;
             Some(canonical)
@@ -1808,7 +2102,7 @@ async fn run_install_job(job_id: String, target_id: String, apk_path: String) {
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Install cancelled before start\n").await;
         return;
@@ -1904,7 +2198,7 @@ async fn run_launch_job(job_id: String, target_id: String, application_id: Strin
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Launch cancelled before start\n").await;
         return;
@@ -2031,7 +2325,7 @@ async fn run_stop_job(job_id: String, target_id: String, application_id: String)
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Stop cancelled before start\n").await;
         return;
@@ -2211,17 +2505,6 @@ fn missing_groups(groups: &[String], required: &[&str]) -> Vec<String> {
         .filter(|required| !groups.iter().any(|group| group == *required))
         .map(|group| group.to_string())
         .collect()
-}
-
-fn tail_lines(contents: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
-}
-
-fn read_file_tail(path: &str, max_lines: usize) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    Some(tail_lines(&contents, max_lines))
 }
 
 async fn run_diag_command(label: &str, command: &str) -> Option<String> {
@@ -2656,7 +2939,7 @@ async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool) {
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled before launch\n").await;
         return;
@@ -2954,7 +3237,7 @@ async fn run_cuttlefish_stop_job(job_id: String) {
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish stop cancelled before start\n").await;
         return;
@@ -3053,7 +3336,7 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
         }
     };
 
-    let mut cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
+    let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled before start\n").await;
         return;
@@ -3239,10 +3522,9 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
     }
 
     let required_groups = ["kvm", "cvdnetwork", "render"];
-    let mut missing = Vec::new();
-    match current_user_groups().await {
+    let missing = match current_user_groups().await {
         Some(groups) => {
-            missing = missing_groups(&groups, &required_groups);
+            let missing = missing_groups(&groups, &required_groups);
             if missing.is_empty() {
                 let _ = publish_log(
                     &mut job_client,
@@ -3258,17 +3540,18 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
                 )
                 .await;
             }
+            missing
         }
         None => {
-            missing = required_groups.iter().map(|g| g.to_string()).collect();
             let _ = publish_log(
                 &mut job_client,
                 &job_id,
                 "Unable to determine user groups; assuming group setup is needed\n",
             )
             .await;
+            required_groups.iter().map(|g| g.to_string()).collect()
         }
-    }
+    };
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish install cancelled\n").await;
@@ -3657,12 +3940,13 @@ async fn run_cuttlefish_install_job(job_id: String, options: CuttlefishInstallOp
 
 async fn emit_logcat(
     target_id: &str,
+    adb_serial: &str,
     filter: &str,
     dump: bool,
     tx: &mpsc::Sender<Result<LogcatEvent, Status>>,
 ) -> Result<(), Status> {
     let mut cmd = Command::new(adb_path());
-    cmd.arg("-s").arg(target_id).arg("logcat");
+    cmd.arg("-s").arg(adb_serial).arg("logcat");
     if dump {
         cmd.arg("-d");
     }
@@ -3698,18 +3982,19 @@ async fn emit_logcat(
 
 async fn stream_logcat_impl(
     target_id: String,
+    adb_serial: String,
     filter: String,
     include_history: bool,
     tx: mpsc::Sender<Result<LogcatEvent, Status>>,
 ) {
     if include_history {
-        if let Err(err) = emit_logcat(&target_id, &filter, true, &tx).await {
+        if let Err(err) = emit_logcat(&target_id, &adb_serial, &filter, true, &tx).await {
             let _ = tx.send(Err(err)).await;
             return;
         }
     }
 
-    if let Err(err) = emit_logcat(&target_id, &filter, false, &tx).await {
+    if let Err(err) = emit_logcat(&target_id, &adb_serial, &filter, false, &tx).await {
         let _ = tx.send(Err(err)).await;
     }
 }
@@ -3721,7 +4006,13 @@ impl TargetService for Svc {
         request: Request<ListTargetsRequest>,
     ) -> Result<Response<ListTargetsResponse>, Status> {
         let req = request.into_inner();
-        let targets = fetch_targets(req.include_offline).await?;
+        let mut targets = fetch_targets(req.include_offline).await?;
+        {
+            let mut st = self.state.lock().await;
+            upsert_inventory_entries(&mut st.inventory, &targets, now_millis());
+            save_state_best_effort(&st);
+            merge_inventory_targets(&mut targets, &st.inventory, req.include_offline);
+        }
         Ok(Response::new(ListTargetsResponse { targets }))
     }
 
@@ -3731,16 +4022,34 @@ impl TargetService for Svc {
     ) -> Result<Response<SetDefaultTargetResponse>, Status> {
         let req = request.into_inner();
         let target_id = require_id(req.target_id, "target_id")?;
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return Err(Status::invalid_argument("target_id is invalid"));
+        }
         let targets = fetch_targets(true).await?;
-        let chosen = targets
-            .into_iter()
-            .find(|t| t.target_id.as_ref().map(|i| i.value.as_str()) == Some(target_id.as_str()));
+        let target_key = normalize_target_id_for_compare(&target_id);
+        let mut chosen = targets.into_iter().find(|t| {
+            t.target_id
+                .as_ref()
+                .map(|i| normalize_target_id_for_compare(&i.value) == target_key)
+                .unwrap_or(false)
+        });
+
+        let mut st = self.state.lock().await;
+        if chosen.is_none() {
+            chosen = st
+                .inventory
+                .iter()
+                .find(|entry| normalize_target_id_for_compare(&entry.target.target_id) == target_key)
+                .map(|entry| entry.to_target(Some("offline")));
+        }
         let Some(chosen) = chosen else {
             return Ok(Response::new(SetDefaultTargetResponse { ok: false }));
         };
-
-        let mut st = self.state.lock().await;
         st.default_target = Some(chosen);
+        if let Some(target) = st.default_target.clone() {
+            upsert_inventory_entries(&mut st.inventory, std::slice::from_ref(&target), now_millis());
+        }
         if let Err(err) = save_state(&st) {
             return Err(Status::internal(format!(
                 "failed to persist default target: {err}"
@@ -3765,21 +4074,38 @@ impl TargetService for Svc {
             .filter(|value| !value.is_empty());
 
         if let Some(target_id) = stored_id {
+            let target_key = normalize_target_id_for_compare(&target_id);
             if let Ok(targets) = fetch_targets(true).await {
                 if let Some(found) = targets.into_iter().find(|target| {
                     target
                         .target_id
                         .as_ref()
-                        .map(|id| id.value.as_str())
-                        == Some(target_id.as_str())
+                        .map(|id| normalize_target_id_for_compare(&id.value) == target_key)
+                        .unwrap_or(false)
                 }) {
                     let mut st = self.state.lock().await;
                     st.default_target = Some(found.clone());
+                    upsert_inventory_entries(&mut st.inventory, std::slice::from_ref(&found), now_millis());
                     save_state_best_effort(&st);
                     return Ok(Response::new(GetDefaultTargetResponse {
                         target: Some(found),
                     }));
                 }
+            }
+            let inventory_target = {
+                let st = self.state.lock().await;
+                st.inventory
+                    .iter()
+                    .find(|entry| normalize_target_id_for_compare(&entry.target.target_id) == target_key)
+                    .map(|entry| entry.to_target(Some("offline")))
+            };
+            if let Some(found) = inventory_target {
+                let mut st = self.state.lock().await;
+                st.default_target = Some(found.clone());
+                save_state_best_effort(&st);
+                return Ok(Response::new(GetDefaultTargetResponse {
+                    target: Some(found),
+                }));
             }
         }
 
@@ -3794,6 +4120,10 @@ impl TargetService for Svc {
     ) -> Result<Response<InstallApkResponse>, Status> {
         let req = request.into_inner();
         let target_id = require_id(req.target_id.clone(), "target_id")?;
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return Err(Status::invalid_argument("target_id is invalid"));
+        }
         let apk_path = req.apk_path;
 
         if apk_path.trim().is_empty() {
@@ -3835,6 +4165,10 @@ impl TargetService for Svc {
     ) -> Result<Response<LaunchResponse>, Status> {
         let req = request.into_inner();
         let target_id = require_id(req.target_id.clone(), "target_id")?;
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return Err(Status::invalid_argument("target_id is invalid"));
+        }
         let application_id = req.application_id.trim().to_string();
         if application_id.is_empty() {
             return Err(Status::invalid_argument("application_id is required"));
@@ -3877,6 +4211,10 @@ impl TargetService for Svc {
     ) -> Result<Response<StopAppResponse>, Status> {
         let req = request.into_inner();
         let target_id = require_id(req.target_id.clone(), "target_id")?;
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return Err(Status::invalid_argument("target_id is invalid"));
+        }
         let application_id = req.application_id.trim().to_string();
         if application_id.is_empty() {
             return Err(Status::invalid_argument("application_id is required"));
@@ -4087,33 +4425,36 @@ impl TargetService for Svc {
         _request: Request<GetCuttlefishStatusRequest>,
     ) -> Result<Response<GetCuttlefishStatusResponse>, Status> {
         let mut details = Vec::new();
-        let mut state = "stopped".to_string();
         let mut adb_serial = cuttlefish_adb_serial();
 
-        match cuttlefish_status().await {
+        let state = match cuttlefish_status().await {
             Ok(status) => {
                 if !status.adb_serial.is_empty() {
                     adb_serial = status.adb_serial;
                 }
-                state = if status.running { "running" } else { "stopped" }.into();
                 for (key, value) in status.details {
                     details.push(KeyValue { key: format!("cuttlefish_{key}"), value });
                 }
                 if !status.raw.is_empty() {
                     details.push(KeyValue { key: "cuttlefish_status_raw".into(), value: status.raw });
                 }
+                if status.running {
+                    "running".to_string()
+                } else {
+                    "stopped".to_string()
+                }
             }
-            Err(CuttlefishStatusError::NotInstalled) => {
-                state = "not_installed".into();
-            }
+            Err(CuttlefishStatusError::NotInstalled) => "not_installed".to_string(),
             Err(CuttlefishStatusError::Failed(err)) => {
-                state = "error".into();
                 details.push(KeyValue { key: "cuttlefish_status_error".into(), value: err });
+                "error".to_string()
             }
-        }
+        };
 
+        let adb_serial = normalize_target_id(&adb_serial);
+        let adb_serial_canonical = canonicalize_adb_serial(&adb_serial);
         if !adb_serial.is_empty() {
-            match adb_get_state(&adb_serial).await {
+            match adb_get_state(&adb_serial_canonical).await {
                 Ok(adb_state) => details.push(KeyValue { key: "adb_state".into(), value: adb_state }),
                 Err(err) => details.push(KeyValue { key: "adb_state_error".into(), value: adb_failure_message(&err) }),
             }
@@ -4134,8 +4475,13 @@ impl TargetService for Svc {
     ) -> Result<Response<Self::StreamLogcatStream>, Status> {
         let req = request.into_inner();
         let target_id = require_id(req.target_id, "target_id")?;
+        let target_id = normalize_target_id(&target_id);
+        if target_id.is_empty() {
+            return Err(Status::invalid_argument("target_id is invalid"));
+        }
+        let adb_serial = canonicalize_adb_serial(&target_id);
 
-        match adb_get_state(&target_id).await {
+        match adb_get_state(&adb_serial).await {
             Ok(state) if state == "device" => {}
             Ok(state) => {
                 return Err(Status::failed_precondition(format!(
@@ -4148,6 +4494,7 @@ impl TargetService for Svc {
         let (tx, rx) = mpsc::channel::<Result<LogcatEvent, Status>>(256);
         tokio::spawn(stream_logcat_impl(
             target_id,
+            adb_serial,
             req.filter,
             req.include_history,
             tx.clone(),
