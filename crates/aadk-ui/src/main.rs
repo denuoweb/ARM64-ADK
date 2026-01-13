@@ -54,6 +54,7 @@ struct AppConfig {
     last_job_target_id: String,
     last_job_toolchain_set_id: String,
     last_job_id: String,
+    last_correlation_id: String,
 }
 
 impl Default for AppConfig {
@@ -76,6 +77,7 @@ impl Default for AppConfig {
             last_job_target_id: String::new(),
             last_job_toolchain_set_id: String::new(),
             last_job_id: String::new(),
+            last_correlation_id: String::new(),
         }
     }
 }
@@ -113,6 +115,7 @@ impl AppConfig {
                     cfg.last_job_target_id = file_cfg.last_job_target_id;
                     cfg.last_job_toolchain_set_id = file_cfg.last_job_toolchain_set_id;
                     cfg.last_job_id = file_cfg.last_job_id;
+                    cfg.last_correlation_id = file_cfg.last_correlation_id;
                 }
                 Err(err) => {
                     eprintln!("Failed to parse {}: {err}", path.display());
@@ -202,6 +205,7 @@ enum UiCommand {
         project_id: String,
         target_id: String,
         toolchain_set_id: String,
+        correlation_id: String,
     },
     HomeWatchJob { cfg: AppConfig, job_id: String },
     HomeCancelCurrent { cfg: AppConfig },
@@ -213,6 +217,7 @@ enum UiCommand {
         created_before: String,
         finished_after: String,
         finished_before: String,
+        correlation_id: String,
         page_size: u32,
         page_token: String,
     },
@@ -232,27 +237,44 @@ enum UiCommand {
     },
     ToolchainListProviders { cfg: AppConfig },
     ToolchainListAvailable { cfg: AppConfig, provider_id: String },
-    ToolchainInstall { cfg: AppConfig, provider_id: String, version: String, verify: bool },
+    ToolchainInstall {
+        cfg: AppConfig,
+        provider_id: String,
+        version: String,
+        verify: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     ToolchainListInstalled { cfg: AppConfig, kind: ToolchainKind },
     ToolchainListSets { cfg: AppConfig },
-    ToolchainVerifyInstalled { cfg: AppConfig },
+    ToolchainVerifyInstalled {
+        cfg: AppConfig,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     ToolchainUpdate {
         cfg: AppConfig,
         toolchain_id: String,
         version: String,
         verify: bool,
         remove_cached: bool,
+        job_id: Option<String>,
+        correlation_id: String,
     },
     ToolchainUninstall {
         cfg: AppConfig,
         toolchain_id: String,
         remove_cached: bool,
         force: bool,
+        job_id: Option<String>,
+        correlation_id: String,
     },
     ToolchainCleanupCache {
         cfg: AppConfig,
         dry_run: bool,
         remove_all: bool,
+        job_id: Option<String>,
+        correlation_id: String,
     },
     ToolchainCreateSet {
         cfg: AppConfig,
@@ -265,7 +287,14 @@ enum UiCommand {
     ProjectListTemplates { cfg: AppConfig },
     ProjectListRecent { cfg: AppConfig },
     ProjectLoadDefaults { cfg: AppConfig },
-    ProjectCreate { cfg: AppConfig, name: String, path: String, template_id: String },
+    ProjectCreate {
+        cfg: AppConfig,
+        name: String,
+        path: String,
+        template_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     ProjectOpen { cfg: AppConfig, path: String },
     ProjectSetConfig {
         cfg: AppConfig,
@@ -283,6 +312,8 @@ enum UiCommand {
         branch: String,
         target: String,
         build_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
     },
     TargetsResolveCuttlefishBuild {
         cfg: AppConfig,
@@ -290,11 +321,33 @@ enum UiCommand {
         target: String,
         build_id: String,
     },
-    TargetsStartCuttlefish { cfg: AppConfig, show_full_ui: bool },
-    TargetsStopCuttlefish { cfg: AppConfig },
+    TargetsStartCuttlefish {
+        cfg: AppConfig,
+        show_full_ui: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsStopCuttlefish {
+        cfg: AppConfig,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     TargetsCuttlefishStatus { cfg: AppConfig },
-    TargetsInstallApk { cfg: AppConfig, target_id: String, apk_path: String },
-    TargetsLaunchApp { cfg: AppConfig, target_id: String, application_id: String, activity: String },
+    TargetsInstallApk {
+        cfg: AppConfig,
+        target_id: String,
+        apk_path: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsLaunchApp {
+        cfg: AppConfig,
+        target_id: String,
+        application_id: String,
+        activity: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     TargetsStreamLogcat { cfg: AppConfig, target_id: String, filter: String },
     ObserveListRuns { cfg: AppConfig },
     ObserveExportSupport {
@@ -304,8 +357,15 @@ enum UiCommand {
         include_toolchain_provenance: bool,
         include_recent_runs: bool,
         recent_runs_limit: u32,
+        job_id: Option<String>,
+        correlation_id: String,
     },
-    ObserveExportEvidence { cfg: AppConfig, run_id: String },
+    ObserveExportEvidence {
+        cfg: AppConfig,
+        run_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
     BuildRun {
         cfg: AppConfig,
         project_ref: String,
@@ -315,6 +375,8 @@ enum UiCommand {
         tasks: Vec<String>,
         clean_first: bool,
         gradle_args: Vec<KeyValue>,
+        job_id: Option<String>,
+        correlation_id: String,
     },
     BuildListArtifacts {
         cfg: AppConfig,
@@ -698,6 +760,7 @@ fn make_page(title: &str) -> Page {
 
 const KNOWN_JOB_TYPES: &[&str] = &[
     "demo.job",
+    "workflow.pipeline",
     "project.create",
     "build.run",
     "toolchain.install",
@@ -762,6 +825,11 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
         .placeholder_text("optional toolchain set id")
         .hexpand(true)
         .build();
+    let correlation_id_label = gtk::Label::builder().label("Correlation id").xalign(0.0).build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional correlation id")
+        .hexpand(true)
+        .build();
 
     form.attach(&job_type_label, 0, 0, 1, 1);
     form.attach(&job_type_entry, 1, 0, 1, 1);
@@ -774,6 +842,8 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     form.attach(&target_id_entry, 1, 3, 2, 1);
     form.attach(&toolchain_id_label, 0, 4, 1, 1);
     form.attach(&toolchain_id_entry, 1, 4, 2, 1);
+    form.attach(&correlation_id_label, 0, 5, 1, 1);
+    form.attach(&correlation_id_entry, 1, 5, 2, 1);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let start_btn = gtk::Button::with_label("Start job");
@@ -839,6 +909,9 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
         if !cfg.last_job_toolchain_set_id.is_empty() {
             toolchain_id_entry.set_text(&cfg.last_job_toolchain_set_id);
         }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
         if !cfg.last_job_id.is_empty() {
             watch_entry.set_text(&cfg.last_job_id);
         }
@@ -858,12 +931,14 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     let project_id_entry_start = project_id_entry.clone();
     let target_id_entry_start = target_id_entry.clone();
     let toolchain_id_entry_start = toolchain_id_entry.clone();
+    let correlation_id_entry_start = correlation_id_entry.clone();
     start_btn.connect_clicked(move |_| {
         let job_type = job_type_entry_start.text().to_string();
         let params_raw = text_view_text(&params_view_start);
         let project_id = project_id_entry_start.text().to_string();
         let target_id = target_id_entry_start.text().to_string();
         let toolchain_set_id = toolchain_id_entry_start.text().to_string();
+        let correlation_id = correlation_id_entry_start.text().to_string();
 
         {
             let mut cfg = cfg_start.lock().unwrap();
@@ -872,6 +947,7 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
             cfg.last_job_project_id = project_id.clone();
             cfg.last_job_target_id = target_id.clone();
             cfg.last_job_toolchain_set_id = toolchain_set_id.clone();
+            cfg.last_correlation_id = correlation_id.clone();
             if let Err(err) = cfg.save() {
                 eprintln!("Failed to persist UI config: {err}");
             }
@@ -886,6 +962,7 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
                 project_id,
                 target_id,
                 toolchain_set_id,
+                correlation_id,
             })
             .ok();
     });
@@ -955,6 +1032,10 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
         .placeholder_text("finished before (unix ms)")
         .hexpand(true)
         .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
     let page_size_entry = gtk::Entry::builder().text("50").hexpand(true).build();
     let page_token_entry = gtk::Entry::builder()
         .placeholder_text("page token")
@@ -975,11 +1056,13 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
     list_grid.attach(&finished_after_entry, 1, 4, 1, 1);
     list_grid.attach(&gtk::Label::new(Some("Finished before")), 0, 5, 1, 1);
     list_grid.attach(&finished_before_entry, 1, 5, 1, 1);
-    list_grid.attach(&gtk::Label::new(Some("Page size")), 0, 6, 1, 1);
-    list_grid.attach(&page_size_entry, 1, 6, 1, 1);
-    list_grid.attach(&gtk::Label::new(Some("Page token")), 0, 7, 1, 1);
-    list_grid.attach(&page_token_entry, 1, 7, 1, 1);
-    list_grid.attach(&list_btn, 1, 8, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 6, 1, 1);
+    list_grid.attach(&correlation_id_entry, 1, 6, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Page size")), 0, 7, 1, 1);
+    list_grid.attach(&page_size_entry, 1, 7, 1, 1);
+    list_grid.attach(&gtk::Label::new(Some("Page token")), 0, 8, 1, 1);
+    list_grid.attach(&page_token_entry, 1, 8, 1, 1);
+    list_grid.attach(&list_btn, 1, 9, 1, 1);
 
     list_frame.set_child(Some(&list_grid));
 
@@ -1047,6 +1130,9 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
         if !cfg.last_job_type.is_empty() {
             job_types_entry.set_text(&cfg.last_job_type);
         }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
         if !cfg.last_job_id.is_empty() {
             job_id_entry.set_text(&cfg.last_job_id);
         }
@@ -1060,6 +1146,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
     let created_before_entry_list = created_before_entry.clone();
     let finished_after_entry_list = finished_after_entry.clone();
     let finished_before_entry_list = finished_before_entry.clone();
+    let correlation_id_entry_list = correlation_id_entry.clone();
     let page_size_entry_list = page_size_entry.clone();
     let page_token_entry_list = page_token_entry.clone();
     list_btn.connect_clicked(move |_| {
@@ -1074,6 +1161,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
                 created_before: created_before_entry_list.text().to_string(),
                 finished_after: finished_after_entry_list.text().to_string(),
                 finished_before: finished_before_entry_list.text().to_string(),
+                correlation_id: correlation_id_entry_list.text().to_string(),
                 page_size,
                 page_token: page_token_entry_list.text().to_string(),
             })
@@ -1146,6 +1234,24 @@ const NDK_VERSION: &str = "r29";
 fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
     let page = make_page("Toolchains — ToolchainService");
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+    let job_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
+    job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
+    job_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
 
     let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list = gtk::Button::with_label("List providers");
@@ -1280,12 +1386,23 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     active_row.append(&get_active_btn);
     set_grid.attach(&active_row, 1, 4, 1, 1);
 
+    actions.append(&job_grid);
     actions.append(&row1);
     actions.append(&version_grid);
     actions.append(&row2);
     actions.append(&maintenance_grid);
     actions.append(&set_grid);
     page.container.insert_child_after(&actions, Some(&page.container.first_child().unwrap()));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
 
     let cfg_list = cfg.clone();
     let cmd_tx_list = cmd_tx.clone();
@@ -1330,7 +1447,29 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let cfg_install_sdk = cfg.clone();
     let cmd_tx_install_sdk = cmd_tx.clone();
     let sdk_version_entry_install = sdk_version_entry.clone();
+    let use_job_id_install_sdk = use_job_id_check.clone();
+    let job_id_entry_install_sdk = job_id_entry.clone();
+    let correlation_entry_install_sdk = correlation_id_entry.clone();
     install_sdk.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_install_sdk.text().to_string();
+        let correlation_id = correlation_entry_install_sdk.text().to_string();
+        let job_id = if use_job_id_install_sdk.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_install_sdk.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_install_sdk.lock().unwrap().clone();
         let version = sdk_version_entry_install.text().to_string();
         cmd_tx_install_sdk
@@ -1339,6 +1478,8 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
                 provider_id: PROVIDER_SDK_ID.into(),
                 version,
                 verify: true,
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1346,7 +1487,29 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let cfg_install_ndk = cfg.clone();
     let cmd_tx_install_ndk = cmd_tx.clone();
     let ndk_version_entry_install = ndk_version_entry.clone();
+    let use_job_id_install_ndk = use_job_id_check.clone();
+    let job_id_entry_install_ndk = job_id_entry.clone();
+    let correlation_entry_install_ndk = correlation_id_entry.clone();
     install_ndk.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_install_ndk.text().to_string();
+        let correlation_id = correlation_entry_install_ndk.text().to_string();
+        let job_id = if use_job_id_install_ndk.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_install_ndk.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_install_ndk.lock().unwrap().clone();
         let version = ndk_version_entry_install.text().to_string();
         cmd_tx_install_ndk
@@ -1355,6 +1518,8 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
                 provider_id: PROVIDER_NDK_ID.into(),
                 version,
                 verify: true,
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1373,10 +1538,36 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
 
     let cfg_verify_installed = cfg.clone();
     let cmd_tx_verify_installed = cmd_tx.clone();
+    let use_job_id_verify = use_job_id_check.clone();
+    let job_id_entry_verify = job_id_entry.clone();
+    let correlation_entry_verify = correlation_id_entry.clone();
     verify_installed.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_verify.text().to_string();
+        let correlation_id = correlation_entry_verify.text().to_string();
+        let job_id = if use_job_id_verify.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_verify_installed.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_verify_installed.lock().unwrap().clone();
         cmd_tx_verify_installed
-            .send(UiCommand::ToolchainVerifyInstalled { cfg })
+            .send(UiCommand::ToolchainVerifyInstalled {
+                cfg,
+                job_id,
+                correlation_id,
+            })
             .ok();
     });
 
@@ -1386,7 +1577,29 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let update_version_entry_update = update_version_entry.clone();
     let verify_update_check_update = verify_update_check.clone();
     let remove_cached_check_update = remove_cached_check.clone();
+    let use_job_id_update = use_job_id_check.clone();
+    let job_id_entry_update = job_id_entry.clone();
+    let correlation_entry_update = correlation_id_entry.clone();
     update_btn.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_update.text().to_string();
+        let correlation_id = correlation_entry_update.text().to_string();
+        let job_id = if use_job_id_update.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_update.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_update.lock().unwrap().clone();
         cmd_tx_update
             .send(UiCommand::ToolchainUpdate {
@@ -1395,6 +1608,8 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
                 version: update_version_entry_update.text().to_string(),
                 verify: verify_update_check_update.is_active(),
                 remove_cached: remove_cached_check_update.is_active(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1404,7 +1619,29 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let toolchain_id_entry_uninstall = toolchain_id_entry.clone();
     let remove_cached_check_uninstall = remove_cached_check.clone();
     let force_uninstall_check_uninstall = force_uninstall_check.clone();
+    let use_job_id_uninstall = use_job_id_check.clone();
+    let job_id_entry_uninstall = job_id_entry.clone();
+    let correlation_entry_uninstall = correlation_id_entry.clone();
     uninstall_btn.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_uninstall.text().to_string();
+        let correlation_id = correlation_entry_uninstall.text().to_string();
+        let job_id = if use_job_id_uninstall.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_uninstall.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_uninstall.lock().unwrap().clone();
         cmd_tx_uninstall
             .send(UiCommand::ToolchainUninstall {
@@ -1412,6 +1649,8 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
                 toolchain_id: toolchain_id_entry_uninstall.text().to_string(),
                 remove_cached: remove_cached_check_uninstall.is_active(),
                 force: force_uninstall_check_uninstall.is_active(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1420,13 +1659,37 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
     let cmd_tx_cleanup = cmd_tx.clone();
     let dry_run_check_cleanup = dry_run_check.clone();
     let remove_all_check_cleanup = remove_all_check.clone();
+    let use_job_id_cleanup = use_job_id_check.clone();
+    let job_id_entry_cleanup = job_id_entry.clone();
+    let correlation_entry_cleanup = correlation_id_entry.clone();
     cleanup_btn.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_cleanup.text().to_string();
+        let correlation_id = correlation_entry_cleanup.text().to_string();
+        let job_id = if use_job_id_cleanup.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_cleanup.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_cleanup.lock().unwrap().clone();
         cmd_tx_cleanup
             .send(UiCommand::ToolchainCleanupCache {
                 cfg,
                 dry_run: dry_run_check_cleanup.is_active(),
                 remove_all: remove_all_check_cleanup.is_active(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1495,6 +1758,25 @@ fn page_projects(
     page.container
         .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
 
+    let job_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
+    job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
+    job_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
+    page.container.insert_child_after(&job_grid, Some(&row));
+
     let form = gtk::Grid::builder()
         .row_spacing(8)
         .column_spacing(8)
@@ -1526,7 +1808,7 @@ fn page_projects(
     path_row.append(&browse_btn);
     form.attach(&path_row, 1, 2, 1, 1);
 
-    page.container.insert_child_after(&form, Some(&row));
+    page.container.insert_child_after(&form, Some(&job_grid));
 
     let config_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -1563,6 +1845,16 @@ fn page_projects(
     config_grid.attach(&config_actions, 1, 3, 1, 1);
 
     page.container.insert_child_after(&config_grid, Some(&form));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
 
     let cfg_refresh = cfg.clone();
     let cmd_tx_refresh = cmd_tx.clone();
@@ -1605,7 +1897,29 @@ fn page_projects(
     let path_entry_create = path_entry.clone();
     let name_entry_create = name_entry.clone();
     let template_combo_create = template_combo.clone();
+    let use_job_id_create = use_job_id_check.clone();
+    let job_id_entry_create = job_id_entry.clone();
+    let correlation_entry_create = correlation_id_entry.clone();
     create_btn.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_create.text().to_string();
+        let correlation_id = correlation_entry_create.text().to_string();
+        let job_id = if use_job_id_create.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_create.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_create.lock().unwrap().clone();
         let template_id = template_combo_create
             .active_id()
@@ -1617,6 +1931,8 @@ fn page_projects(
                 name: name_entry_create.text().to_string(),
                 path: path_entry_create.text().to_string(),
                 template_id,
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -1725,6 +2041,25 @@ fn page_targets(
     row.append(&list);
     row.append(&stream);
     page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+
+    let job_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
+    job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
+    job_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
+    page.container.insert_child_after(&job_grid, Some(&row));
 
     let status = gtk::Button::with_label("Status");
     let web_ui = gtk::Button::with_label("Web UI");
@@ -1843,9 +2178,19 @@ fn page_targets(
     default_row.append(&get_default_btn);
     form.attach(&default_row, 1, 5, 1, 1);
 
-    page.container.insert_child_after(&cuttlefish_buttons, Some(&row));
+    page.container.insert_child_after(&cuttlefish_buttons, Some(&job_grid));
     page.container.insert_child_after(&cuttlefish_grid, Some(&cuttlefish_buttons));
     page.container.insert_child_after(&form, Some(&cuttlefish_grid));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
 
     let cfg_list = cfg.clone();
     let cmd_tx_list = cmd_tx.clone();
@@ -1931,19 +2276,72 @@ fn page_targets(
 
     let cfg_start = cfg.clone();
     let cmd_tx_start = cmd_tx.clone();
+    let use_job_id_start = use_job_id_check.clone();
+    let job_id_entry_start = job_id_entry.clone();
+    let correlation_entry_start = correlation_id_entry.clone();
     start.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_start.text().to_string();
+        let correlation_id = correlation_entry_start.text().to_string();
+        let job_id = if use_job_id_start.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_start.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_start.lock().unwrap().clone();
         cmd_tx_start
-            .send(UiCommand::TargetsStartCuttlefish { cfg, show_full_ui: true })
+            .send(UiCommand::TargetsStartCuttlefish {
+                cfg,
+                show_full_ui: true,
+                job_id,
+                correlation_id,
+            })
             .ok();
     });
 
     let cfg_stop = cfg.clone();
     let cmd_tx_stop = cmd_tx.clone();
+    let use_job_id_stop = use_job_id_check.clone();
+    let job_id_entry_stop = job_id_entry.clone();
+    let correlation_entry_stop = correlation_id_entry.clone();
     stop.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_stop.text().to_string();
+        let correlation_id = correlation_entry_stop.text().to_string();
+        let job_id = if use_job_id_stop.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_stop.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_stop.lock().unwrap().clone();
         cmd_tx_stop
-            .send(UiCommand::TargetsStopCuttlefish { cfg })
+            .send(UiCommand::TargetsStopCuttlefish {
+                cfg,
+                job_id,
+                correlation_id,
+            })
             .ok();
     });
 
@@ -1974,7 +2372,29 @@ fn page_targets(
     let branch_entry_install = cuttlefish_branch_entry.clone();
     let target_entry_install = cuttlefish_target_entry.clone();
     let build_entry_install = cuttlefish_build_entry.clone();
+    let use_job_id_install = use_job_id_check.clone();
+    let job_id_entry_install = job_id_entry.clone();
+    let correlation_entry_install = correlation_id_entry.clone();
     install.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_install.text().to_string();
+        let correlation_id = correlation_entry_install.text().to_string();
+        let job_id = if use_job_id_install.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_install.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_install.lock().unwrap().clone();
         cmd_tx_install
             .send(UiCommand::TargetsInstallCuttlefish {
@@ -1983,6 +2403,8 @@ fn page_targets(
                 branch: branch_entry_install.text().to_string(),
                 target: target_entry_install.text().to_string(),
                 build_id: build_entry_install.text().to_string(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2032,13 +2454,37 @@ fn page_targets(
     let cmd_tx_install_apk = cmd_tx.clone();
     let target_entry_install = target_entry.clone();
     let apk_entry_install = apk_entry.clone();
+    let use_job_id_install_apk = use_job_id_check.clone();
+    let job_id_entry_install_apk = job_id_entry.clone();
+    let correlation_entry_install_apk = correlation_id_entry.clone();
     install_apk.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_install_apk.text().to_string();
+        let correlation_id = correlation_entry_install_apk.text().to_string();
+        let job_id = if use_job_id_install_apk.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_install_apk.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_install_apk.lock().unwrap().clone();
         cmd_tx_install_apk
             .send(UiCommand::TargetsInstallApk {
                 cfg,
                 target_id: target_entry_install.text().to_string(),
                 apk_path: apk_entry_install.text().to_string(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2048,7 +2494,29 @@ fn page_targets(
     let target_entry_launch = target_entry.clone();
     let app_id_entry_launch = app_id_entry.clone();
     let activity_entry_launch = activity_entry.clone();
+    let use_job_id_launch = use_job_id_check.clone();
+    let job_id_entry_launch = job_id_entry.clone();
+    let correlation_entry_launch = correlation_id_entry.clone();
     launch_app.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_launch.text().to_string();
+        let correlation_id = correlation_entry_launch.text().to_string();
+        let job_id = if use_job_id_launch.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_launch.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_launch.lock().unwrap().clone();
         cmd_tx_launch
             .send(UiCommand::TargetsLaunchApp {
@@ -2056,6 +2524,8 @@ fn page_targets(
                 target_id: target_entry_launch.text().to_string(),
                 application_id: app_id_entry_launch.text().to_string(),
                 activity: activity_entry_launch.text().to_string(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2146,6 +2616,35 @@ fn page_console(
 
     page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
 
+    let job_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
+    job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
+    job_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
+    page.container.insert_child_after(&job_grid, Some(&form));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
+
     let artifacts_label = gtk::Label::builder()
         .label("Artifacts (filters)")
         .xalign(0.0)
@@ -2200,7 +2699,7 @@ fn page_console(
     list_row.append(&list_artifacts);
     artifact_form.attach(&list_row, 1, 5, 1, 1);
 
-    page.container.insert_child_after(&artifacts_label, Some(&form));
+    page.container.insert_child_after(&artifacts_label, Some(&job_grid));
     page.container.insert_child_after(&artifact_form, Some(&artifacts_label));
 
     let parent_window = parent.clone();
@@ -2245,7 +2744,29 @@ fn page_console(
     let args_entry_run = args_entry.clone();
     let variant_combo_run = variant_combo.clone();
     let clean_check_run = clean_check.clone();
+    let use_job_id_run = use_job_id_check.clone();
+    let job_id_entry_run = job_id_entry.clone();
+    let correlation_entry_run = correlation_id_entry.clone();
     run.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_run.text().to_string();
+        let correlation_id = correlation_entry_run.text().to_string();
+        let job_id = if use_job_id_run.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_run.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_run.lock().unwrap().clone();
         let project_ref = project_entry_run.text().to_string();
         let module = module_entry_run.text().to_string();
@@ -2267,6 +2788,8 @@ fn page_console(
                 tasks,
                 clean_first,
                 gradle_args,
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2326,6 +2849,25 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     page.container
         .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
 
+    let job_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("correlation id")
+        .hexpand(true)
+        .build();
+    job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
+    job_grid.attach(&job_id_entry, 1, 0, 1, 1);
+    job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
+    page.container.insert_child_after(&job_grid, Some(&row));
+
     let form = gtk::Grid::builder()
         .row_spacing(8)
         .column_spacing(8)
@@ -2370,7 +2912,17 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     checkbox_row.append(&include_recent);
     form.attach(&checkbox_row, 1, 2, 1, 1);
 
-    page.container.insert_child_after(&form, Some(&row));
+    page.container.insert_child_after(&form, Some(&job_grid));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
 
     let cfg_list = cfg.clone();
     let cmd_tx_list = cmd_tx.clone();
@@ -2386,7 +2938,29 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     let include_toolchain_support = include_toolchain.clone();
     let include_recent_support = include_recent.clone();
     let recent_limit_support = recent_limit_entry.clone();
+    let use_job_id_support = use_job_id_check.clone();
+    let job_id_entry_support = job_id_entry.clone();
+    let correlation_entry_support = correlation_id_entry.clone();
     export_support.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_support.text().to_string();
+        let correlation_id = correlation_entry_support.text().to_string();
+        let job_id = if use_job_id_support.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_support.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_support.lock().unwrap().clone();
         let limit = recent_limit_support
             .text()
@@ -2400,6 +2974,8 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
                 include_toolchain_provenance: include_toolchain_support.is_active(),
                 include_recent_runs: include_recent_support.is_active(),
                 recent_runs_limit: limit,
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2407,12 +2983,36 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     let cfg_evidence = cfg.clone();
     let cmd_tx_evidence = cmd_tx.clone();
     let run_id_evidence = run_id_entry.clone();
+    let use_job_id_evidence = use_job_id_check.clone();
+    let job_id_entry_evidence = job_id_entry.clone();
+    let correlation_entry_evidence = correlation_id_entry.clone();
     export_evidence.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_evidence.text().to_string();
+        let correlation_id = correlation_entry_evidence.text().to_string();
+        let job_id = if use_job_id_evidence.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+        {
+            let mut cfg = cfg_evidence.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
         let cfg = cfg_evidence.lock().unwrap().clone();
         cmd_tx_evidence
             .send(UiCommand::ObserveExportEvidence {
                 cfg,
                 run_id: run_id_evidence.text().to_string(),
+                job_id,
+                correlation_id,
             })
             .ok();
     });
@@ -2853,6 +3453,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             project_id,
             target_id,
             toolchain_set_id,
+            correlation_id,
         } => {
             ui.send(AppEvent::HomeResetStatus).ok();
             ui.send(AppEvent::Log { page: "home", line: format!("Connecting to JobService at {}\n", cfg.job_addr) }).ok();
@@ -2870,6 +3471,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 project_id: to_optional_id(&project_id),
                 target_id: to_optional_id(&target_id),
                 toolchain_set_id: to_optional_id(&toolchain_set_id),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
@@ -2916,6 +3518,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             created_before,
             finished_after,
             finished_before,
+            correlation_id,
             page_size,
             page_token,
         } => {
@@ -2960,6 +3563,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 created_before: created_before.map(|ms| Timestamp { unix_millis: ms }),
                 finished_after: finished_after.map(|ms| Timestamp { unix_millis: ms }),
                 finished_before: finished_before.map(|ms| Timestamp { unix_millis: ms }),
+                correlation_id: correlation_id.trim().to_string(),
             };
 
             let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
@@ -3121,7 +3725,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ToolchainInstall { cfg, provider_id, version, verify } => {
+        UiCommand::ToolchainInstall {
+            cfg,
+            provider_id,
+            version,
+            verify,
+            job_id,
+            correlation_id,
+        } => {
             let version = version.trim().to_string();
             if version.is_empty() {
                 ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain install requires a version.\n".into() }).ok();
@@ -3134,7 +3745,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 version,
                 install_root: "".into(),
                 verify_hash: verify,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3151,7 +3766,15 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ToolchainUpdate { cfg, toolchain_id, version, verify, remove_cached } => {
+        UiCommand::ToolchainUpdate {
+            cfg,
+            toolchain_id,
+            version,
+            verify,
+            remove_cached,
+            job_id,
+            correlation_id,
+        } => {
             let toolchain_id = toolchain_id.trim().to_string();
             let version = version.trim().to_string();
             if toolchain_id.is_empty() || version.is_empty() {
@@ -3165,7 +3788,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 version,
                 verify_hash: verify,
                 remove_cached_artifact: remove_cached,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3182,7 +3809,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ToolchainUninstall { cfg, toolchain_id, remove_cached, force } => {
+        UiCommand::ToolchainUninstall {
+            cfg,
+            toolchain_id,
+            remove_cached,
+            force,
+            job_id,
+            correlation_id,
+        } => {
             let toolchain_id = toolchain_id.trim().to_string();
             if toolchain_id.is_empty() {
                 ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain uninstall requires toolchain id.\n".into() }).ok();
@@ -3194,7 +3828,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 toolchain_id: Some(Id { value: toolchain_id }),
                 remove_cached_artifact: remove_cached,
                 force,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3211,13 +3849,23 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ToolchainCleanupCache { cfg, dry_run, remove_all } => {
+        UiCommand::ToolchainCleanupCache {
+            cfg,
+            dry_run,
+            remove_all,
+            job_id,
+            correlation_id,
+        } => {
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Cleaning cache via {} (dry_run={dry_run}, remove_all={remove_all})\n", cfg.toolchain_addr) }).ok();
             let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
             let resp = client.cleanup_toolchain_cache(CleanupToolchainCacheRequest {
                 dry_run,
                 remove_all,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3276,7 +3924,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ToolchainVerifyInstalled { cfg } => {
+        UiCommand::ToolchainVerifyInstalled {
+            cfg,
+            job_id,
+            correlation_id,
+        } => {
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Verifying installed toolchains via {}\n", cfg.toolchain_addr) }).ok();
             let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
             let resp = client.list_installed(ListInstalledRequest { kind: ToolchainKind::Unspecified as i32 }).await?.into_inner();
@@ -3291,7 +3943,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     };
                     let verify = client.verify_toolchain(VerifyToolchainRequest {
                         toolchain_id: Some(Id { value: id.clone() }),
-                        job_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.trim().to_string(),
                     }).await?.into_inner();
 
                     if verify.verified {
@@ -3541,7 +4197,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ProjectCreate { cfg, name, path, template_id } => {
+        UiCommand::ProjectCreate {
+            cfg,
+            name,
+            path,
+            template_id,
+            job_id,
+            correlation_id,
+        } => {
             let name = name.trim().to_string();
             let path = path.trim().to_string();
             let template_id = template_id.trim().to_string();
@@ -3567,6 +4230,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 template_id: Some(Id { value: template_id.clone() }),
                 params: vec![],
                 toolchain_set_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -3783,6 +4451,8 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             branch,
             target,
             build_id,
+            job_id,
+            correlation_id,
         } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
             let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
@@ -3792,7 +4462,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     branch: branch.trim().to_string(),
                     target: target.trim().to_string(),
                     build_id: build_id.trim().to_string(),
-                    job_id: None,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.trim().to_string(),
                 })
                 .await?
                 .into_inner();
@@ -3835,10 +4509,25 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             ui.send(AppEvent::SetCuttlefishBuildId { build_id: resp.build_id }).ok();
         }
 
-        UiCommand::TargetsStartCuttlefish { cfg, show_full_ui } => {
+        UiCommand::TargetsStartCuttlefish {
+            cfg,
+            show_full_ui,
+            job_id,
+            correlation_id,
+        } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
             let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
-            let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui, job_id: None }).await?.into_inner();
+            let resp = client
+                .start_cuttlefish(StartCuttlefishRequest {
+                    show_full_ui,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.trim().to_string(),
+                })
+                .await?
+                .into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "targets", line: format!("Cuttlefish start job: {job_id}\n") }).ok();
@@ -3855,10 +4544,23 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::TargetsStopCuttlefish { cfg } => {
+        UiCommand::TargetsStopCuttlefish {
+            cfg,
+            job_id,
+            correlation_id,
+        } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
             let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
-            let resp = client.stop_cuttlefish(StopCuttlefishRequest { job_id: None }).await?.into_inner();
+            let resp = client
+                .stop_cuttlefish(StopCuttlefishRequest {
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.trim().to_string(),
+                })
+                .await?
+                .into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "targets", line: format!("Cuttlefish stop job: {job_id}\n") }).ok();
@@ -3885,7 +4587,13 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::TargetsInstallApk { cfg, target_id, apk_path } => {
+        UiCommand::TargetsInstallApk {
+            cfg,
+            target_id,
+            apk_path,
+            job_id,
+            correlation_id,
+        } => {
             let target_id = target_id.trim().to_string();
             let apk_path = apk_path.trim().to_string();
             if target_id.is_empty() {
@@ -3903,7 +4611,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: Some(Id { value: target_id.clone() }),
                 project_id: None,
                 apk_path: apk_path.clone(),
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -3927,7 +4639,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::TargetsLaunchApp { cfg, target_id, application_id, activity } => {
+        UiCommand::TargetsLaunchApp {
+            cfg,
+            target_id,
+            application_id,
+            activity,
+            job_id,
+            correlation_id,
+        } => {
             let target_id = target_id.trim().to_string();
             let application_id = application_id.trim().to_string();
             let activity = activity.trim().to_string();
@@ -3946,7 +4665,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: Some(Id { value: target_id.clone() }),
                 application_id: application_id.clone(),
                 activity,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -4036,6 +4759,8 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             include_toolchain_provenance,
             include_recent_runs,
             recent_runs_limit,
+            job_id,
+            correlation_id,
         } => {
             ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
@@ -4045,10 +4770,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 include_toolchain_provenance,
                 include_recent_runs,
                 recent_runs_limit,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
                 project_id: None,
                 target_id: None,
                 toolchain_set_id: None,
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -4069,7 +4798,12 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ObserveExportEvidence { cfg, run_id } => {
+        UiCommand::ObserveExportEvidence {
+            cfg,
+            run_id,
+            job_id,
+            correlation_id,
+        } => {
             let run_id = run_id.trim().to_string();
             if run_id.is_empty() {
                 ui.send(AppEvent::Log { page: "evidence", line: "Run id is required for evidence export.\n".into() }).ok();
@@ -4079,7 +4813,11 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                 run_id: Some(Id { value: run_id.clone() }),
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
+                correlation_id: correlation_id.trim().to_string(),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -4109,6 +4847,8 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             tasks,
             clean_first,
             gradle_args,
+            job_id,
+            correlation_id,
         } => {
             if project_ref.trim().is_empty() {
                 ui.send(AppEvent::Log { page: "console", line: "Project path or id is required.\n".into() }).ok();
@@ -4123,10 +4863,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 variant: variant as i32,
                 clean_first,
                 gradle_args,
-                job_id: None,
+                job_id: job_id
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| Id { value: value.clone() }),
                 module,
                 variant_name,
                 tasks,
+                correlation_id: correlation_id.trim().to_string(),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {

@@ -20,9 +20,11 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - The Cuttlefish docs button opens https://source.android.com/docs/devices/cuttlefish/get-started.
 - The Targets page includes an "Open Cuttlefish Env" button using AADK_CUTTLEFISH_ENV_URL (default https://localhost:1443).
 - Observe export requests include optional metadata fields (project/target/toolchain ids), currently unset in the UI.
+- Toolchains/Projects/Targets/Console/Evidence pages include a "Use job id" toggle plus
+  correlation id entry to attach work to existing jobs and grouped workflows.
 
 ## Service coverage
-- Home: start arbitrary jobs with params/ids, watch job streams, live status panel.
+- Home: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
 - Job History: list jobs and event history with filters; export logs.
 - Toolchains: list providers/available/installed/sets, install/verify, update/uninstall, cache cleanup, create/set/get toolchain sets.
 - Projects: list templates, create/open, list recent, set project config, use active defaults.

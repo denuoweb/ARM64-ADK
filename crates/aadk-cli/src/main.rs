@@ -79,6 +79,8 @@ enum JobCmd {
     StartDemo {
         #[arg(long, default_value_t = default_job_addr())]
         addr: String,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
     /// Run a job by type and optionally stream events
     Run {
@@ -93,6 +95,8 @@ enum JobCmd {
         target_id: Option<String>,
         #[arg(long)]
         toolchain_set_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
         #[arg(long)]
         no_stream: bool,
     },
@@ -112,6 +116,8 @@ enum JobCmd {
         finished_after: Option<i64>,
         #[arg(long)]
         finished_before: Option<i64>,
+        #[arg(long)]
+        correlation_id: Option<String>,
         #[arg(long, default_value_t = 50)]
         page_size: u32,
         #[arg(long, default_value = "")]
@@ -209,6 +215,10 @@ enum ToolchainCmd {
         #[arg(long)]
         remove_cached: bool,
         #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// Uninstall a toolchain
@@ -223,6 +233,10 @@ enum ToolchainCmd {
         #[arg(long)]
         force: bool,
         #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// Cleanup cached toolchain artifacts
@@ -235,6 +249,10 @@ enum ToolchainCmd {
         dry_run: bool,
         #[arg(long)]
         remove_all: bool,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
         #[arg(long)]
         no_stream: bool,
     },
@@ -264,11 +282,19 @@ enum TargetsCmd {
         addr: String,
         #[arg(long)]
         show_full_ui: bool,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
     /// Stop Cuttlefish and return a job id
     StopCuttlefish {
         #[arg(long, default_value_t = default_targets_addr())]
         addr: String,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
     /// Get Cuttlefish status
     CuttlefishStatus {
@@ -281,6 +307,10 @@ enum TargetsCmd {
         addr: String,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
 }
 
@@ -310,6 +340,10 @@ enum ProjectCmd {
         path: String,
         #[arg(long)]
         template_id: String,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
     /// Open an existing project
     Open {
@@ -366,6 +400,10 @@ enum ObserveCmd {
         include_recent_runs: bool,
         #[arg(long, default_value_t = 10)]
         recent_runs_limit: u32,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
     /// Export an evidence bundle for a run id
     ExportEvidence {
@@ -374,6 +412,10 @@ enum ObserveCmd {
         #[arg(long, default_value_t = default_job_addr())]
         job_addr: String,
         run_id: String,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
     },
 }
 
@@ -501,6 +543,10 @@ enum BuildCmd {
         #[arg(long)]
         clean_first: bool,
         #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// List build artifacts
@@ -590,7 +636,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
-            JobCmd::StartDemo { addr } => {
+            JobCmd::StartDemo { addr, correlation_id } => {
                 update_cli_config(|cfg| {
                     cfg.job_addr = addr.clone();
                     cfg.last_job_type = "demo.job".into();
@@ -602,6 +648,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     project_id: None,
                     target_id: None,
                     toolchain_set_id: None,
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
 
                 let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
@@ -620,6 +667,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 project_id,
                 target_id,
                 toolchain_set_id,
+                correlation_id,
                 no_stream,
             } => {
                 if job_type.trim().is_empty() {
@@ -640,6 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     toolchain_set_id: toolchain_set_id
                         .as_ref()
                         .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
                 let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
@@ -658,6 +707,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 created_before,
                 finished_after,
                 finished_before,
+                correlation_id,
                 page_size,
                 page_token,
             } => {
@@ -673,6 +723,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     created_before: created_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
                     finished_after: finished_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
                     finished_before: finished_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    correlation_id: correlation_id.unwrap_or_default(),
                 };
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client
@@ -878,6 +929,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 version,
                 verify_hash,
                 remove_cached,
+                job_id,
+                correlation_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -895,7 +948,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         version,
                         verify_hash,
                         remove_cached_artifact: remove_cached,
-                        job_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
                     })
                     .await?
                     .into_inner();
@@ -911,6 +968,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 toolchain_id,
                 remove_cached,
                 force,
+                job_id,
+                correlation_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -927,7 +986,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         toolchain_id: Some(Id { value: toolchain_id.clone() }),
                         remove_cached_artifact: remove_cached,
                         force,
-                        job_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
                     })
                     .await?
                     .into_inner();
@@ -942,6 +1005,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 job_addr,
                 dry_run,
                 remove_all,
+                job_id,
+                correlation_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -953,7 +1018,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .cleanup_toolchain_cache(CleanupToolchainCacheRequest {
                         dry_run,
                         remove_all,
-                        job_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
                     })
                     .await?
                     .into_inner();
@@ -994,17 +1063,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("no default target configured");
                 }
             }
-            TargetsCmd::StartCuttlefish { addr, show_full_ui } => {
+            TargetsCmd::StartCuttlefish {
+                addr,
+                show_full_ui,
+                job_id,
+                correlation_id,
+            } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.start_cuttlefish(StartCuttlefishRequest { show_full_ui, job_id: None }).await?.into_inner();
+                let resp = client
+                    .start_cuttlefish(StartCuttlefishRequest {
+                        show_full_ui,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                    })
+                    .await?
+                    .into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
-            TargetsCmd::StopCuttlefish { addr } => {
+            TargetsCmd::StopCuttlefish {
+                addr,
+                job_id,
+                correlation_id,
+            } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.stop_cuttlefish(StopCuttlefishRequest { job_id: None }).await?.into_inner();
+                let resp = client
+                    .stop_cuttlefish(StopCuttlefishRequest {
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                    })
+                    .await?
+                    .into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
             }
@@ -1017,7 +1114,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}\t{}", kv.key, kv.value);
                 }
             }
-            TargetsCmd::InstallCuttlefish { addr, force } => {
+            TargetsCmd::InstallCuttlefish {
+                addr,
+                force,
+                job_id,
+                correlation_id,
+            } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
                 let resp = client
@@ -1026,7 +1128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         branch: "".into(),
                         target: "".into(),
                         build_id: "".into(),
-                        job_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        correlation_id: correlation_id.unwrap_or_default(),
                     })
                     .await?
                     .into_inner();
@@ -1075,7 +1181,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            ProjectCmd::Create { addr, job_addr, name, path, template_id } => {
+            ProjectCmd::Create {
+                addr,
+                job_addr,
+                name,
+                path,
+                template_id,
+                job_id,
+                correlation_id,
+            } => {
                 update_cli_config(|cfg| {
                     cfg.project_addr = addr.clone();
                     cfg.job_addr = job_addr.clone();
@@ -1087,6 +1201,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     template_id: Some(Id { value: template_id }),
                     params: vec![],
                     toolchain_set_id: None,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -1267,6 +1386,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 include_toolchain_provenance,
                 include_recent_runs,
                 recent_runs_limit,
+                job_id,
+                correlation_id,
             } => {
                 update_cli_config(|cfg| {
                     cfg.observe_addr = addr.clone();
@@ -1279,10 +1400,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_toolchain_provenance,
                     include_recent_runs,
                     recent_runs_limit,
-                    job_id: None,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
                     project_id: None,
                     target_id: None,
                     toolchain_set_id: None,
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
@@ -1290,7 +1415,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stream_job_events_until_done(&job_addr, &job_id).await?;
                 }
             }
-            ObserveCmd::ExportEvidence { addr, job_addr, run_id } => {
+            ObserveCmd::ExportEvidence {
+                addr,
+                job_addr,
+                run_id,
+                job_id,
+                correlation_id,
+            } => {
                 update_cli_config(|cfg| {
                     cfg.observe_addr = addr.clone();
                     cfg.job_addr = job_addr.clone();
@@ -1298,7 +1429,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                     run_id: Some(Id { value: run_id }),
-                    job_id: None,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
@@ -1319,6 +1454,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 task,
                 gradle_arg,
                 clean_first,
+                job_id,
+                correlation_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -1355,10 +1492,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     variant: variant as i32,
                     clean_first,
                     gradle_args,
-                    job_id: None,
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
                     module: module.unwrap_or_default().trim().to_string(),
                     variant_name: variant_name.unwrap_or_default().trim().to_string(),
                     tasks,
+                    correlation_id: correlation_id.unwrap_or_default(),
                 }).await?.into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
