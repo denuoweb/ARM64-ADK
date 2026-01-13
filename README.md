@@ -125,6 +125,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - `include_history` replay followed by live event streaming.
 - ListJobs/ListJobHistory APIs with pagination and filters (type/state/time, event kinds).
 - Validates job types; demo job runner remains for smoke tests while services publish real jobs.
+- Supports correlation_id grouping (StartJob + ListJobs filter) and reserves workflow.pipeline for multi-step orchestration.
 
 ### ToolchainService (aadk-toolchain)
 - Provider catalog with host-aware artifacts (override via `AADK_TOOLCHAIN_CATALOG`).
@@ -159,6 +160,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
 - Console: run Gradle builds with module/variant/task selection, list artifacts with filters grouped by module, stream logs.
 - Evidence: list runs, export support/evidence bundles and stream job events.
+- Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
 
 ### CLI (aadk-cli)
 - Job run/list/watch/history/export + demo start/cancel.
@@ -167,6 +169,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Projects list-templates/list-recent/create/open/use-active-defaults.
 - Observe list-runs/export-support/export-evidence.
 - Build run/list-artifacts with module/variant/tasks + artifact filters.
+- Long-running commands accept --job-id/--correlation-id for workflow grouping.
 
 ## Extending from here (recommended order)
 1. Add transparency log validation to ToolchainService verification.

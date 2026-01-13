@@ -40,9 +40,12 @@ Default addresses (override with env vars):
 - JobService is the event bus. Toolchain/Build/Targets publish job events; UI streams events.
 - Progress payloads include job-specific metrics for build/project/toolchain/target/observe workflows.
 - BuildService resolves project paths via ProjectService GetProject for ids; direct paths are accepted.
+- BuildService loads a Gradle model snapshot after project evaluation to validate modules/variants.
 - TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
 - ObserveService persists run history and uses JobService history plus state/env snapshots for bundle contents.
+- Correlation ids group related jobs across services; JobService ListJobs can filter by correlation_id.
+- workflow.pipeline is reserved for multi-step orchestration that spans multiple services.
 
 ## Shared data and locations
 - Job state: ~/.local/share/aadk/state/jobs.json
