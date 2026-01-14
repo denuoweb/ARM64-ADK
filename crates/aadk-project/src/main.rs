@@ -16,7 +16,7 @@ use aadk_proto::aadk::v1::{
     JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged,
     KeyValue, ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
-    PublishJobEventRequest, SetProjectConfigRequest, SetProjectConfigResponse, StartJobRequest,
+    PublishJobEventRequest, RunId, SetProjectConfigRequest, SetProjectConfigResponse, StartJobRequest,
     Template, Timestamp, StreamJobEventsRequest, GetJobRequest, GetProjectRequest, GetProjectResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,8 @@ struct CreateRequestParts {
     template_id: String,
     toolchain_set_id: Option<String>,
     resolved_defaults: ResolvedTemplateDefaults,
+    run_id: Option<String>,
+    correlation_id: String,
 }
 
 fn default_schema_version() -> u32 {
@@ -689,6 +691,7 @@ async fn start_job(
     params: Vec<KeyValue>,
     correlation_id: &str,
     project_id: Option<Id>,
+    run_id: Option<RunId>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -698,6 +701,7 @@ async fn start_job(
             target_id: None,
             toolchain_set_id: None,
             correlation_id: correlation_id.to_string(),
+            run_id,
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -977,6 +981,17 @@ fn project_progress_metrics(
         metric("template_id", &req.template_id),
         metric("template_name", &template.name),
     ];
+    if let Some(run_id) = req
+        .run_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        metrics.push(metric("run_id", run_id));
+    }
+    if !req.correlation_id.trim().is_empty() {
+        metrics.push(metric("correlation_id", req.correlation_id.trim()));
+    }
     if !req.resolved_defaults.min_sdk.trim().is_empty() {
         metrics.push(metric("min_sdk", &req.resolved_defaults.min_sdk));
     }
@@ -1284,6 +1299,7 @@ impl ProjectService for Svc {
                 Some(Id {
                     value: project_id.clone(),
                 }),
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -1296,6 +1312,8 @@ impl ProjectService for Svc {
             template_id: template_id.clone(),
             toolchain_set_id: req.toolchain_set_id.map(|id| id.value),
             resolved_defaults,
+            run_id: req.run_id.as_ref().map(|id| id.value.clone()),
+            correlation_id: correlation_id.to_string(),
         };
 
         let state = self.state.clone();

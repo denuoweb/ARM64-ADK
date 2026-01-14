@@ -17,7 +17,7 @@ use aadk_proto::aadk::v1::{
     InstallCuttlefishRequest, InstallCuttlefishResponse, JobCompleted, JobEvent, JobFailed,
     JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
     LaunchRequest, LaunchResponse, ListTargetsRequest, ListTargetsResponse, LogChunk, LogcatEvent,
-    PublishJobEventRequest, ResolveCuttlefishBuildRequest, ResolveCuttlefishBuildResponse,
+    PublishJobEventRequest, ResolveCuttlefishBuildRequest, ResolveCuttlefishBuildResponse, RunId,
     SetDefaultTargetRequest, SetDefaultTargetResponse, StartCuttlefishRequest,
     StartCuttlefishResponse, StartJobRequest, StopAppRequest, StopAppResponse, StopCuttlefishRequest,
     StopCuttlefishResponse, StreamLogcatRequest, Target, TargetKind, Timestamp,
@@ -1867,6 +1867,7 @@ async fn start_job(
     project_id: Option<Id>,
     target_id: Option<Id>,
     correlation_id: &str,
+    run_id: Option<RunId>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -1876,6 +1877,7 @@ async fn start_job(
             target_id,
             toolchain_set_id: None,
             correlation_id: correlation_id.to_string(),
+            run_id,
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -4151,6 +4153,7 @@ impl TargetService for Svc {
                 req.project_id,
                 Some(Id { value: target_id.clone() }),
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -4194,6 +4197,7 @@ impl TargetService for Svc {
                 None,
                 Some(Id { value: target_id.clone() }),
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -4242,6 +4246,7 @@ impl TargetService for Svc {
                 None,
                 Some(Id { value: target_id.clone() }),
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -4307,6 +4312,7 @@ impl TargetService for Svc {
                 None,
                 None,
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -4387,6 +4393,7 @@ impl TargetService for Svc {
                 None,
                 None,
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -4421,6 +4428,7 @@ impl TargetService for Svc {
                 None,
                 None,
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {

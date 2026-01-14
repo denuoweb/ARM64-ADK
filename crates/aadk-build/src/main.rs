@@ -18,7 +18,7 @@ use aadk_proto::aadk::v1::{
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildResponse, BuildVariant, ErrorCode,
     ErrorDetail, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
     JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListArtifactsRequest,
-    ListArtifactsResponse, LogChunk, PublishJobEventRequest, StartJobRequest,
+    ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId, StartJobRequest,
     StreamJobEventsRequest, GetJobRequest, GetProjectRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -290,6 +290,7 @@ async fn start_job(
     params: Vec<KeyValue>,
     correlation_id: &str,
     project_id: Option<Id>,
+    run_id: Option<RunId>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -299,6 +300,7 @@ async fn start_job(
             target_id: None,
             toolchain_set_id: None,
             correlation_id: correlation_id.to_string(),
+            run_id,
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -391,6 +393,17 @@ fn build_progress_metrics(
         metric("variant", plan.variant.label.clone()),
         metric("clean_first", req.clean_first),
     ];
+    if let Some(run_id) = req
+        .run_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        metrics.push(metric("run_id", run_id));
+    }
+    if !req.correlation_id.trim().is_empty() {
+        metrics.push(metric("correlation_id", req.correlation_id.trim()));
+    }
 
     if let Some(module) = plan.module.as_ref() {
         if !module.trim().is_empty() {
@@ -2452,6 +2465,7 @@ impl BuildService for Svc {
                 params,
                 correlation_id,
                 Some(project_id),
+                req.run_id.clone(),
             )
             .await?
         } else {

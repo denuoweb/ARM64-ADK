@@ -24,7 +24,7 @@ Update this file whenever ProjectService behavior changes or when commits touchi
   pointing at SampleConsole/ for the bundled Android sample.
 - create_project scaffolds files from the template directory, streams job progress/logs to
   JobService, and persists metadata in .aadk/project.json plus the recent list; requests can
-  attach to an existing job_id and supply correlation_id for grouped workflows.
+  attach to an existing job_id and supply correlation_id/run_id for grouped workflows.
 - create_project progress metrics include project/template metadata plus copied/total files and
   resolved minSdk/compileSdk values.
 - open_project reads .aadk/project.json when present, otherwise generates metadata and persists it.

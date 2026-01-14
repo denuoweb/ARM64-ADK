@@ -26,7 +26,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - Job progress metrics include target/app identifiers, adb serials, install/launch inputs, and
   target health/ABI/SDK details plus Cuttlefish env/artifact details.
 - InstallApk, Launch, StopApp, and Cuttlefish job RPCs accept optional job_id for existing jobs
-  and correlation_id for grouping related workflows.
+  plus correlation_id and run_id for grouping related workflows.
 - Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
 - Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.
 - GPU mode can be set via AADK_CUTTLEFISH_GPU_MODE and is appended to launch arguments when starting Cuttlefish.
