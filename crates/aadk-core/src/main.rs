@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    cmp::{Ordering, Reverse},
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     fs,
     io,
     net::SocketAddr,
@@ -11,11 +12,11 @@ use std::{
 use aadk_proto::aadk::v1::{
     job_service_server::{JobService, JobServiceServer},
     CancelJobRequest, CancelJobResponse, ErrorCode, ErrorDetail, GetJobRequest, GetJobResponse, Id,
-    Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter,
+    Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter, RunId,
     JobLogAppended, JobProgress, JobProgressUpdated, JobRef, JobState, JobStateChanged, KeyValue,
     ListJobHistoryRequest, ListJobHistoryResponse, ListJobsRequest, ListJobsResponse, LogChunk,
     PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation,
-    StartJobRequest, StartJobResponse, StreamJobEventsRequest, Timestamp,
+    StartJobRequest, StartJobResponse, StreamJobEventsRequest, StreamRunEventsRequest, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex, watch};
@@ -33,6 +34,10 @@ const PERSIST_DEBOUNCE_MS: u64 = 250;
 const RETENTION_TICK_SECS: u64 = 300;
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
+const DEFAULT_RUN_STREAM_BUFFER_MAX: usize = 512;
+const DEFAULT_RUN_STREAM_MAX_DELAY_MS: u64 = 1500;
+const DEFAULT_RUN_STREAM_DISCOVERY_MS: u64 = 750;
+const DEFAULT_RUN_STREAM_FLUSH_MS: u64 = 200;
 
 #[derive(Clone, Copy)]
 struct RetentionPolicy {
@@ -59,6 +64,7 @@ struct PersistedJob {
     finished_at_unix_millis: Option<i64>,
     display_name: String,
     correlation_id: String,
+    run_id: String,
     project_id: Option<String>,
     target_id: Option<String>,
     toolchain_set_id: Option<String>,
@@ -348,6 +354,11 @@ impl PersistedJob {
             finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
             display_name: job.display_name.clone(),
             correlation_id: job.correlation_id.clone(),
+            run_id: job
+                .run_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
             project_id: job.project_id.as_ref().map(|id| id.value.clone()),
             target_id: job.target_id.as_ref().map(|id| id.value.clone()),
             toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()),
@@ -369,6 +380,7 @@ impl PersistedJob {
             finished_at_unix_millis,
             display_name,
             correlation_id,
+            run_id,
             project_id,
             target_id,
             toolchain_set_id,
@@ -393,6 +405,11 @@ impl PersistedJob {
         } else {
             correlation_id
         };
+        let run_ref = if run_id.trim().is_empty() {
+            None
+        } else {
+            Some(RunId { value: run_id })
+        };
 
         let job = Job {
             job_id: Some(Id { value: job_id.clone() }),
@@ -405,6 +422,7 @@ impl PersistedJob {
             finished_at: finished_at_unix_millis.map(|ms| Timestamp { unix_millis: ms }),
             display_name,
             correlation_id: correlation,
+            run_id: run_ref,
             project_id: project_id.map(|value| Id { value }),
             target_id: target_id.map(|value| Id { value }),
             toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
@@ -505,6 +523,17 @@ fn job_matches_filter(job: &Job, filter: &JobFilter) -> bool {
     {
         return false;
     }
+    if let Some(run_id) = filter
+        .run_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let job_run_id = job.run_id.as_ref().map(|id| id.value.as_str());
+        if job_run_id != Some(run_id) {
+            return false;
+        }
+    }
     if !filter.states.is_empty() && !filter.states.contains(&job.state) {
         return false;
     }
@@ -568,6 +597,96 @@ fn event_matches_filter(event: &JobEvent, filter: &JobHistoryFilter) -> bool {
         }
     }
     true
+}
+
+#[derive(Clone)]
+struct RunStreamConfig {
+    buffer_max_events: usize,
+    max_delay: Duration,
+    discovery_interval: Duration,
+    flush_interval: Duration,
+}
+
+#[derive(Clone)]
+struct BufferedEvent {
+    at_unix_millis: i64,
+    seq: u64,
+    event: JobEvent,
+}
+
+impl Ord for BufferedEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.at_unix_millis.cmp(&other.at_unix_millis) {
+            Ordering::Equal => self.seq.cmp(&other.seq),
+            ordering => ordering,
+        }
+    }
+}
+
+impl PartialOrd for BufferedEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for BufferedEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.at_unix_millis == other.at_unix_millis && self.seq == other.seq
+    }
+}
+
+impl Eq for BufferedEvent {}
+
+fn event_timestamp(event: &JobEvent) -> i64 {
+    event
+        .at
+        .as_ref()
+        .map(|ts| ts.unix_millis)
+        .unwrap_or_else(now_millis)
+}
+
+fn job_matches_run(job: &Job, run_id: &str, correlation_id: &str) -> bool {
+    let run_id = run_id.trim();
+    let correlation_id = correlation_id.trim();
+    if !run_id.is_empty() {
+        let job_run = job.run_id.as_ref().map(|id| id.value.as_str()).unwrap_or("");
+        if job_run == run_id {
+            return true;
+        }
+        if job_run.is_empty() && !correlation_id.is_empty() && job.correlation_id == correlation_id {
+            return true;
+        }
+        return false;
+    }
+    if !correlation_id.is_empty() {
+        return job.correlation_id == correlation_id;
+    }
+    false
+}
+
+fn run_stream_config(req: &StreamRunEventsRequest) -> RunStreamConfig {
+    let buffer_max = if req.buffer_max_events == 0 {
+        read_env_usize("AADK_RUN_STREAM_BUFFER_MAX", DEFAULT_RUN_STREAM_BUFFER_MAX)
+    } else {
+        req.buffer_max_events as usize
+    };
+    let max_delay_ms = if req.max_delay_ms == 0 {
+        read_env_u64("AADK_RUN_STREAM_MAX_DELAY_MS", DEFAULT_RUN_STREAM_MAX_DELAY_MS)
+    } else {
+        req.max_delay_ms
+    };
+    let discovery_ms = if req.discovery_interval_ms == 0 {
+        read_env_u64("AADK_RUN_STREAM_DISCOVERY_MS", DEFAULT_RUN_STREAM_DISCOVERY_MS)
+    } else {
+        req.discovery_interval_ms
+    };
+    let flush_ms = read_env_u64("AADK_RUN_STREAM_FLUSH_MS", DEFAULT_RUN_STREAM_FLUSH_MS);
+    RunStreamConfig {
+        buffer_max_events: buffer_max.max(1),
+        max_delay: Duration::from_millis(max_delay_ms.max(1)),
+        discovery_interval: Duration::from_millis(discovery_ms.max(1)),
+        flush_interval: Duration::from_millis(flush_ms.max(1)),
+    }
 }
 
 fn data_dir() -> PathBuf {
@@ -637,6 +756,58 @@ struct JobRecordInner {
     cancel_tx: watch::Sender<bool>,
 }
 
+async fn spawn_job_stream(
+    job_id: String,
+    rec: Arc<Mutex<JobRecordInner>>,
+    include_history: bool,
+    event_tx: mpsc::Sender<JobEvent>,
+) {
+    let (history, mut rx) = {
+        let inner = rec.lock().await;
+        let hist = if include_history {
+            inner.history.iter().cloned().collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        (hist, inner.broadcaster.subscribe())
+    };
+
+    tokio::spawn(async move {
+        for evt in history {
+            if event_tx.send(evt).await.is_err() {
+                return;
+            }
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(evt) => {
+                    if event_tx.send(evt).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let notice = mk_event(
+                        &job_id,
+                        aadk_proto::aadk::v1::job_event::Payload::Log(JobLogAppended {
+                            chunk: Some(LogChunk {
+                                stream: "server".into(),
+                                data: format!(
+                                    "WARNING: client lagged; skipped {skipped} events\n"
+                                )
+                                .into_bytes(),
+                                truncated: false,
+                            }),
+                        }),
+                    );
+                    let _ = event_tx.send(notice).await;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
 #[derive(Clone, Default)]
 struct JobStore {
     inner: Arc<Mutex<HashMap<String, Arc<Mutex<JobRecordInner>>>>>,
@@ -688,6 +859,66 @@ impl JobStore {
         let mut inner = self.inner.lock().await;
         inner.retain(|job_id, _| keep_ids.contains(job_id));
     }
+}
+
+async fn discover_run_jobs(
+    store: &JobStore,
+    run_id: &str,
+    correlation_id: &str,
+    include_history: bool,
+    known_jobs: &mut HashSet<String>,
+    event_tx: &mpsc::Sender<JobEvent>,
+) {
+    let jobs = store.list_jobs().await;
+    for job in jobs {
+        let job_id = job
+            .job_id
+            .as_ref()
+            .map(|id| id.value.clone())
+            .unwrap_or_default();
+        if job_id.is_empty() || known_jobs.contains(&job_id) {
+            continue;
+        }
+        if !job_matches_run(&job, run_id, correlation_id) {
+            continue;
+        }
+        known_jobs.insert(job_id.clone());
+        if let Some(rec) = store.get(&job_id).await {
+            spawn_job_stream(job_id, rec, include_history, event_tx.clone()).await;
+        }
+    }
+}
+
+async fn flush_run_buffer(
+    buffer: &mut BinaryHeap<Reverse<BufferedEvent>>,
+    out_tx: &mut mpsc::Sender<Result<JobEvent, Status>>,
+    config: &RunStreamConfig,
+    force: bool,
+) -> bool {
+    let max_delay_ms = config.max_delay.as_millis() as i64;
+    loop {
+        let should_flush = if force {
+            !buffer.is_empty()
+        } else if buffer.len() > config.buffer_max_events {
+            true
+        } else if let Some(Reverse(evt)) = buffer.peek() {
+            now_millis().saturating_sub(evt.at_unix_millis) >= max_delay_ms
+        } else {
+            false
+        };
+
+        if !should_flush {
+            break;
+        }
+
+        let Some(Reverse(next)) = buffer.pop() else {
+            break;
+        };
+        if out_tx.send(Ok(next.event)).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn load_state_file() -> JobStateFile {
@@ -943,6 +1174,74 @@ impl JobSvc {
     }
 }
 
+async fn stream_run_events_task(
+    store: JobStore,
+    run_id: String,
+    correlation_id: String,
+    include_history: bool,
+    config: RunStreamConfig,
+    mut out_tx: mpsc::Sender<Result<JobEvent, Status>>,
+) {
+    let (event_tx, mut event_rx) = mpsc::channel::<JobEvent>(config.buffer_max_events * 2);
+    let mut known_jobs = HashSet::new();
+    let mut buffer: BinaryHeap<Reverse<BufferedEvent>> = BinaryHeap::new();
+    let mut seq = 0u64;
+
+    discover_run_jobs(
+        &store,
+        &run_id,
+        &correlation_id,
+        include_history,
+        &mut known_jobs,
+        &event_tx,
+    )
+    .await;
+
+    let mut discovery_tick = tokio::time::interval(config.discovery_interval);
+    let mut flush_tick = tokio::time::interval(config.flush_interval);
+
+    loop {
+        tokio::select! {
+            _ = discovery_tick.tick() => {
+                discover_run_jobs(
+                    &store,
+                    &run_id,
+                    &correlation_id,
+                    include_history,
+                    &mut known_jobs,
+                    &event_tx,
+                )
+                .await;
+                if out_tx.is_closed() {
+                    break;
+                }
+            }
+            _ = flush_tick.tick() => {
+                if !flush_run_buffer(&mut buffer, &mut out_tx, &config, false).await {
+                    return;
+                }
+            }
+            maybe_evt = event_rx.recv() => {
+                let Some(evt) = maybe_evt else {
+                    break;
+                };
+                let at = event_timestamp(&evt);
+                buffer.push(Reverse(BufferedEvent {
+                    at_unix_millis: at,
+                    seq,
+                    event: evt,
+                }));
+                seq = seq.wrapping_add(1);
+                if !flush_run_buffer(&mut buffer, &mut out_tx, &config, false).await {
+                    return;
+                }
+            }
+        }
+    }
+
+    let _ = flush_run_buffer(&mut buffer, &mut out_tx, &config, true).await;
+}
+
 #[tonic::async_trait]
 impl JobService for JobSvc {
     async fn start_job(
@@ -968,11 +1267,27 @@ impl JobService for JobSvc {
         let job_id = Uuid::new_v4().to_string();
         let (btx, _brx) = broadcast::channel::<JobEvent>(BROADCAST_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let correlation_id = req.correlation_id.trim();
-        let correlation_id = if correlation_id.is_empty() {
+        let correlation_id_raw = req.correlation_id.trim();
+        let correlation_id = if correlation_id_raw.is_empty() {
             job_id.clone()
         } else {
-            correlation_id.to_string()
+            correlation_id_raw.to_string()
+        };
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        let run_id = if run_id.is_empty() && !correlation_id_raw.is_empty() {
+            correlation_id_raw.to_string()
+        } else {
+            run_id
+        };
+        let run_ref = if run_id.is_empty() {
+            None
+        } else {
+            Some(RunId { value: run_id })
         };
 
         let job = Job {
@@ -984,6 +1299,7 @@ impl JobService for JobSvc {
             finished_at: None,
             display_name: display_name.into(),
             correlation_id,
+            run_id: run_ref,
             project_id: req.project_id,
             target_id: req.target_id,
             toolchain_set_id: req.toolchain_set_id,
@@ -1053,6 +1369,7 @@ impl JobService for JobSvc {
     }
 
     type StreamJobEventsStream = ReceiverStream<Result<JobEvent, Status>>;
+    type StreamRunEventsStream = ReceiverStream<Result<JobEvent, Status>>;
 
     async fn stream_job_events(
         &self,
@@ -1120,6 +1437,45 @@ impl JobService for JobSvc {
                     }
                 }
             }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
+    }
+
+    async fn stream_run_events(
+        &self,
+        request: Request<StreamRunEventsRequest>,
+    ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
+        let req = request.into_inner();
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        let correlation_id = req.correlation_id.trim().to_string();
+
+        if run_id.is_empty() && correlation_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "run_id or correlation_id is required",
+            ));
+        }
+
+        let config = run_stream_config(&req);
+        let (tx, out_rx) = mpsc::channel::<Result<JobEvent, Status>>(1024);
+        let store = self.store.clone();
+        let include_history = req.include_history;
+
+        tokio::spawn(async move {
+            stream_run_events_task(
+                store,
+                run_id,
+                correlation_id,
+                include_history,
+                config,
+                tx,
+            )
+            .await;
         });
 
         Ok(Response::new(ReceiverStream::new(out_rx)))
