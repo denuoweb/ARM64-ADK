@@ -5,6 +5,10 @@ message Id {
   string value = 1; // opaque id
 }
 
+message RunId {
+  string value = 1; // opaque run id
+}
+
 message Timestamp {
   int64 unix_millis = 1;
 }

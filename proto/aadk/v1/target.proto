@@ -30,13 +30,33 @@ message SetDefaultTargetResponse { bool ok = 1; }
 message GetDefaultTargetRequest {}
 message GetDefaultTargetResponse { Target target = 1; }
 
-message InstallApkRequest { Id target_id = 1; Id project_id = 2; string apk_path = 3; Id job_id = 4; string correlation_id = 5; }
+message InstallApkRequest {
+  Id target_id = 1;
+  Id project_id = 2;
+  string apk_path = 3;
+  Id job_id = 4;
+  string correlation_id = 5;
+  RunId run_id = 6;
+}
 message InstallApkResponse { Id job_id = 1; }
 
-message LaunchRequest { Id target_id = 1; string application_id = 2; string activity = 3; Id job_id = 4; string correlation_id = 5; }
+message LaunchRequest {
+  Id target_id = 1;
+  string application_id = 2;
+  string activity = 3;
+  Id job_id = 4;
+  string correlation_id = 5;
+  RunId run_id = 6;
+}
 message LaunchResponse { Id job_id = 1; }
 
-message StopAppRequest { Id target_id = 1; string application_id = 2; Id job_id = 3; string correlation_id = 4; }
+message StopAppRequest {
+  Id target_id = 1;
+  string application_id = 2;
+  Id job_id = 3;
+  string correlation_id = 4;
+  RunId run_id = 5;
+}
 message StopAppResponse { Id job_id = 1; }
 
 message InstallCuttlefishRequest {
@@ -46,6 +66,7 @@ message InstallCuttlefishRequest {
   string build_id = 4;
   Id job_id = 5;
   string correlation_id = 6;
+  RunId run_id = 7;
 }
 message InstallCuttlefishResponse { Id job_id = 1; }
 
@@ -61,10 +82,15 @@ message ResolveCuttlefishBuildResponse {
   string product = 4;
 }
 
-message StartCuttlefishRequest { bool show_full_ui = 1; Id job_id = 2; string correlation_id = 3; }
+message StartCuttlefishRequest {
+  bool show_full_ui = 1;
+  Id job_id = 2;
+  string correlation_id = 3;
+  RunId run_id = 4;
+}
 message StartCuttlefishResponse { Id job_id = 1; }
 
-message StopCuttlefishRequest { Id job_id = 1; string correlation_id = 2; }
+message StopCuttlefishRequest { Id job_id = 1; string correlation_id = 2; RunId run_id = 3; }
 message StopCuttlefishResponse { Id job_id = 1; }
 
 message GetCuttlefishStatusRequest {}

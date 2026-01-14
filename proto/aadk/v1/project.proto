@@ -31,6 +31,7 @@ message CreateProjectRequest {
   Id toolchain_set_id = 5;
   Id job_id = 6;
   string correlation_id = 7;
+  RunId run_id = 8;
 }
 
 message CreateProjectResponse { Id job_id = 1; Id project_id = 2; }

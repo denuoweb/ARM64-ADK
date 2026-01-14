@@ -73,10 +73,16 @@ message InstallToolchainRequest {
   bool verify_hash = 4;
   Id job_id = 5;
   string correlation_id = 6;
+  RunId run_id = 7;
 }
 message InstallToolchainResponse { Id job_id = 1; }
 
-message VerifyToolchainRequest { Id toolchain_id = 1; Id job_id = 2; string correlation_id = 3; }
+message VerifyToolchainRequest {
+  Id toolchain_id = 1;
+  Id job_id = 2;
+  string correlation_id = 3;
+  RunId run_id = 4;
+}
 message VerifyToolchainResponse { bool verified = 1; ErrorDetail error = 2; Id job_id = 3; }
 
 message UpdateToolchainRequest {
@@ -86,6 +92,7 @@ message UpdateToolchainRequest {
   bool remove_cached_artifact = 4;
   Id job_id = 5;
   string correlation_id = 6;
+  RunId run_id = 7;
 }
 message UpdateToolchainResponse { Id job_id = 1; }
 
@@ -95,6 +102,7 @@ message UninstallToolchainRequest {
   bool force = 3;
   Id job_id = 4;
   string correlation_id = 5;
+  RunId run_id = 6;
 }
 message UninstallToolchainResponse { Id job_id = 1; }
 
@@ -103,6 +111,7 @@ message CleanupToolchainCacheRequest {
   bool remove_all = 2;
   Id job_id = 3;
   string correlation_id = 4;
+  RunId run_id = 5;
 }
 message CleanupToolchainCacheResponse { Id job_id = 1; }
 

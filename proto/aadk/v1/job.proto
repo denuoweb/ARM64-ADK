@@ -26,6 +26,7 @@ message Job {
   Timestamp finished_at = 6;
   string display_name = 7;
   string correlation_id = 8;
+  RunId run_id = 12;
 
   // Optional linkage
   Id project_id = 9;
@@ -96,6 +97,7 @@ message JobFilter {
   Timestamp finished_after = 5;
   Timestamp finished_before = 6;
   string correlation_id = 7;
+  RunId run_id = 8;
 }
 
 message JobHistoryFilter {
@@ -111,6 +113,7 @@ message StartJobRequest {
   Id target_id = 4;
   Id toolchain_set_id = 5;
   string correlation_id = 6;
+  RunId run_id = 7;
 }
 
 message StartJobResponse {
@@ -136,6 +139,15 @@ message CancelJobResponse {
 message StreamJobEventsRequest {
   Id job_id = 1;
   bool include_history = 2;
+}
+
+message StreamRunEventsRequest {
+  RunId run_id = 1;
+  string correlation_id = 2;
+  bool include_history = 3;
+  uint32 buffer_max_events = 4;
+  uint64 max_delay_ms = 5;
+  uint64 discovery_interval_ms = 6;
 }
 
 message PublishJobEventRequest {
@@ -172,6 +184,7 @@ service JobService {
   rpc GetJob(GetJobRequest) returns (GetJobResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
   rpc StreamJobEvents(StreamJobEventsRequest) returns (stream JobEvent);
+  rpc StreamRunEvents(StreamRunEventsRequest) returns (stream JobEvent);
   rpc PublishJobEvent(PublishJobEventRequest) returns (PublishJobEventResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc ListJobHistory(ListJobHistoryRequest) returns (ListJobHistoryResponse);

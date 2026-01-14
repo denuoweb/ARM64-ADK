@@ -1,0 +1,48 @@
+syntax = "proto3";
+package aadk.v1;
+
+import "aadk/v1/common.proto";
+import "aadk/v1/build.proto";
+
+message WorkflowPipelineOptions {
+  bool verify_toolchain = 1;
+  bool create_project = 2;
+  bool open_project = 3;
+  bool build = 4;
+  bool install_apk = 5;
+  bool launch_app = 6;
+  bool export_support_bundle = 7;
+  bool export_evidence_bundle = 8;
+}
+
+message WorkflowPipelineRequest {
+  RunId run_id = 1;
+  string correlation_id = 2;
+  Id job_id = 3;
+  Id project_id = 4;
+  string project_path = 5;
+  string project_name = 6;
+  Id template_id = 7;
+  Id toolchain_id = 8;
+  Id toolchain_set_id = 9;
+  Id target_id = 10;
+  BuildVariant build_variant = 11;
+  string module = 12;
+  string variant_name = 13;
+  repeated string tasks = 14;
+  string apk_path = 15;
+  string application_id = 16;
+  string activity = 17;
+  WorkflowPipelineOptions options = 18;
+}
+
+message WorkflowPipelineResponse {
+  RunId run_id = 1;
+  Id job_id = 2;
+  Id project_id = 3;
+  repeated KeyValue outputs = 4;
+}
+
+service WorkflowService {
+  rpc RunPipeline(WorkflowPipelineRequest) returns (WorkflowPipelineResponse);
+}

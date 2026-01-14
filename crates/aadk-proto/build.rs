@@ -17,6 +17,7 @@ fn main() {
         proto_root.join("aadk/v1/build.proto"),
         proto_root.join("aadk/v1/target.proto"),
         proto_root.join("aadk/v1/observe.proto"),
+        proto_root.join("aadk/v1/workflow.proto"),
     ];
 
     for p in &protos {

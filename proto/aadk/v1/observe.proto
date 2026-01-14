@@ -4,7 +4,7 @@ package aadk.v1;
 import "aadk/v1/common.proto";
 
 message RunRecord {
-  Id run_id = 1;
+  RunId run_id = 1;
   Id project_id = 2;
   Id target_id = 3;
   Id toolchain_set_id = 4;
@@ -13,9 +13,19 @@ message RunRecord {
   string result = 7;
   repeated Id job_ids = 8;
   repeated KeyValue summary = 9;
+  string correlation_id = 10;
 }
 
-message ListRunsRequest { Pagination page = 1; }
+message RunFilter {
+  RunId run_id = 1;
+  string correlation_id = 2;
+  Id project_id = 3;
+  Id target_id = 4;
+  Id toolchain_set_id = 5;
+  string result = 6;
+}
+
+message ListRunsRequest { Pagination page = 1; RunFilter filter = 2; }
 message ListRunsResponse { repeated RunRecord runs = 1; PageInfo page_info = 2; }
 
 message ExportSupportBundleRequest {
@@ -29,14 +39,30 @@ message ExportSupportBundleRequest {
   Id target_id = 8;
   Id toolchain_set_id = 9;
   string correlation_id = 10;
+  RunId run_id = 11;
 }
 message ExportSupportBundleResponse { Id job_id = 1; string output_path = 2; }
 
-message ExportEvidenceBundleRequest { Id run_id = 1; Id job_id = 2; string correlation_id = 3; }
+message ExportEvidenceBundleRequest { RunId run_id = 1; Id job_id = 2; string correlation_id = 3; }
 message ExportEvidenceBundleResponse { Id job_id = 1; string output_path = 2; }
+
+message UpsertRunRequest {
+  RunId run_id = 1;
+  string correlation_id = 2;
+  Id project_id = 3;
+  Id target_id = 4;
+  Id toolchain_set_id = 5;
+  repeated Id job_ids = 6;
+  string result = 7;
+  repeated KeyValue summary = 8;
+  Timestamp started_at = 9;
+  Timestamp finished_at = 10;
+}
+message UpsertRunResponse { RunRecord run = 1; }
 
 service ObserveService {
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
   rpc ExportSupportBundle(ExportSupportBundleRequest) returns (ExportSupportBundleResponse);
   rpc ExportEvidenceBundle(ExportEvidenceBundleRequest) returns (ExportEvidenceBundleResponse);
+  rpc UpsertRun(UpsertRunRequest) returns (UpsertRunResponse);
 }

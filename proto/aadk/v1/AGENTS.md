@@ -8,7 +8,7 @@ source of truth for the Rust gRPC clients/servers and any future non-Rust client
 Update this file whenever proto contracts change or when commits touching this directory are made.
 
 ## Files and ownership
-- common.proto: shared primitives (Id, Timestamp, KeyValue, PageInfo)
+- common.proto: shared primitives (Id, RunId, Timestamp, KeyValue, PageInfo)
 - errors.proto: ErrorCode and ErrorDetail
 - job.proto: JobService and job event types
 - toolchain.proto: ToolchainService (includes ListToolchainSets)
@@ -16,6 +16,7 @@ Update this file whenever proto contracts change or when commits touching this d
 - build.proto: BuildService
 - target.proto: TargetService (includes ResolveCuttlefishBuild and install overrides)
 - observe.proto: ObserveService
+- workflow.proto: WorkflowService (pipeline orchestration)
 
 ## Recent changes
 - Added optional job_id fields to long-running requests (build/toolchain/target/observe) so services
@@ -27,6 +28,9 @@ Update this file whenever proto contracts change or when commits touching this d
 - Extended toolchain.proto with update/uninstall/cache cleanup RPCs and new toolchain error codes.
 - Added correlation_id to StartJobRequest, JobFilter, and long-running requests to group workflow jobs.
 - Added job_id + correlation_id to CreateProjectRequest for project creation workflows.
+- Added RunId as a shared identifier and threaded it through job + service requests.
+- Added StreamRunEvents RPC for aggregated run-level job event streaming.
+- Added ObserveService RunFilter/UpsertRun and workflow.proto for pipeline orchestration.
 
 ## Code generation
 - Build script: crates/aadk-proto/build.rs
