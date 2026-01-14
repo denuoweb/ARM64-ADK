@@ -480,12 +480,12 @@ fn build_ui(app: &gtk::Application) {
     let console = page_console(cfg.clone(), cmd_tx.clone(), &window);
     let settings = page_settings(cfg.clone());
 
-    stack.add_titled(&home.page.container, Some("home"), "Home");
-    stack.add_titled(&jobs_history.container, Some("jobs"), "Job History");
+    stack.add_titled(&home.page.container, Some("home"), "Job Control");
     stack.add_titled(&toolchains.page.container, Some("toolchains"), "Toolchains");
     stack.add_titled(&projects.page.container, Some("projects"), "Projects");
+    stack.add_titled(&console.container, Some("console"), "Build");
     stack.add_titled(&targets.page.container, Some("targets"), "Targets");
-    stack.add_titled(&console.container, Some("console"), "Console");
+    stack.add_titled(&jobs_history.container, Some("jobs"), "Job History");
     stack.add_titled(&evidence.container, Some("evidence"), "Evidence");
     stack.add_titled(&settings.container, Some("settings"), "Settings");
 
@@ -876,9 +876,9 @@ const KNOWN_JOB_TYPES: &[&str] = &[
 
 fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> HomePage {
     let page = make_page(
-        "Home - Job control and live status",
+        "Job Control - Start and monitor jobs",
         "Overview: Start and watch jobs across the system. Use this page to kick off any JobService job with parameters, project/target/toolchain ids, and an optional correlation id.",
-        "Connections: Jobs started here appear in Job History. Use Projects, Toolchains, Targets, and Console to gather ids and inputs; use Evidence to export run bundles; Settings controls service addresses.",
+        "Connections: Jobs started here appear in Job History. Use Projects, Toolchains, Targets, and Build to gather ids and inputs; use Evidence to export run bundles; Settings controls service addresses.",
     );
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -965,7 +965,7 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
         .build();
     let watch_btn = gtk::Button::with_label("Watch");
     set_tooltip(&start_btn, "What: Start the job with the provided fields. Why: submits to JobService and begins streaming events. How: fill inputs then click.");
-    set_tooltip(&cancel_btn, "What: Cancel the current tracked job. Why: stop a long running job from Home. How: click after a job is started or watched.");
+    set_tooltip(&cancel_btn, "What: Cancel the current tracked job. Why: stop a long running job from Job Control. How: click after a job is started or watched.");
     set_tooltip(&watch_entry, "What: Job id to watch. Why: stream logs and status for an existing job. How: paste a job id from Job History or other tabs.");
     set_tooltip(&watch_btn, "What: Start streaming events for the job id. Why: see live progress without starting a new job. How: enter a job id and click.");
 
@@ -1115,7 +1115,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
     let page = make_page(
         "Job History - JobService query and exports",
         "Overview: Query JobService for jobs and event history with filters, and export logs to JSON for sharing or troubleshooting.",
-        "Connections: Home, Toolchains, Projects, Targets, Console, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
+        "Connections: Job Control, Toolchains, Projects, Targets, Build, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
     );
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -1166,7 +1166,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
     set_tooltip(&created_before_entry, "What: Upper bound for job creation time in unix millis. Why: limit results to older jobs. How: paste an epoch millis value.");
     set_tooltip(&finished_after_entry, "What: Lower bound for job finish time in unix millis. Why: filter completed jobs by finish time. How: paste an epoch millis value.");
     set_tooltip(&finished_before_entry, "What: Upper bound for job finish time in unix millis. Why: filter completed jobs by finish time. How: paste an epoch millis value.");
-    set_tooltip(&correlation_id_entry, "What: Correlation id to match. Why: group jobs by run or workflow. How: paste a correlation id from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to match. Why: group jobs by run or workflow. How: paste a correlation id from Job Control or Job History.");
     set_tooltip(&page_size_entry, "What: Maximum jobs per page. Why: control result size and output volume. How: enter an integer, for example 50.");
     set_tooltip(&page_token_entry, "What: Pagination token from a previous response. Why: continue listing from where you left off. How: paste the token string.");
     set_tooltip(&list_btn, "What: List jobs using the filters. Why: query JobService. How: set filters and click.");
@@ -1226,7 +1226,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
 
     let list_history_btn = gtk::Button::with_label("List history");
     let export_btn = gtk::Button::with_label("Export logs");
-    set_tooltip(&job_id_entry, "What: Job id to fetch event history for. Why: history is per job. How: paste a job id from the list or Home.");
+    set_tooltip(&job_id_entry, "What: Job id to fetch event history for. Why: history is per job. How: paste a job id from the list or Job Control.");
     set_tooltip(&kinds_entry, "What: Event kinds to include. Why: focus on state, progress, or log events. How: use state,progress,log,completed,failed.");
     set_tooltip(&after_entry, "What: Lower bound for event timestamps in unix millis. Why: limit history size. How: paste an epoch millis value.");
     set_tooltip(&before_entry, "What: Upper bound for event timestamps in unix millis. Why: limit history size. How: paste an epoch millis value.");
@@ -1373,7 +1373,7 @@ fn page_toolchains(
     let page = make_page(
         "Toolchains - SDK/NDK management and sets",
         "Overview: Discover providers, list available versions, install or verify SDK/NDK toolchains, and manage toolchain sets.",
-        "Connections: Projects can point at toolchain sets; Console builds use installed toolchains; Toolchain jobs stream in Home and Job History; Evidence bundles can include toolchain provenance; Settings controls ToolchainService address.",
+        "Connections: Projects can point at toolchain sets; Build runs use installed toolchains; Toolchain jobs stream in Job Control and Job History; Evidence bundles can include toolchain provenance; Settings controls ToolchainService address.",
     );
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -1391,7 +1391,7 @@ fn page_toolchains(
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this toolchain action to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group toolchain work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -1937,7 +1937,7 @@ fn page_projects(
     let page = make_page(
         "Projects - Templates, create/open, defaults",
         "Overview: Create or open projects from templates, list recent workspaces, and set per-project defaults like toolchain sets and default targets.",
-        "Connections: Console builds reference these projects by id or path; Targets can use default target ids set here; Toolchains supply toolchain sets; jobs appear in Home and Job History; Settings controls ProjectService address.",
+        "Connections: Build runs reference these projects by id or path; Targets can use default target ids set here; Toolchains supply toolchain sets; jobs appear in Job Control and Job History; Settings controls ProjectService address.",
     );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let refresh_templates = gtk::Button::with_label("Refresh templates");
@@ -1971,7 +1971,7 @@ fn page_projects(
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this project action to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group project work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -2248,7 +2248,7 @@ fn page_targets(
     let page = make_page(
         "Targets - Devices, ADB, and Cuttlefish",
         "Overview: Manage ADB targets and Cuttlefish instances, install APKs, and launch apps via TargetService.",
-        "Connections: Console builds produce APKs used here; Projects can set a default target; target jobs stream in Home and Job History; Evidence exports can capture target run context; Settings controls TargetService address.",
+        "Connections: Build runs produce APKs used here; Projects can set a default target; target jobs stream in Job Control and Job History; Evidence exports can capture target run context; Settings controls TargetService address.",
     );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list = gtk::Button::with_label("List targets");
@@ -2273,7 +2273,7 @@ fn page_targets(
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this target action to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group target work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -2783,9 +2783,9 @@ fn page_console(
     parent: &gtk::ApplicationWindow,
 ) -> Page {
     let page = make_page(
-        "Console - BuildService (Gradle) runner",
+        "Build - BuildService (Gradle) runner",
         "Overview: Run Gradle builds with module/variant/task overrides and list artifacts from the build output.",
-        "Connections: Projects provide ids/paths; Toolchains provide SDK/NDK; Targets use APKs produced here; build jobs stream in Home and Job History; Evidence exports run bundles; Settings controls BuildService address.",
+        "Connections: Projects provide ids/paths; Toolchains provide SDK/NDK; Targets use APKs produced here; build jobs stream in Job Control and Job History; Evidence exports run bundles; Settings controls BuildService address.",
     );
 
     let form = gtk::Grid::builder()
@@ -2883,7 +2883,7 @@ fn page_console(
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this build to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group build work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -3103,7 +3103,7 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     let page = make_page(
         "Evidence - ObserveService runs and bundles",
         "Overview: List workflow runs and export support or evidence bundles for auditing and sharing.",
-        "Connections: Jobs started in Home, Console, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
+        "Connections: Jobs started in Job Control, Build, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
     );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list_runs = gtk::Button::with_label("List runs");
@@ -3131,7 +3131,7 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this export to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group evidence work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -3326,7 +3326,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         0,
         "JobService",
-        "What: JobService address (host:port). Why: Home and Job History use it for job control/logs. How: enter an address like 127.0.0.1:50051.",
+        "What: JobService address (host:port). Why: Job Control and Job History use it for job control/logs. How: enter an address like 127.0.0.1:50051.",
         cfg.lock().unwrap().job_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg1.lock().unwrap();
@@ -3371,7 +3371,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         3,
         "BuildService",
-        "What: BuildService address (host:port). Why: Console tab uses it for builds and artifacts. How: enter an address like 127.0.0.1:50054.",
+        "What: BuildService address (host:port). Why: Build tab uses it for builds and artifacts. How: enter an address like 127.0.0.1:50054.",
         cfg.lock().unwrap().build_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg4.lock().unwrap();
