@@ -35,6 +35,7 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   `signature_public_key` (hex or base64); signatures are recorded in provenance when available.
 - InstallToolchain and VerifyToolchain accept optional job_id to reuse existing JobService jobs,
   plus correlation_id and run_id to group multi-step workflows.
+- InstallToolchain and VerifyToolchain trim provider/toolchain identifiers and reject empty values with invalid-argument errors.
 - Update/Uninstall/Cleanup cache operations publish JobService events and can reuse job_id while
   honoring correlation_id and run_id for grouped job streams.
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active

@@ -17,6 +17,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - UiCommand enum defines all async work; a background worker executes these commands and emits
   AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
+- Core flow actions log connection/RPC failures to the page output so bad inputs and service errors are visible.
 - Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
 - All interactive fields and selections include verbose tooltips describing what, why, and how to use them.
 - Sidebar order is Job Control, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).

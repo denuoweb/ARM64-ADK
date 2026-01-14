@@ -3936,15 +3936,28 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 before: before.map(|ms| Timestamp { unix_millis: ms }),
             };
 
-            let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
-            let resp = client
+            let channel = match connect(&cfg.job_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("JobService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = JobServiceClient::new(channel);
+            let resp = match client
                 .list_job_history(ListJobHistoryRequest {
                     job_id: Some(Id { value: job_id.clone() }),
                     page: Some(Pagination { page_size: page_size.max(1), page_token }),
                     filter: Some(filter),
                 })
-                .await?
-                .into_inner();
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "jobs", line: format!("List job history failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
 
             if resp.events.is_empty() {
                 ui.send(AppEvent::Log { page: "jobs", line: "No events found.\n".into() }).ok();
@@ -4046,14 +4059,26 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             job_id,
             correlation_id,
         } => {
+            let provider_id = provider_id.trim().to_string();
+            if provider_id.is_empty() {
+                ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain install requires a provider.\n".into() }).ok();
+                return Ok(());
+            }
             let version = version.trim().to_string();
             if version.is_empty() {
                 ui.send(AppEvent::Log { page: "toolchains", line: "Toolchain install requires a version.\n".into() }).ok();
                 return Ok(());
             }
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Installing {provider_id} {version} (verify={verify})\n") }).ok();
-            let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
-            let resp = client.install_toolchain(InstallToolchainRequest {
+            let channel = match connect(&cfg.toolchain_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("ToolchainService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = ToolchainServiceClient::new(channel);
+            let resp = match client.install_toolchain(InstallToolchainRequest {
                 provider_id: Some(Id { value: provider_id }),
                 version,
                 install_root: "".into(),
@@ -4064,7 +4089,13 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
                 run_id: run_id_from_optional(&correlation_id),
-            }).await?.into_inner();
+            }).await {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("Install toolchain failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Install job queued: {job_id}\n") }).ok();
@@ -4247,8 +4278,24 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             correlation_id,
         } => {
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Verifying installed toolchains via {}\n", cfg.toolchain_addr) }).ok();
-            let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
-            let resp = client.list_installed(ListInstalledRequest { kind: ToolchainKind::Unspecified as i32 }).await?.into_inner();
+            let channel = match connect(&cfg.toolchain_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("ToolchainService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = ToolchainServiceClient::new(channel);
+            let resp = match client
+                .list_installed(ListInstalledRequest { kind: ToolchainKind::Unspecified as i32 })
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("List installed toolchains failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
 
             if resp.items.is_empty() {
                 ui.send(AppEvent::Log { page: "toolchains", line: "No installed toolchains to verify.\n".into() }).ok();
@@ -4258,15 +4305,24 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                         ui.send(AppEvent::Log { page: "toolchains", line: "Skipping toolchain with missing id.\n".into() }).ok();
                         continue;
                     };
-                    let verify = client.verify_toolchain(VerifyToolchainRequest {
-                        toolchain_id: Some(Id { value: id.clone() }),
-                        job_id: job_id
-                            .as_ref()
-                            .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
-                        correlation_id: correlation_id.trim().to_string(),
-                        run_id: run_id_from_optional(&correlation_id),
-                    }).await?.into_inner();
+                    let verify = match client
+                        .verify_toolchain(VerifyToolchainRequest {
+                            toolchain_id: Some(Id { value: id.clone() }),
+                            job_id: job_id
+                                .as_ref()
+                                .filter(|value| !value.trim().is_empty())
+                                .map(|value| Id { value: value.clone() }),
+                            correlation_id: correlation_id.trim().to_string(),
+                            run_id: run_id_from_optional(&correlation_id),
+                        })
+                        .await
+                    {
+                        Ok(resp) => resp.into_inner(),
+                        Err(err) => {
+                            ui.send(AppEvent::Log { page: "toolchains", line: format!("- {id} verify request failed: {err}\n") }).ok();
+                            continue;
+                        }
+                    };
 
                     if verify.verified {
                         ui.send(AppEvent::Log { page: "toolchains", line: format!("- {id} verified OK\n") }).ok();
@@ -4541,7 +4597,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
 
             ui.send(AppEvent::Log { page: "projects", line: format!("Creating project via {}\n", cfg.project_addr) }).ok();
-            let mut client = ProjectServiceClient::new(connect(&cfg.project_addr).await?);
+            let channel = match connect(&cfg.project_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("ProjectService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = ProjectServiceClient::new(channel);
             let resp = match client.create_project(CreateProjectRequest {
                 name: name.clone(),
                 path: path.clone(),
@@ -4586,7 +4649,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
 
             ui.send(AppEvent::Log { page: "projects", line: format!("Opening project via {}\n", cfg.project_addr) }).ok();
-            let mut client = ProjectServiceClient::new(connect(&cfg.project_addr).await?);
+            let channel = match connect(&cfg.project_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "projects", line: format!("ProjectService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = ProjectServiceClient::new(channel);
             let resp = match client.open_project(OpenProjectRequest { path: path.clone() }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -4720,8 +4790,21 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
 
         UiCommand::TargetsList { cfg } => {
             ui.send(AppEvent::Log { page: "targets", line: format!("Connecting to TargetService at {}\n", cfg.targets_addr) }).ok();
-            let mut client = TargetServiceClient::new(connect(&cfg.targets_addr).await?);
-            let resp = client.list_targets(ListTargetsRequest { include_offline: true }).await?.into_inner();
+            let channel = match connect(&cfg.targets_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "targets", line: format!("TargetService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = TargetServiceClient::new(channel);
+            let resp = match client.list_targets(ListTargetsRequest { include_offline: true }).await {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "targets", line: format!("List targets failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
 
             ui.send(AppEvent::Log { page: "targets", line: "Targets:\n".into() }).ok();
             for t in resp.targets {
@@ -5182,7 +5265,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
 
             ui.send(AppEvent::Log { page: "console", line: format!("Connecting to BuildService at {}\n", cfg.build_addr) }).ok();
-            let mut client = BuildServiceClient::new(connect(&cfg.build_addr).await?);
+            let channel = match connect(&cfg.build_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "console", line: format!("BuildService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = BuildServiceClient::new(channel);
 
             let resp = match client.build(BuildRequest {
                 project_id: Some(Id { value: project_ref.trim().to_string() }),

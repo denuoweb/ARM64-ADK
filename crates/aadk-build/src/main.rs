@@ -2421,11 +2421,17 @@ async fn run_build_job(
 #[tonic::async_trait]
 impl BuildService for Svc {
     async fn build(&self, request: Request<BuildRequest>) -> Result<Response<BuildResponse>, Status> {
-        let req = request.into_inner();
+        let mut req = request.into_inner();
         let project_id = req
             .project_id
-            .clone()
-            .ok_or_else(|| Status::invalid_argument("project_id is required"))?;
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::invalid_argument("project_id is required"))?
+            .to_string();
+        req.project_id = Some(Id {
+            value: project_id.clone(),
+        });
 
         let plan = build_plan_for_request(&req)?;
         let mut job_client = connect_job().await?;
@@ -2464,7 +2470,9 @@ impl BuildService for Svc {
                 "build.run",
                 params,
                 correlation_id,
-                Some(project_id),
+                Some(Id {
+                    value: project_id.clone(),
+                }),
                 req.run_id.clone(),
             )
             .await?

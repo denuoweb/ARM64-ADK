@@ -3366,12 +3366,14 @@ impl ToolchainService for Svc {
         let req = _request.into_inner();
         let provider_id = req
             .provider_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| Status::invalid_argument("provider_id is required"))?
-            .value;
-        let version = if req.version.is_empty() {
+            .to_string();
+        let version = req.version.trim().to_string();
+        if version.is_empty() {
             return Err(Status::invalid_argument("version is required"));
-        } else {
-            req.version
         };
 
         if !self
@@ -3454,8 +3456,11 @@ impl ToolchainService for Svc {
         let req = _request.into_inner();
         let id = req
             .toolchain_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| Status::invalid_argument("toolchain_id is required"))?
-            .value;
+            .to_string();
 
         let fixtures = fixtures_dir();
         let host = host_key().unwrap_or_else(|| "unknown".into());

@@ -16,6 +16,7 @@ Update this file whenever BuildService behavior changes or when commits touching
 - Implementation lives in crates/aadk-build/src/main.rs with a tonic server.
 - Build requests:
   - Validate project_id and resolve to a path using ProjectService GetProject unless the value already looks like a path.
+  - Reject empty/whitespace project_id values before starting the job.
   - Accept module/variant_name/tasks overrides, validate basic formatting, and prefix module tasks as needed.
   - Load a Gradle model snapshot (init script) to validate module/variant selection and surface
     compileSdk/minSdk/buildTypes/flavors metadata.
