@@ -452,8 +452,7 @@ impl PersistedJob {
 fn is_known_job_type(job_type: &str) -> bool {
     matches!(
         job_type,
-        "demo.job"
-            | "workflow.pipeline"
+        "workflow.pipeline"
             | "project.create"
             | "build.run"
             | "toolchain.install"
@@ -1094,84 +1093,6 @@ impl JobSvc {
         .await;
     }
 
-    async fn demo_job_runner(&self, job_id: String, mut cancel_rx: watch::Receiver<bool>) {
-        self.set_state(&job_id, JobState::Queued).await;
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        self.set_state(&job_id, JobState::Running).await;
-
-        let total_steps = 10u32;
-        for step in 1..=total_steps {
-            // Cancellation check (cheap and deterministic).
-            if *cancel_rx.borrow() {
-                self.set_state(&job_id, JobState::Cancelled).await;
-                self.publish(
-                    &job_id,
-                    aadk_proto::aadk::v1::job_event::Payload::Completed(JobCompleted {
-                        summary: "Demo job cancelled".into(),
-                        outputs: vec![],
-                    }),
-                )
-                .await;
-                return;
-            }
-
-            // Also react quickly if a change arrives.
-            if cancel_rx.has_changed().unwrap_or(false) {
-                let _ = cancel_rx.changed().await;
-            }
-
-            tokio::time::sleep(Duration::from_millis(250)).await;
-
-            let pct = step * 10;
-            self.publish(
-                &job_id,
-                aadk_proto::aadk::v1::job_event::Payload::Progress(JobProgressUpdated {
-                    progress: Some(JobProgress {
-                        percent: pct,
-                        phase: format!("Demo phase {step}"),
-                        metrics: vec![
-                            KeyValue {
-                                key: "step".into(),
-                                value: step.to_string(),
-                            },
-                            KeyValue {
-                                key: "total_steps".into(),
-                                value: total_steps.to_string(),
-                            },
-                        ],
-                    }),
-                }),
-            )
-            .await;
-
-            let line = format!("demo: step {step} complete ({pct}%)\n");
-            self.publish(
-                &job_id,
-                aadk_proto::aadk::v1::job_event::Payload::Log(JobLogAppended {
-                    chunk: Some(LogChunk {
-                        stream: "stdout".into(),
-                        data: line.into_bytes(),
-                        truncated: false,
-                    }),
-                }),
-            )
-            .await;
-        }
-
-        self.set_state(&job_id, JobState::Success).await;
-        self.publish(
-            &job_id,
-            aadk_proto::aadk::v1::job_event::Payload::Completed(JobCompleted {
-                summary: "Demo job finished successfully".into(),
-                outputs: vec![KeyValue {
-                    key: "artifact".into(),
-                    value: "/tmp/demo-artifact.txt".into(),
-                }],
-            }),
-        )
-        .await;
-    }
 }
 
 async fn stream_run_events_task(
@@ -1259,7 +1180,6 @@ impl JobService for JobSvc {
             )));
         }
         let display_name = match job_type {
-            "demo.job" => "Demo Job",
             "workflow.pipeline" => "Workflow Pipeline",
             _ => job_type,
         };
@@ -1314,15 +1234,6 @@ impl JobService for JobSvc {
 
         self.store.insert(&job_id, rec).await;
         self.schedule_persist();
-
-        // Start known jobs.
-        if job_type == "demo.job" {
-            let svc = self.clone();
-            let job_id_clone = job_id.clone();
-            tokio::spawn(async move {
-                svc.demo_job_runner(job_id_clone, cancel_rx).await;
-            });
-        }
 
         Ok(Response::new(StartJobResponse {
             job: Some(JobRef { job_id: Some(Id { value: job_id }) }),

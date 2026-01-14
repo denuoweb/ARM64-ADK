@@ -10,7 +10,7 @@ Update this file whenever CLI behavior changes or when commits touching this cra
 ## Key implementation details
 - Implementation lives in crates/aadk-cli/src/main.rs.
 - Uses clap for subcommands:
-  - job start-demo / run / list / watch / history / export / cancel
+  - job run / list / watch / history / export / cancel
   - job watch-run (aggregated run stream by run_id/correlation_id)
   - toolchain list-providers / list-sets / create-set / set-active / get-active / update / uninstall / cleanup-cache
   - targets list / set-default / get-default / start-cuttlefish / stop-cuttlefish / cuttlefish-status / install-cuttlefish

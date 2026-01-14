@@ -26,17 +26,15 @@ Update this file whenever JobService behavior changes or when commits touching t
 - ListJobs supports pagination with filters by job_type, state, run_id, and created/finished timestamps.
 - ListJobHistory returns paginated job events with optional kind/time filters.
 - publish_job_event updates job state on StateChanged/Completed/Failed payloads before broadcasting.
-- start_job requires a non-empty job_type, rejects unknown types, and runs the demo runner only
-  for demo.job (other services own their worker execution). workflow.pipeline is reserved for
-  orchestrated multi-step flows.
+- start_job requires a non-empty job_type, rejects unknown types, and reserves workflow.pipeline
+  for orchestrated multi-step flows.
 - StartJob accepts optional correlation_id and run_id; ListJobs can filter by either to group related jobs.
-- demo.job progress emits step/total_steps metrics for UI/CLI validation.
 - Retention trims completed jobs by age/count; active jobs are preserved.
 
 ## Data flow and dependencies
 - ToolchainService, BuildService, TargetService, and ObserveService are expected to create jobs
   and publish progress/log events to this service.
-- The GTK UI and CLI stream job events from JobService (both demo and real jobs).
+- The GTK UI and CLI stream job events from JobService.
 - CLI can also stream run-level events via StreamRunEvents for multi-job pipelines.
 
 ## Environment / config

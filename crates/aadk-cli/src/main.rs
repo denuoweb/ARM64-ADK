@@ -82,15 +82,6 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum JobCmd {
-    /// Start a demo job and stream events
-    StartDemo {
-        #[arg(long, default_value_t = default_job_addr())]
-        addr: String,
-        #[arg(long)]
-        correlation_id: Option<String>,
-        #[arg(long)]
-        run_id: Option<String>,
-    },
     /// Run a job by type and optionally stream events
     Run {
         #[arg(long, default_value_t = default_job_addr())]
@@ -765,31 +756,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
-            JobCmd::StartDemo { addr, correlation_id, run_id } => {
-                update_cli_config(|cfg| {
-                    cfg.job_addr = addr.clone();
-                    cfg.last_job_type = "demo.job".into();
-                });
-                let mut client = JobServiceClient::new(connect(&addr).await?);
-                let resp = client.start_job(StartJobRequest {
-                    job_type: "demo.job".into(),
-                    params: vec![],
-                    project_id: None,
-                    target_id: None,
-                    toolchain_set_id: None,
-                    correlation_id: correlation_id.unwrap_or_default(),
-                    run_id: run_id.map(|value| RunId { value }),
-                }).await?.into_inner();
-
-                let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
-                println!("job_id={job_id}");
-                if !job_id.is_empty() {
-                    update_cli_config(|cfg| cfg.last_job_id = job_id.clone());
-                }
-                if !job_id.is_empty() {
-                    stream_job_events_until_done(&addr, &job_id).await?;
-                }
-            }
             JobCmd::Run {
                 addr,
                 job_type,

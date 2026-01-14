@@ -136,7 +136,6 @@ GTK_A11Y=none cargo run -p aadk-ui
 
 ### 6) Optional: CLI sanity checks
 ```bash
-cargo run -p aadk-cli -- job start-demo
 cargo run -p aadk-cli -- toolchain list-providers
 cargo run -p aadk-cli -- toolchain list-sets
 cargo run -p aadk-cli -- targets list
@@ -152,8 +151,8 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - `include_history` replay followed by live event streaming.
 - StreamRunEvents aggregates run events across jobs with bounded buffering and best-effort timestamp ordering.
 - ListJobs/ListJobHistory APIs with pagination and filters (type/state/time/run_id, event kinds).
-- Validates job types; demo job runner remains for smoke tests while services publish real jobs.
-- Supports run_id + correlation_id grouping (StartJob + ListJobs filter) and reserves workflow.pipeline for multi-step orchestration.
+- Validates job types and reserves workflow.pipeline for multi-step orchestration.
+- Supports run_id + correlation_id grouping (StartJob + ListJobs filter).
 
 ### ToolchainService (aadk-toolchain)
 - Provider catalog with host-aware artifacts (override via `AADK_TOOLCHAIN_CATALOG`).
@@ -197,7 +196,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
 
 ### CLI (aadk-cli)
-- Job run/list/watch/history/export + demo start/cancel + watch-run (aggregated run stream).
+- Job run/list/watch/history/export/cancel + watch-run (aggregated run stream).
 - Toolchain list-providers/list-sets/update/uninstall/cleanup-cache.
 - Targets list/start/stop/status/install Cuttlefish.
 - Projects list-templates/list-recent/create/open/use-active-defaults.
