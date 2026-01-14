@@ -16,6 +16,7 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     target_service_client::TargetServiceClient,
     toolchain_service_client::ToolchainServiceClient,
+    workflow_service_client::WorkflowServiceClient,
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildVariant, CancelJobRequest,
     CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
     ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
@@ -27,8 +28,9 @@ use aadk_proto::aadk::v1::{
     ListTargetsRequest, ListTemplatesRequest, ListToolchainSetsRequest, OpenProjectRequest,
     Pagination, ResolveCuttlefishBuildRequest, SetActiveToolchainSetRequest, SetDefaultTargetRequest,
     SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
-    StreamJobEventsRequest, StreamLogcatRequest, Timestamp, ToolchainKind,
-    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest, RunId,
+    StreamJobEventsRequest, StreamLogcatRequest, StreamRunEventsRequest, Timestamp, ToolchainKind,
+    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest, RunFilter, RunId,
+    WorkflowPipelineOptions, WorkflowPipelineRequest,
 };
 use futures_util::StreamExt;
 use gtk4 as gtk;
@@ -229,8 +231,10 @@ enum UiCommand {
         finished_after: String,
         finished_before: String,
         correlation_id: String,
+        run_id: String,
         page_size: u32,
         page_token: String,
+        page: &'static str,
     },
     JobsHistory {
         cfg: AppConfig,
@@ -245,6 +249,7 @@ enum UiCommand {
         cfg: AppConfig,
         job_id: String,
         output_path: String,
+        page: &'static str,
     },
     ToolchainListProviders { cfg: AppConfig },
     ToolchainListAvailable { cfg: AppConfig, provider_id: String },
@@ -361,7 +366,15 @@ enum UiCommand {
         correlation_id: String,
     },
     TargetsStreamLogcat { cfg: AppConfig, target_id: String, filter: String },
-    ObserveListRuns { cfg: AppConfig },
+    ObserveListRuns {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        result: String,
+        page_size: u32,
+        page_token: String,
+        page: &'static str,
+    },
     ObserveExportSupport {
         cfg: AppConfig,
         include_logs: bool,
@@ -371,12 +384,43 @@ enum UiCommand {
         recent_runs_limit: u32,
         job_id: Option<String>,
         correlation_id: String,
+        page: &'static str,
     },
     ObserveExportEvidence {
         cfg: AppConfig,
         run_id: String,
         job_id: Option<String>,
         correlation_id: String,
+        page: &'static str,
+    },
+    StreamRunEvents {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        include_history: bool,
+        page: &'static str,
+    },
+    WorkflowRunPipeline {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        job_id: Option<String>,
+        project_id: String,
+        project_path: String,
+        project_name: String,
+        template_id: String,
+        toolchain_id: String,
+        toolchain_set_id: String,
+        target_id: String,
+        build_variant: BuildVariant,
+        module: String,
+        variant_name: String,
+        tasks: Vec<String>,
+        apk_path: String,
+        application_id: String,
+        activity: String,
+        options: Option<WorkflowPipelineOptions>,
+        stream_history: bool,
     },
     BuildRun {
         cfg: AppConfig,
@@ -504,6 +548,7 @@ fn build_ui(app: &gtk::Application) {
 
     // Pages
     let home = page_home(cfg.clone(), cmd_tx.clone());
+    let workflow = page_workflow(cfg.clone(), cmd_tx.clone(), &window);
     let jobs_history = page_jobs_history(cfg.clone(), cmd_tx.clone());
     let toolchains = page_toolchains(cfg.clone(), cmd_tx.clone());
     let projects = page_projects(cfg.clone(), cmd_tx.clone(), &window);
@@ -513,6 +558,7 @@ fn build_ui(app: &gtk::Application) {
     let settings = page_settings(cfg.clone());
 
     stack.add_titled(&home.page.root, Some("home"), "Job Control");
+    stack.add_titled(&workflow.root, Some("workflow"), "Workflow");
     stack.add_titled(&toolchains.page.root, Some("toolchains"), "Toolchains");
     stack.add_titled(&projects.page.root, Some("projects"), "Projects");
     stack.add_titled(&console.page.root, Some("console"), "Build");
@@ -523,6 +569,7 @@ fn build_ui(app: &gtk::Application) {
 
     // Clone page handles for event routing closure.
     let home_page_for_events = home.clone();
+    let workflow_for_events = workflow.clone();
     let jobs_for_events = jobs_history.clone();
     let toolchains_for_events = toolchains.clone();
     let projects_for_events = projects.clone();
@@ -539,6 +586,7 @@ fn build_ui(app: &gtk::Application) {
                 Ok(ev) => match ev {
                     AppEvent::Log { page, line } => match page {
                         "home" => home_page_for_events.append(&line),
+                        "workflow" => workflow_for_events.append(&line),
                         "jobs" => jobs_for_events.append(&line),
                         "toolchains" => toolchains_for_events.append(&line),
                         "projects" => projects_for_events.append(&line),
@@ -1201,11 +1249,416 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     }
 }
 
+fn page_workflow(
+    cfg: Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: mpsc::Sender<UiCommand>,
+    parent: &gtk::ApplicationWindow,
+) -> Page {
+    let page = make_page(
+        "Workflow - Pipeline orchestration",
+        "Overview: Run workflow.pipeline with explicit step inputs and watch run-level events as the pipeline fans out across services.",
+        "Connections: WorkflowService creates a pipeline job and delegates to Project/Toolchain/Build/Targets/Observe. Run streams come from JobService. Settings controls the WorkflowService address.",
+    );
+
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+    let identity_frame = gtk::Frame::builder().label("Run identity").build();
+    let identity_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let run_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional run id")
+        .hexpand(true)
+        .build();
+    let correlation_id_entry = gtk::Entry::builder()
+        .placeholder_text("optional correlation id")
+        .hexpand(true)
+        .build();
+    let use_job_id_check = gtk::CheckButton::with_label("Use job id");
+    let job_id_entry = gtk::Entry::builder()
+        .placeholder_text("job id")
+        .hexpand(true)
+        .build();
+    let include_history_check = gtk::CheckButton::with_label("Include run history");
+    include_history_check.set_active(true);
+
+    set_tooltip(&run_id_entry, "What: Optional RunId to assign to the pipeline. Why: use a stable id for run dashboards. How: enter a custom id or leave blank to auto-generate.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id for grouping jobs. Why: helps group pipeline jobs with other work. How: set a stable string to reuse across related jobs.");
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new pipeline job. Why: attach pipeline output to a known job stream. How: enable and enter a job id.");
+    set_tooltip(&job_id_entry, "What: Existing job id for pipeline. Why: attach pipeline results to a known job. How: paste a job id from Job Control or Job History.");
+    set_tooltip(&include_history_check, "What: Include existing run history in the stream. Why: show earlier events when attaching to an existing run. How: enable to replay history before live events.");
+
+    identity_grid.attach(&gtk::Label::new(Some("Run id")), 0, 0, 1, 1);
+    identity_grid.attach(&run_id_entry, 1, 0, 1, 1);
+    identity_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
+    identity_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
+    identity_grid.attach(&use_job_id_check, 0, 2, 1, 1);
+    identity_grid.attach(&job_id_entry, 1, 2, 1, 1);
+    identity_grid.attach(&include_history_check, 1, 3, 1, 1);
+
+    identity_frame.set_child(Some(&identity_grid));
+    controls.append(&identity_frame);
+
+    let project_frame = gtk::Frame::builder().label("Project + Toolchain").build();
+    let project_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let template_id_entry = gtk::Entry::builder()
+        .placeholder_text("template id (e.g. tmpl-sample-console)")
+        .hexpand(true)
+        .build();
+    let project_path_entry = gtk::Entry::builder()
+        .placeholder_text("project path (create/open)")
+        .hexpand(true)
+        .build();
+    let project_browse = gtk::Button::with_label("Browse...");
+    let project_name_entry = gtk::Entry::builder()
+        .placeholder_text("project name (optional)")
+        .hexpand(true)
+        .build();
+    let project_id_entry = gtk::Entry::builder()
+        .placeholder_text("project id (optional)")
+        .hexpand(true)
+        .build();
+    let toolchain_id_entry = gtk::Entry::builder()
+        .placeholder_text("toolchain id (verify)")
+        .hexpand(true)
+        .build();
+    let toolchain_set_entry = gtk::Entry::builder()
+        .placeholder_text("toolchain set id (build/project)")
+        .hexpand(true)
+        .build();
+    let target_id_entry = gtk::Entry::builder()
+        .placeholder_text("target id (adb serial)")
+        .hexpand(true)
+        .build();
+
+    set_tooltip(&template_id_entry, "What: Project template id for create steps. Why: create_project needs a template id. How: copy from Projects or registry.");
+    set_tooltip(&project_path_entry, "What: Project path for create/open steps. Why: project.create/open needs a filesystem path. How: enter a path or use Browse.");
+    set_tooltip(&project_browse, "What: Pick a project folder. Why: avoid typing full paths. How: select a folder.");
+    set_tooltip(&project_name_entry, "What: Project name for create. Why: create_project needs a name. How: enter a friendly name or leave blank to infer.");
+    set_tooltip(&project_id_entry, "What: Existing project id. Why: build steps can use an id instead of a path. How: paste from Projects or Job History.");
+    set_tooltip(&toolchain_id_entry, "What: Toolchain id to verify. Why: toolchain.verify step needs an installed toolchain id. How: copy from Toolchains or Job History.");
+    set_tooltip(&toolchain_set_entry, "What: Toolchain set id for build/project steps. Why: pipeline passes this to project.create and build. How: copy from Toolchains or Projects.");
+    set_tooltip(&target_id_entry, "What: Target id/adb serial for install/launch. Why: target steps need a device. How: copy from Targets.");
+
+    project_grid.attach(&gtk::Label::new(Some("Template id")), 0, 0, 1, 1);
+    project_grid.attach(&template_id_entry, 1, 0, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Project path")), 0, 1, 1, 1);
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    path_row.append(&project_path_entry);
+    path_row.append(&project_browse);
+    project_grid.attach(&path_row, 1, 1, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Project name")), 0, 2, 1, 1);
+    project_grid.attach(&project_name_entry, 1, 2, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Project id")), 0, 3, 1, 1);
+    project_grid.attach(&project_id_entry, 1, 3, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Toolchain id")), 0, 4, 1, 1);
+    project_grid.attach(&toolchain_id_entry, 1, 4, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Toolchain set id")), 0, 5, 1, 1);
+    project_grid.attach(&toolchain_set_entry, 1, 5, 1, 1);
+    project_grid.attach(&gtk::Label::new(Some("Target id")), 0, 6, 1, 1);
+    project_grid.attach(&target_id_entry, 1, 6, 1, 1);
+
+    project_frame.set_child(Some(&project_grid));
+    controls.append(&project_frame);
+
+    let build_frame = gtk::Frame::builder().label("Build + Launch").build();
+    let build_grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .build();
+
+    let variant_combo = gtk::DropDown::from_strings(&["debug", "release"]);
+    variant_combo.set_selected(0);
+    let variant_name_entry = gtk::Entry::builder()
+        .placeholder_text("variant name override (e.g. demoDebug)")
+        .hexpand(true)
+        .build();
+    let module_entry = gtk::Entry::builder()
+        .placeholder_text("module (e.g. app or :app)")
+        .hexpand(true)
+        .build();
+    let tasks_entry = gtk::Entry::builder()
+        .placeholder_text("tasks (comma/space separated)")
+        .hexpand(true)
+        .build();
+    let apk_path_entry = gtk::Entry::builder()
+        .placeholder_text("apk path for install")
+        .hexpand(true)
+        .build();
+    let application_id_entry = gtk::Entry::builder()
+        .placeholder_text("application id (com.example.app)")
+        .hexpand(true)
+        .build();
+    let activity_entry = gtk::Entry::builder()
+        .placeholder_text("activity (optional)")
+        .hexpand(true)
+        .build();
+
+    set_tooltip(&variant_combo, "What: Base build variant. Why: used when Variant name is empty. How: choose debug or release.");
+    set_tooltip(&variant_name_entry, "What: Explicit variant name override. Why: override debug/release with a custom variant. How: enter demoDebug or similar.");
+    set_tooltip(&module_entry, "What: Gradle module. Why: limit build to a module. How: enter app or :app.");
+    set_tooltip(&tasks_entry, "What: Explicit Gradle tasks. Why: override default tasks. How: enter space or comma separated tasks.");
+    set_tooltip(&apk_path_entry, "What: APK path for install step. Why: targets.install needs an APK. How: paste a path or leave empty to skip install.");
+    set_tooltip(&application_id_entry, "What: Application id for launch. Why: targets.launch uses it to start the app. How: enter com.example.app.");
+    set_tooltip(&activity_entry, "What: Optional activity for launch. Why: open a specific activity. How: enter the full activity class or leave blank.");
+
+    build_grid.attach(&gtk::Label::new(Some("Variant")), 0, 0, 1, 1);
+    build_grid.attach(&variant_combo, 1, 0, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("Variant name")), 0, 1, 1, 1);
+    build_grid.attach(&variant_name_entry, 1, 1, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("Module")), 0, 2, 1, 1);
+    build_grid.attach(&module_entry, 1, 2, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("Tasks")), 0, 3, 1, 1);
+    build_grid.attach(&tasks_entry, 1, 3, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("APK path")), 0, 4, 1, 1);
+    build_grid.attach(&apk_path_entry, 1, 4, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("Application id")), 0, 5, 1, 1);
+    build_grid.attach(&application_id_entry, 1, 5, 1, 1);
+    build_grid.attach(&gtk::Label::new(Some("Activity")), 0, 6, 1, 1);
+    build_grid.attach(&activity_entry, 1, 6, 1, 1);
+
+    build_frame.set_child(Some(&build_grid));
+    controls.append(&build_frame);
+
+    let steps_frame = gtk::Frame::builder().label("Pipeline steps").build();
+    let steps_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let auto_infer_check = gtk::CheckButton::with_label("Auto-infer steps from inputs");
+    auto_infer_check.set_active(true);
+    set_tooltip(&auto_infer_check, "What: Let the pipeline infer which steps to run. Why: reduces manual toggles. How: leave enabled to infer steps from the filled inputs.");
+
+    let create_check = gtk::CheckButton::with_label("Create project");
+    let open_check = gtk::CheckButton::with_label("Open project");
+    let verify_check = gtk::CheckButton::with_label("Verify toolchain");
+    let build_check = gtk::CheckButton::with_label("Build");
+    let install_check = gtk::CheckButton::with_label("Install APK");
+    let launch_check = gtk::CheckButton::with_label("Launch app");
+    let support_check = gtk::CheckButton::with_label("Export support bundle");
+    let evidence_check = gtk::CheckButton::with_label("Export evidence bundle");
+
+    set_tooltip(&create_check, "What: Run project.create. Why: scaffold a project before build. How: enable when you want to create from a template.");
+    set_tooltip(&open_check, "What: Run project.open. Why: open an existing project. How: enable when you have a project path.");
+    set_tooltip(&verify_check, "What: Run toolchain.verify. Why: ensure SDK/NDK installs are valid. How: enable to verify a toolchain id.");
+    set_tooltip(&build_check, "What: Run build.run. Why: produce APKs/AABs. How: enable when you have a project id/path.");
+    set_tooltip(&install_check, "What: Run targets.install. Why: install APK on a device. How: enable with target id and apk path.");
+    set_tooltip(&launch_check, "What: Run targets.launch. Why: start the app on the target. How: enable with target id and application id.");
+    set_tooltip(&support_check, "What: Run observe.support_bundle. Why: export a support bundle after the run. How: enable to capture logs and config.");
+    set_tooltip(&evidence_check, "What: Run observe.evidence_bundle. Why: export a run-specific evidence bundle. How: enable and set Run id.");
+
+    let step_row_a = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    step_row_a.append(&create_check);
+    step_row_a.append(&open_check);
+    step_row_a.append(&verify_check);
+    step_row_a.append(&build_check);
+    let step_row_b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    step_row_b.append(&install_check);
+    step_row_b.append(&launch_check);
+    step_row_b.append(&support_check);
+    step_row_b.append(&evidence_check);
+
+    steps_box.append(&auto_infer_check);
+    steps_box.append(&step_row_a);
+    steps_box.append(&step_row_b);
+    steps_frame.set_child(Some(&steps_box));
+    controls.append(&steps_frame);
+
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let run_btn = gtk::Button::with_label("Run pipeline");
+    let stream_btn = gtk::Button::with_label("Stream run events");
+    set_tooltip(&run_btn, "What: Start the workflow pipeline. Why: orchestrate multi-service steps in order. How: fill inputs and click.");
+    set_tooltip(&stream_btn, "What: Stream run-level events. Why: watch pipeline progress across jobs. How: enter run id or correlation id and click.");
+    action_row.append(&run_btn);
+    action_row.append(&stream_btn);
+    controls.append(&action_row);
+
+    page.container.insert_child_after(&controls, Some(&page.intro));
+
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        if !cfg.last_job_id.is_empty() {
+            job_id_entry.set_text(&cfg.last_job_id);
+        }
+        if !cfg.last_correlation_id.is_empty() {
+            correlation_id_entry.set_text(&cfg.last_correlation_id);
+        }
+    }
+
+    let parent_window = parent.clone();
+    let project_path_entry_browse = project_path_entry.clone();
+    project_browse.connect_clicked(move |_| {
+        let dialog = gtk::FileChooserNative::new(
+            Some("Select Project Folder"),
+            Some(&parent_window),
+            gtk::FileChooserAction::SelectFolder,
+            Some("Open"),
+            Some("Cancel"),
+        );
+
+        let current = project_path_entry_browse.text().to_string();
+        if !current.trim().is_empty() {
+            let folder = gtk::gio::File::for_path(current.trim());
+            let _ = dialog.set_current_folder(Some(&folder));
+        }
+
+        let project_entry_dialog = project_path_entry_browse.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let Some(file) = dialog.file() {
+                    if let Some(path) = file.path() {
+                        if let Some(path_str) = path.to_str() {
+                            project_entry_dialog.set_text(path_str);
+                        }
+                    }
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
+    });
+
+    let cfg_run = cfg.clone();
+    let cmd_tx_run = cmd_tx.clone();
+    let run_id_entry_run = run_id_entry.clone();
+    let correlation_id_entry_run = correlation_id_entry.clone();
+    let use_job_id_run = use_job_id_check.clone();
+    let job_id_entry_run = job_id_entry.clone();
+    let include_history_run = include_history_check.clone();
+    let project_id_entry_run = project_id_entry.clone();
+    let project_path_entry_run = project_path_entry.clone();
+    let project_name_entry_run = project_name_entry.clone();
+    let template_id_entry_run = template_id_entry.clone();
+    let toolchain_id_entry_run = toolchain_id_entry.clone();
+    let toolchain_set_entry_run = toolchain_set_entry.clone();
+    let target_id_entry_run = target_id_entry.clone();
+    let variant_combo_run = variant_combo.clone();
+    let variant_name_entry_run = variant_name_entry.clone();
+    let module_entry_run = module_entry.clone();
+    let tasks_entry_run = tasks_entry.clone();
+    let apk_path_entry_run = apk_path_entry.clone();
+    let application_id_entry_run = application_id_entry.clone();
+    let activity_entry_run = activity_entry.clone();
+    let auto_infer_run = auto_infer_check.clone();
+    let create_check_run = create_check.clone();
+    let open_check_run = open_check.clone();
+    let verify_check_run = verify_check.clone();
+    let build_check_run = build_check.clone();
+    let install_check_run = install_check.clone();
+    let launch_check_run = launch_check.clone();
+    let support_check_run = support_check.clone();
+    let evidence_check_run = evidence_check.clone();
+    run_btn.connect_clicked(move |_| {
+        let job_id_raw = job_id_entry_run.text().to_string();
+        let correlation_id = correlation_id_entry_run.text().to_string();
+        let job_id = if use_job_id_run.is_active() && !job_id_raw.trim().is_empty() {
+            Some(job_id_raw.clone())
+        } else {
+            None
+        };
+
+        {
+            let mut cfg = cfg_run.lock().unwrap();
+            if !job_id_raw.trim().is_empty() {
+                cfg.last_job_id = job_id_raw.clone();
+            }
+            if !correlation_id.trim().is_empty() {
+                cfg.last_correlation_id = correlation_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+
+        let cfg = cfg_run.lock().unwrap().clone();
+        let run_id = run_id_entry_run.text().to_string();
+        let project_id = project_id_entry_run.text().to_string();
+        let project_path = project_path_entry_run.text().to_string();
+        let project_name = project_name_entry_run.text().to_string();
+        let template_id = template_id_entry_run.text().to_string();
+        let toolchain_id = toolchain_id_entry_run.text().to_string();
+        let toolchain_set_id = toolchain_set_entry_run.text().to_string();
+        let target_id = target_id_entry_run.text().to_string();
+        let build_variant = match variant_combo_run.selected() {
+            1 => BuildVariant::Release,
+            _ => BuildVariant::Debug,
+        };
+        let variant_name = variant_name_entry_run.text().to_string();
+        let module = module_entry_run.text().to_string();
+        let tasks = parse_list_tokens(&tasks_entry_run.text());
+        let apk_path = apk_path_entry_run.text().to_string();
+        let application_id = application_id_entry_run.text().to_string();
+        let activity = activity_entry_run.text().to_string();
+        let options = if auto_infer_run.is_active() {
+            None
+        } else {
+            Some(WorkflowPipelineOptions {
+                verify_toolchain: verify_check_run.is_active(),
+                create_project: create_check_run.is_active(),
+                open_project: open_check_run.is_active(),
+                build: build_check_run.is_active(),
+                install_apk: install_check_run.is_active(),
+                launch_app: launch_check_run.is_active(),
+                export_support_bundle: support_check_run.is_active(),
+                export_evidence_bundle: evidence_check_run.is_active(),
+            })
+        };
+
+        cmd_tx_run
+            .send(UiCommand::WorkflowRunPipeline {
+                cfg,
+                run_id,
+                correlation_id,
+                job_id,
+                project_id,
+                project_path,
+                project_name,
+                template_id,
+                toolchain_id,
+                toolchain_set_id,
+                target_id,
+                build_variant,
+                module,
+                variant_name,
+                tasks,
+                apk_path,
+                application_id,
+                activity,
+                options,
+                stream_history: include_history_run.is_active(),
+            })
+            .ok();
+    });
+
+    let cfg_stream = cfg.clone();
+    let cmd_tx_stream = cmd_tx.clone();
+    let run_id_entry_stream = run_id_entry.clone();
+    let correlation_id_entry_stream = correlation_id_entry.clone();
+    let include_history_stream = include_history_check.clone();
+    stream_btn.connect_clicked(move |_| {
+        let cfg = cfg_stream.lock().unwrap().clone();
+        cmd_tx_stream
+            .send(UiCommand::StreamRunEvents {
+                cfg,
+                run_id: run_id_entry_stream.text().to_string(),
+                correlation_id: correlation_id_entry_stream.text().to_string(),
+                include_history: include_history_stream.is_active(),
+                page: "workflow",
+            })
+            .ok();
+    });
+
+    page
+}
+
 fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
     let page = make_page(
         "Job History - JobService query and exports",
         "Overview: Query JobService for jobs and event history with filters, and export logs to JSON for sharing or troubleshooting.",
-        "Connections: Job Control, Toolchains, Projects, Targets, Build, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
+        "Connections: Job Control, Workflow, Toolchains, Projects, Targets, Build, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
     );
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -1387,8 +1840,10 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
                 finished_after: finished_after_entry_list.text().to_string(),
                 finished_before: finished_before_entry_list.text().to_string(),
                 correlation_id: correlation_id_entry_list.text().to_string(),
+                run_id: String::new(),
                 page_size,
                 page_token: page_token_entry_list.text().to_string(),
+                page: "jobs",
             })
             .ok();
     });
@@ -1444,6 +1899,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
                 cfg,
                 job_id,
                 output_path: output_path_entry_export.text().to_string(),
+                page: "jobs",
             })
             .ok();
     });
@@ -1481,7 +1937,7 @@ fn page_toolchains(
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this toolchain action to an existing job stream. How: enable it and fill Job id below.");
-    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach or export. Why: stream results into a known job or export its logs. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group toolchain work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -3214,20 +3670,32 @@ fn page_console(
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
     let page = make_page(
         "Evidence - ObserveService runs and bundles",
-        "Overview: List workflow runs and export support or evidence bundles for auditing and sharing.",
-        "Connections: Jobs started in Job Control, Build, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
+        "Overview: List runs, group jobs by run, stream run-level events, and export support/evidence bundles or job logs.",
+        "Connections: Jobs started in Job Control, Workflow, Build, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
     );
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let primary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list_runs = gtk::Button::with_label("List runs");
     let export_support = gtk::Button::with_label("Export support bundle");
     let export_evidence = gtk::Button::with_label("Export evidence bundle");
     set_tooltip(&list_runs, "What: List runs from ObserveService. Why: discover run ids for evidence exports. How: click to query.");
     set_tooltip(&export_support, "What: Export a support bundle. Why: capture logs and config for troubleshooting. How: set options and click.");
     set_tooltip(&export_evidence, "What: Export an evidence bundle for a run. Why: capture run artifacts for audit or sharing. How: enter run id and click.");
-    row.append(&list_runs);
-    row.append(&export_support);
-    row.append(&export_evidence);
-    page.container.insert_child_after(&row, Some(&page.intro));
+    primary_row.append(&list_runs);
+    primary_row.append(&export_support);
+    primary_row.append(&export_evidence);
+    page.container.insert_child_after(&primary_row, Some(&page.intro));
+
+    let secondary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let list_jobs = gtk::Button::with_label("List jobs for run");
+    let stream_run = gtk::Button::with_label("Stream run events");
+    let export_job_logs = gtk::Button::with_label("Export job logs");
+    set_tooltip(&list_jobs, "What: List jobs for a run id or correlation id. Why: group pipeline jobs together. How: enter run id/correlation id and click.");
+    set_tooltip(&stream_run, "What: Stream run-level events. Why: watch pipeline progress across jobs. How: enter run id or correlation id and click.");
+    set_tooltip(&export_job_logs, "What: Export job logs to JSON. Why: share job details alongside run bundles. How: enter a job id and optional path, then click.");
+    secondary_row.append(&list_jobs);
+    secondary_row.append(&stream_run);
+    secondary_row.append(&export_job_logs);
+    page.container.insert_child_after(&secondary_row, Some(&primary_row));
 
     let job_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -3242,14 +3710,21 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    let output_path_entry = gtk::Entry::builder()
+        .placeholder_text("job log export path (optional)")
+        .hexpand(true)
+        .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this export to an existing job stream. How: enable it and fill Job id below.");
     set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
-    set_tooltip(&correlation_id_entry, "What: Correlation id to group evidence work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group work into a run. Why: filter run dashboards and evidence exports. How: set a stable string and reuse it.");
+    set_tooltip(&output_path_entry, "What: Optional output path for job log exports. Why: save logs to a specific file. How: leave blank to use the default export path.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
-    page.container.insert_child_after(&job_grid, Some(&row));
+    job_grid.attach(&gtk::Label::new(Some("Log export path")), 0, 2, 1, 1);
+    job_grid.attach(&output_path_entry, 1, 2, 1, 1);
+    page.container.insert_child_after(&job_grid, Some(&secondary_row));
 
     let form = gtk::Grid::builder()
         .row_spacing(8)
@@ -3264,6 +3739,8 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .text("10")
         .hexpand(true)
         .build();
+    let include_history = gtk::CheckButton::with_label("Include run history in stream");
+    include_history.set_active(true);
 
     let include_logs = gtk::CheckButton::with_label("Include logs");
     include_logs.set_active(true);
@@ -3273,8 +3750,9 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     include_toolchain.set_active(true);
     let include_recent = gtk::CheckButton::with_label("Include recent runs");
     include_recent.set_active(true);
-    set_tooltip(&run_id_entry, "What: Run id to export evidence for. Why: evidence bundles are run-specific. How: copy from List runs or Job History run_id.");
+    set_tooltip(&run_id_entry, "What: Run id for dashboards and evidence exports. Why: run-level actions need a run id. How: copy from List runs or Job History run_id.");
     set_tooltip(&recent_limit_entry, "What: Limit for recent runs included in support bundle. Why: control bundle size. How: enter an integer, for example 10.");
+    set_tooltip(&include_history, "What: Include previous run events in the stream. Why: replay history when attaching to existing runs. How: enable to replay before live events.");
     set_tooltip(&include_logs, "What: Include job logs. Why: logs are essential for troubleshooting. How: check to include.");
     set_tooltip(&include_config, "What: Include config snapshot. Why: capture environment and service settings. How: check to include.");
     set_tooltip(&include_toolchain, "What: Include toolchain provenance. Why: record SDK/NDK versions used. How: check to include.");
@@ -3293,13 +3771,14 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     form.attach(&run_id_entry, 1, 0, 1, 1);
     form.attach(&label_limit, 0, 1, 1, 1);
     form.attach(&recent_limit_entry, 1, 1, 1, 1);
+    form.attach(&include_history, 1, 2, 1, 1);
 
     let checkbox_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     checkbox_row.append(&include_logs);
     checkbox_row.append(&include_config);
     checkbox_row.append(&include_toolchain);
     checkbox_row.append(&include_recent);
-    form.attach(&checkbox_row, 1, 2, 1, 1);
+    form.attach(&checkbox_row, 1, 3, 1, 1);
 
     page.container.insert_child_after(&form, Some(&job_grid));
 
@@ -3315,9 +3794,63 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
 
     let cfg_list = cfg.clone();
     let cmd_tx_list = cmd_tx.clone();
+    let run_id_entry_list = run_id_entry.clone();
+    let correlation_id_entry_list = correlation_id_entry.clone();
     list_runs.connect_clicked(move |_| {
         let cfg = cfg_list.lock().unwrap().clone();
-        cmd_tx_list.send(UiCommand::ObserveListRuns { cfg }).ok();
+        cmd_tx_list
+            .send(UiCommand::ObserveListRuns {
+                cfg,
+                run_id: run_id_entry_list.text().to_string(),
+                correlation_id: correlation_id_entry_list.text().to_string(),
+                result: String::new(),
+                page_size: 25,
+                page_token: String::new(),
+                page: "evidence",
+            })
+            .ok();
+    });
+
+    let cfg_list_jobs = cfg.clone();
+    let cmd_tx_list_jobs = cmd_tx.clone();
+    let run_id_entry_list_jobs = run_id_entry.clone();
+    let correlation_id_entry_list_jobs = correlation_id_entry.clone();
+    list_jobs.connect_clicked(move |_| {
+        let cfg = cfg_list_jobs.lock().unwrap().clone();
+        cmd_tx_list_jobs
+            .send(UiCommand::JobsList {
+                cfg,
+                job_types: String::new(),
+                states: String::new(),
+                created_after: String::new(),
+                created_before: String::new(),
+                finished_after: String::new(),
+                finished_before: String::new(),
+                correlation_id: correlation_id_entry_list_jobs.text().to_string(),
+                run_id: run_id_entry_list_jobs.text().to_string(),
+                page_size: 200,
+                page_token: String::new(),
+                page: "evidence",
+            })
+            .ok();
+    });
+
+    let cfg_stream = cfg.clone();
+    let cmd_tx_stream = cmd_tx.clone();
+    let run_id_entry_stream = run_id_entry.clone();
+    let correlation_id_entry_stream = correlation_id_entry.clone();
+    let include_history_stream = include_history.clone();
+    stream_run.connect_clicked(move |_| {
+        let cfg = cfg_stream.lock().unwrap().clone();
+        cmd_tx_stream
+            .send(UiCommand::StreamRunEvents {
+                cfg,
+                run_id: run_id_entry_stream.text().to_string(),
+                correlation_id: correlation_id_entry_stream.text().to_string(),
+                include_history: include_history_stream.is_active(),
+                page: "evidence",
+            })
+            .ok();
     });
 
     let cfg_support = cfg.clone();
@@ -3365,6 +3898,7 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
                 recent_runs_limit: limit,
                 job_id,
                 correlation_id,
+                page: "evidence",
             })
             .ok();
     });
@@ -3402,6 +3936,33 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
                 run_id: run_id_evidence.text().to_string(),
                 job_id,
                 correlation_id,
+                page: "evidence",
+            })
+            .ok();
+    });
+
+    let cfg_export_jobs = cfg.clone();
+    let cmd_tx_export_jobs = cmd_tx.clone();
+    let job_id_entry_export = job_id_entry.clone();
+    let output_path_entry_export = output_path_entry.clone();
+    export_job_logs.connect_clicked(move |_| {
+        let job_id = job_id_entry_export.text().to_string();
+        {
+            let mut cfg = cfg_export_jobs.lock().unwrap();
+            if !job_id.trim().is_empty() {
+                cfg.last_job_id = job_id.clone();
+            }
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+        let cfg = cfg_export_jobs.lock().unwrap().clone();
+        cmd_tx_export_jobs
+            .send(UiCommand::JobsExportLogs {
+                cfg,
+                job_id,
+                output_path: output_path_entry_export.text().to_string(),
+                page: "evidence",
             })
             .ok();
     });
@@ -3518,6 +4079,21 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
         Box::new(move |v| {
             let mut cfg = cfg6.lock().unwrap();
             cfg.observe_addr = v;
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }),
+    );
+
+    let cfg7 = cfg.clone();
+    add_row(
+        6,
+        "WorkflowService",
+        "What: WorkflowService address (host:port). Why: Workflow tab uses it for pipeline runs. How: enter an address like 127.0.0.1:50057.",
+        cfg.lock().unwrap().workflow_addr.clone(),
+        Box::new(move |v| {
+            let mut cfg = cfg7.lock().unwrap();
+            cfg.workflow_addr = v;
             if let Err(err) = cfg.save() {
                 eprintln!("Failed to persist UI config: {err}");
             }
@@ -3824,16 +4400,58 @@ fn stream_job_event_lines(job_id: &str, event: &JobEvent) -> Vec<String> {
     }
 }
 
+fn run_stream_lines(event: &JobEvent) -> Vec<String> {
+    let job_id = event
+        .job_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("-");
+    match event.payload.as_ref() {
+        Some(JobPayload::Log(log)) => {
+            if let Some(chunk) = log.chunk.as_ref() {
+                let mut text = String::from_utf8_lossy(&chunk.data).to_string();
+                if text.is_empty() {
+                    return vec![format!(
+                        "job {job_id}: log: stream={} truncated={}\n",
+                        chunk.stream, chunk.truncated
+                    )];
+                }
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                vec![
+                    format!(
+                        "job {job_id}: log: stream={} truncated={}\n",
+                        chunk.stream, chunk.truncated
+                    ),
+                    text,
+                ]
+            } else {
+                vec![format!("job {job_id}: log: missing chunk\n")]
+            }
+        }
+        _ => stream_job_event_lines(job_id, event),
+    }
+}
+
 fn format_job_row(job: &Job) -> String {
     let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
     let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
     let created = job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
     let finished = job.finished_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    let run_id = job.run_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+    let correlation_id = if job.correlation_id.trim().is_empty() {
+        "-"
+    } else {
+        job.correlation_id.as_str()
+    };
     format!(
-        "- {} type={} state={:?} created={} finished={} display={}\n",
+        "- {} type={} state={:?} run_id={} corr={} created={} finished={} display={}\n",
         job_id,
         job.job_type,
         state,
+        run_id,
+        correlation_id,
         created,
         finished,
         job.display_name
@@ -3975,13 +4593,15 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             finished_after,
             finished_before,
             correlation_id,
+            run_id,
             page_size,
             page_token,
+            page,
         } => {
-            ui.send(AppEvent::Log { page: "jobs", line: format!("Listing jobs via {}\n", cfg.job_addr) }).ok();
+            ui.send(AppEvent::Log { page, line: format!("Listing jobs via {}\n", cfg.job_addr) }).ok();
             let (state_filters, unknown_states) = parse_job_states(&states);
             if !unknown_states.is_empty() {
-                ui.send(AppEvent::Log { page: "jobs", line: format!("Unknown states: {}\n", unknown_states.join(", ")) }).ok();
+                ui.send(AppEvent::Log { page, line: format!("Unknown states: {}\n", unknown_states.join(", ")) }).ok();
             }
             let created_after = match parse_optional_millis(&created_after) {
                 Ok(value) => value,
@@ -4020,7 +4640,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 finished_after: finished_after.map(|ms| Timestamp { unix_millis: ms }),
                 finished_before: finished_before.map(|ms| Timestamp { unix_millis: ms }),
                 correlation_id: correlation_id.trim().to_string(),
-                run_id: None,
+                run_id: run_id_from_optional(&run_id),
             };
 
             let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
@@ -4033,16 +4653,42 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 .into_inner();
 
             if resp.jobs.is_empty() {
-                ui.send(AppEvent::Log { page: "jobs", line: "No jobs found.\n".into() }).ok();
-            } else {
-                ui.send(AppEvent::Log { page: "jobs", line: format!("Jobs ({})\n", resp.jobs.len()) }).ok();
+                ui.send(AppEvent::Log { page, line: "No jobs found.\n".into() }).ok();
+            } else if page == "jobs" {
+                ui.send(AppEvent::Log { page, line: format!("Jobs ({})\n", resp.jobs.len()) }).ok();
                 for job in &resp.jobs {
-                    ui.send(AppEvent::Log { page: "jobs", line: format_job_row(job) }).ok();
+                    ui.send(AppEvent::Log { page, line: format_job_row(job) }).ok();
+                }
+            } else {
+                let mut grouped: BTreeMap<String, Vec<&Job>> = BTreeMap::new();
+                for job in &resp.jobs {
+                    let run_key = job
+                        .run_id
+                        .as_ref()
+                        .map(|id| id.value.clone())
+                        .filter(|value| !value.trim().is_empty())
+                        .or_else(|| {
+                            let corr = job.correlation_id.trim();
+                            if corr.is_empty() {
+                                None
+                            } else {
+                                Some(format!("correlation_id={corr}"))
+                            }
+                        })
+                        .unwrap_or_else(|| "unassigned".to_string());
+                    grouped.entry(run_key).or_default().push(job);
+                }
+                ui.send(AppEvent::Log { page, line: format!("Runs ({})\n", grouped.len()) }).ok();
+                for (run_key, jobs) in grouped {
+                    ui.send(AppEvent::Log { page, line: format!("run={run_key} jobs={}\n", jobs.len()) }).ok();
+                    for job in jobs {
+                        ui.send(AppEvent::Log { page, line: format_job_row(job) }).ok();
+                    }
                 }
             }
             if let Some(page_info) = resp.page_info {
                 if !page_info.next_page_token.is_empty() {
-                    ui.send(AppEvent::Log { page: "jobs", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                    ui.send(AppEvent::Log { page, line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
                 }
             }
         }
@@ -4127,13 +4773,18 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::JobsExportLogs { cfg, job_id, output_path } => {
+        UiCommand::JobsExportLogs {
+            cfg,
+            job_id,
+            output_path,
+            page,
+        } => {
             let job_id = job_id.trim().to_string();
             if job_id.is_empty() {
-                ui.send(AppEvent::Log { page: "jobs", line: "job_id is required for export\n".into() }).ok();
+                ui.send(AppEvent::Log { page, line: "job_id is required for export\n".into() }).ok();
                 return Ok(());
             }
-            ui.send(AppEvent::Log { page: "jobs", line: format!("Exporting logs for {job_id}\n") }).ok();
+            ui.send(AppEvent::Log { page, line: format!("Exporting logs for {job_id}\n") }).ok();
 
             let path = if output_path.trim().is_empty() {
                 default_export_path("ui-job-export", &job_id)
@@ -4145,7 +4796,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             let job = match client.get_job(GetJobRequest { job_id: Some(Id { value: job_id.clone() }) }).await {
                 Ok(resp) => resp.into_inner().job,
                 Err(err) => {
-                    ui.send(AppEvent::Log { page: "jobs", line: format!("GetJob failed: {err}\n") }).ok();
+                    ui.send(AppEvent::Log { page, line: format!("GetJob failed: {err}\n") }).ok();
                     None
                 }
             };
@@ -4158,7 +4809,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 events: events.iter().map(LogExportEvent::from_proto).collect(),
             };
             write_json_atomic(&path, &export)?;
-            ui.send(AppEvent::Log { page: "jobs", line: format!("Exported logs to {}\n", path.display()) }).ok();
+            ui.send(AppEvent::Log { page, line: format!("Exported logs to {}\n", path.display()) }).ok();
         }
 
         UiCommand::ToolchainListProviders { cfg } => {
@@ -5410,42 +6061,88 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
-        UiCommand::ObserveListRuns { cfg } => {
-            ui.send(AppEvent::Log { page: "evidence", line: format!("Listing runs via {}\n", cfg.observe_addr) }).ok();
+        UiCommand::ObserveListRuns {
+            cfg,
+            run_id,
+            correlation_id,
+            result,
+            page_size,
+            page_token,
+            page,
+        } => {
+            ui.send(AppEvent::Log { page, line: format!("Listing runs via {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
-            let resp = client.list_runs(ListRunsRequest {
-                page: Some(Pagination {
-                    page_size: 25,
-                    page_token: String::new(),
-                }),
-                filter: None,
-            }).await?.into_inner();
+            let run_id_value = run_id.trim().to_string();
+            let correlation_value = correlation_id.trim().to_string();
+            let result_value = result.trim().to_string();
+            let filter = if run_id_value.is_empty() && correlation_value.is_empty() && result_value.is_empty() {
+                None
+            } else {
+                Some(RunFilter {
+                    run_id: run_id_from_optional(&run_id_value),
+                    correlation_id: correlation_value,
+                    project_id: None,
+                    target_id: None,
+                    toolchain_set_id: None,
+                    result: result_value,
+                })
+            };
+
+            let resp = client
+                .list_runs(ListRunsRequest {
+                    page: Some(Pagination {
+                        page_size: page_size.max(1),
+                        page_token,
+                    }),
+                    filter,
+                })
+                .await?
+                .into_inner();
 
             if resp.runs.is_empty() {
-                ui.send(AppEvent::Log { page: "evidence", line: "No runs recorded.\n".into() }).ok();
+                ui.send(AppEvent::Log { page, line: "No runs recorded.\n".into() }).ok();
             } else {
-                ui.send(AppEvent::Log { page: "evidence", line: "Runs:\n".into() }).ok();
+                ui.send(AppEvent::Log { page, line: "Runs:\n".into() }).ok();
                 for run in resp.runs {
-                    let run_id = run.run_id.as_ref().map(|i| i.value.as_str()).unwrap_or("");
+                    let run_id = run.run_id.as_ref().map(|i| i.value.as_str()).unwrap_or("-");
+                    let project_id = run.project_id.as_ref().map(|i| i.value.as_str()).unwrap_or("-");
+                    let target_id = run.target_id.as_ref().map(|i| i.value.as_str()).unwrap_or("-");
+                    let toolchain_set_id = run.toolchain_set_id.as_ref().map(|i| i.value.as_str()).unwrap_or("-");
                     let started = run.started_at.as_ref().map(|t| t.unix_millis).unwrap_or(0);
                     let finished = run.finished_at.as_ref().map(|t| t.unix_millis).unwrap_or(0);
                     ui.send(AppEvent::Log {
-                        page: "evidence",
+                        page,
                         line: format!(
-                            "- {} result={} started={} finished={} jobs={}\n",
+                            "- {} result={} corr={} project={} target={} toolchain_set={} started={} finished={} jobs={}\n",
                             run_id,
                             run.result,
+                            run.correlation_id,
+                            project_id,
+                            target_id,
+                            toolchain_set_id,
                             started,
                             finished,
                             run.job_ids.len()
                         ),
                     }).ok();
+                    if !run.job_ids.is_empty() {
+                        let job_ids = run
+                            .job_ids
+                            .iter()
+                            .map(|id| id.value.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.send(AppEvent::Log { page, line: format!("  job_ids: {job_ids}\n") }).ok();
+                    }
+                    if !run.summary.is_empty() {
+                        ui.send(AppEvent::Log { page, line: format!("  summary: {}\n", kv_pairs(&run.summary)) }).ok();
+                    }
                 }
             }
 
             if let Some(page_info) = resp.page_info {
                 if !page_info.next_page_token.trim().is_empty() {
-                    ui.send(AppEvent::Log { page: "evidence", line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                    ui.send(AppEvent::Log { page, line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
                 }
             }
         }
@@ -5459,8 +6156,9 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             recent_runs_limit,
             job_id,
             correlation_id,
+            page,
         } => {
-            ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
+            ui.send(AppEvent::Log { page, line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_support_bundle(ExportSupportBundleRequest {
                 include_logs,
@@ -5481,7 +6179,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log {
-                page: "evidence",
+                page,
                 line: format!("Support bundle job: {job_id}\nOutput path: {}\n", resp.output_path),
             }).ok();
 
@@ -5490,8 +6188,8 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "evidence", ui_stream).await {
-                        let _ = ui_err.send(AppEvent::Log { page: "evidence", line: format!("job stream error ({job_id}): {err}\n") });
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), page, ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page, line: format!("job stream error ({job_id}): {err}\n") });
                     }
                 });
             }
@@ -5502,13 +6200,14 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             run_id,
             job_id,
             correlation_id,
+            page,
         } => {
             let run_id = run_id.trim().to_string();
             if run_id.is_empty() {
-                ui.send(AppEvent::Log { page: "evidence", line: "Run id is required for evidence export.\n".into() }).ok();
+                ui.send(AppEvent::Log { page, line: "Run id is required for evidence export.\n".into() }).ok();
                 return Ok(());
             }
-            ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
+            ui.send(AppEvent::Log { page, line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
                 run_id: Some(RunId { value: run_id.clone() }),
@@ -5521,7 +6220,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log {
-                page: "evidence",
+                page,
                 line: format!("Evidence bundle job: {job_id}\nOutput path: {}\n", resp.output_path),
             }).ok();
 
@@ -5530,11 +6229,157 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), "evidence", ui_stream).await {
-                        let _ = ui_err.send(AppEvent::Log { page: "evidence", line: format!("job stream error ({job_id}): {err}\n") });
+                    if let Err(err) = stream_job_events(job_addr, job_id.clone(), page, ui_stream).await {
+                        let _ = ui_err.send(AppEvent::Log { page, line: format!("job stream error ({job_id}): {err}\n") });
                     }
                 });
             }
+        }
+
+        UiCommand::StreamRunEvents {
+            cfg,
+            run_id,
+            correlation_id,
+            include_history,
+            page,
+        } => {
+            let run_id_value = run_id.trim().to_string();
+            let correlation_value = correlation_id.trim().to_string();
+            if run_id_value.is_empty() && correlation_value.is_empty() {
+                ui.send(AppEvent::Log { page, line: "run_id or correlation_id is required to stream\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page, line: format!("Streaming run events via {}\n", cfg.job_addr) }).ok();
+
+            let job_addr = cfg.job_addr.clone();
+            let ui_stream = ui.clone();
+            let ui_err = ui.clone();
+            tokio::spawn(async move {
+                if let Err(err) = stream_run_events(
+                    job_addr,
+                    run_id_value.clone(),
+                    correlation_value.clone(),
+                    include_history,
+                    page,
+                    ui_stream,
+                )
+                .await
+                {
+                    let _ = ui_err.send(AppEvent::Log { page, line: format!("run stream error: {err}\n") });
+                }
+            });
+        }
+
+        UiCommand::WorkflowRunPipeline {
+            cfg,
+            run_id,
+            correlation_id,
+            job_id,
+            project_id,
+            project_path,
+            project_name,
+            template_id,
+            toolchain_id,
+            toolchain_set_id,
+            target_id,
+            build_variant,
+            module,
+            variant_name,
+            tasks,
+            apk_path,
+            application_id,
+            activity,
+            options,
+            stream_history,
+        } => {
+            ui.send(AppEvent::Log { page: "workflow", line: format!("Connecting to WorkflowService at {}\n", cfg.workflow_addr) }).ok();
+            let channel = match connect(&cfg.workflow_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "workflow", line: format!("WorkflowService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = WorkflowServiceClient::new(channel);
+
+            let resp = match client
+                .run_pipeline(WorkflowPipelineRequest {
+                    run_id: run_id_from_optional(&run_id),
+                    correlation_id: correlation_id.trim().to_string(),
+                    job_id: job_id
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Id { value: value.clone() }),
+                    project_id: to_optional_id(&project_id),
+                    project_path: project_path.trim().to_string(),
+                    project_name: project_name.trim().to_string(),
+                    template_id: to_optional_id(&template_id),
+                    toolchain_id: to_optional_id(&toolchain_id),
+                    toolchain_set_id: to_optional_id(&toolchain_set_id),
+                    target_id: to_optional_id(&target_id),
+                    build_variant: build_variant as i32,
+                    module,
+                    variant_name,
+                    tasks,
+                    apk_path,
+                    application_id,
+                    activity,
+                    options,
+                })
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "workflow", line: format!("RunPipeline failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            let run_id_value = resp.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+            let job_id_value = resp.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+            let project_id_value = resp.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+            ui.send(AppEvent::Log {
+                page: "workflow",
+                line: format!(
+                    "Pipeline started: run_id={} job_id={} project_id={}\n",
+                    run_id_value,
+                    job_id_value,
+                    project_id_value
+                ),
+            })
+            .ok();
+            if !resp.outputs.is_empty() {
+                ui.send(AppEvent::Log { page: "workflow", line: format!("Outputs: {}\n", kv_pairs(&resp.outputs)) }).ok();
+            }
+
+            let stream_run_id = if run_id_value.trim().is_empty() {
+                run_id.trim().to_string()
+            } else {
+                run_id_value.clone()
+            };
+            let stream_corr = correlation_id.trim().to_string();
+            if stream_run_id.is_empty() && stream_corr.is_empty() {
+                ui.send(AppEvent::Log { page: "workflow", line: "No run_id or correlation_id to stream.\n".into() }).ok();
+                return Ok(());
+            }
+
+            let job_addr = cfg.job_addr.clone();
+            let ui_stream = ui.clone();
+            let ui_err = ui.clone();
+            tokio::spawn(async move {
+                if let Err(err) = stream_run_events(
+                    job_addr,
+                    stream_run_id.clone(),
+                    stream_corr.clone(),
+                    stream_history,
+                    "workflow",
+                    ui_stream,
+                )
+                .await
+                {
+                    let _ = ui_err.send(AppEvent::Log { page: "workflow", line: format!("run stream error: {err}\n") });
+                }
+            });
         }
 
         UiCommand::BuildRun {
@@ -5808,6 +6653,44 @@ async fn stream_job_events(
             }
             Err(err) => {
                 ui.send(AppEvent::Log { page, line: format!("job {job_id} stream error: {err}\n") }).ok();
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn stream_run_events(
+    addr: String,
+    run_id: String,
+    correlation_id: String,
+    include_history: bool,
+    page: &'static str,
+    ui: mpsc::Sender<AppEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(&addr).await?);
+    let mut stream = client
+        .stream_run_events(StreamRunEventsRequest {
+            run_id: run_id_from_optional(&run_id),
+            correlation_id,
+            include_history,
+            buffer_max_events: 0,
+            max_delay_ms: 0,
+            discovery_interval_ms: 0,
+        })
+        .await?
+        .into_inner();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(evt) => {
+                for line in run_stream_lines(&evt) {
+                    ui.send(AppEvent::Log { page, line }).ok();
+                }
+            }
+            Err(err) => {
+                ui.send(AppEvent::Log { page, line: format!("run stream error: {err}\n") }).ok();
                 break;
             }
         }
