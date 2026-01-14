@@ -589,6 +589,7 @@ fn build_ui(app: &gtk::Application) {
 #[derive(Clone)]
 struct Page {
     container: gtk::Box,
+    intro: gtk::Box,
     buffer: gtk::TextBuffer,
     textview: gtk::TextView,
 }
@@ -800,7 +801,11 @@ fn combo_active_value(combo: &gtk::ComboBoxText) -> String {
         .unwrap_or_default()
 }
 
-fn make_page(title: &str) -> Page {
+fn set_tooltip<W: gtk::prelude::IsA<gtk::Widget>>(widget: &W, text: &str) {
+    widget.set_tooltip_text(Some(text));
+}
+
+fn make_page(title: &str, description: &str, connections: &str) -> Page {
     let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
     container.set_margin_top(12);
     container.set_margin_bottom(12);
@@ -812,6 +817,25 @@ fn make_page(title: &str) -> Page {
         .xalign(0.0)
         .css_classes(vec!["title-2"])
         .build();
+
+    let description_label = gtk::Label::builder()
+        .label(description)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(vec!["dim-label"])
+        .build();
+
+    let connections_label = gtk::Label::builder()
+        .label(connections)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(vec!["dim-label"])
+        .build();
+
+    let intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    intro.append(&header);
+    intro.append(&description_label);
+    intro.append(&connections_label);
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -827,10 +851,10 @@ fn make_page(title: &str) -> Page {
     let buffer = textview.buffer();
     scroller.set_child(Some(&textview));
 
-    container.append(&header);
+    container.append(&intro);
     container.append(&scroller);
 
-    Page { container, buffer, textview }
+    Page { container, intro, buffer, textview }
 }
 
 const KNOWN_JOB_TYPES: &[&str] = &[
@@ -851,7 +875,11 @@ const KNOWN_JOB_TYPES: &[&str] = &[
 ];
 
 fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> HomePage {
-    let page = make_page("Jobs — start + status");
+    let page = make_page(
+        "Home - Job control and live status",
+        "Overview: Start and watch jobs across the system. Use this page to kick off any JobService job with parameters, project/target/toolchain ids, and an optional correlation id.",
+        "Connections: Jobs started here appear in Job History. Use Projects, Toolchains, Targets, and Console to gather ids and inputs; use Evidence to export run bundles; Settings controls service addresses.",
+    );
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let form = gtk::Grid::builder()
@@ -868,6 +896,8 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     for job_type in KNOWN_JOB_TYPES {
         job_type_combo.append(Some(job_type), job_type);
     }
+    set_tooltip(&job_type_entry, "What: Job type string sent to JobService (for example build.run or workflow.pipeline). Why: JobService uses this to route the request to the right service. How: type a known job type or pick one from the dropdown to fill this field.");
+    set_tooltip(&job_type_combo, "What: Known job types this UI is aware of. Why: helps avoid typos and discover common workflows. How: select one to copy it into the Job type field.");
 
     let params_label = gtk::Label::builder()
         .label("Params (key=value per line)")
@@ -882,29 +912,34 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
         .wrap_mode(gtk::WrapMode::None)
         .build();
     params_scroller.set_child(Some(&params_view));
+    set_tooltip(&params_view, "What: Job parameters as key=value lines. Why: many jobs require additional inputs beyond ids. How: enter one key=value per line; omit '=' to send a key with an empty value.");
 
     let project_id_label = gtk::Label::builder().label("Project id").xalign(0.0).build();
     let project_id_entry = gtk::Entry::builder()
         .placeholder_text("optional project id")
         .hexpand(true)
         .build();
+    set_tooltip(&project_id_entry, "What: Project id to attach to the job. Why: lets services resolve a project without a filesystem path. How: copy an id from the Projects tab or Job History.");
 
     let target_id_label = gtk::Label::builder().label("Target id").xalign(0.0).build();
     let target_id_entry = gtk::Entry::builder()
         .placeholder_text("optional target id")
         .hexpand(true)
         .build();
+    set_tooltip(&target_id_entry, "What: Target id or adb serial to attach to the job. Why: target-aware jobs use it to route device actions. How: copy from Targets or Job History.");
 
     let toolchain_id_label = gtk::Label::builder().label("Toolchain set id").xalign(0.0).build();
     let toolchain_id_entry = gtk::Entry::builder()
         .placeholder_text("optional toolchain set id")
         .hexpand(true)
         .build();
+    set_tooltip(&toolchain_id_entry, "What: Toolchain set id to attach to the job. Why: build and project workflows can use it to select SDK/NDK. How: copy from Toolchains or Projects.");
     let correlation_id_label = gtk::Label::builder().label("Correlation id").xalign(0.0).build();
     let correlation_id_entry = gtk::Entry::builder()
         .placeholder_text("optional correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group multiple jobs into a run. Why: ObserveService uses it to derive run_id for evidence bundles. How: set a stable string and reuse it across related jobs.");
 
     form.attach(&job_type_label, 0, 0, 1, 1);
     form.attach(&job_type_entry, 1, 0, 1, 1);
@@ -929,6 +964,10 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
         .hexpand(true)
         .build();
     let watch_btn = gtk::Button::with_label("Watch");
+    set_tooltip(&start_btn, "What: Start the job with the provided fields. Why: submits to JobService and begins streaming events. How: fill inputs then click.");
+    set_tooltip(&cancel_btn, "What: Cancel the current tracked job. Why: stop a long running job from Home. How: click after a job is started or watched.");
+    set_tooltip(&watch_entry, "What: Job id to watch. Why: stream logs and status for an existing job. How: paste a job id from Job History or other tabs.");
+    set_tooltip(&watch_btn, "What: Start streaming events for the job id. Why: see live progress without starting a new job. How: enter a job id and click.");
 
     buttons.append(&start_btn);
     buttons.append(&cancel_btn);
@@ -956,8 +995,7 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
     controls.append(&buttons);
     controls.append(&status_frame);
 
-    page.container
-        .insert_child_after(&controls, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&controls, Some(&page.intro));
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1074,7 +1112,11 @@ fn page_home(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiComma
 }
 
 fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Job history — list + drill-down");
+    let page = make_page(
+        "Job History - JobService query and exports",
+        "Overview: Query JobService for jobs and event history with filters, and export logs to JSON for sharing or troubleshooting.",
+        "Connections: Home, Toolchains, Projects, Targets, Console, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
+    );
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let list_frame = gtk::Frame::builder().label("List jobs").build();
@@ -1118,6 +1160,16 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
         .build();
 
     let list_btn = gtk::Button::with_label("List jobs");
+    set_tooltip(&job_types_entry, "What: Comma/space list of job types to include. Why: narrows the job list. How: enter values like build.run workflow.pipeline.");
+    set_tooltip(&states_entry, "What: Job state filter. Why: focus on failures or running jobs. How: use queued,running,success,failed,cancelled (case-insensitive).");
+    set_tooltip(&created_after_entry, "What: Lower bound for job creation time in unix millis. Why: limit results to recent jobs. How: paste an epoch millis value.");
+    set_tooltip(&created_before_entry, "What: Upper bound for job creation time in unix millis. Why: limit results to older jobs. How: paste an epoch millis value.");
+    set_tooltip(&finished_after_entry, "What: Lower bound for job finish time in unix millis. Why: filter completed jobs by finish time. How: paste an epoch millis value.");
+    set_tooltip(&finished_before_entry, "What: Upper bound for job finish time in unix millis. Why: filter completed jobs by finish time. How: paste an epoch millis value.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to match. Why: group jobs by run or workflow. How: paste a correlation id from Home or Job History.");
+    set_tooltip(&page_size_entry, "What: Maximum jobs per page. Why: control result size and output volume. How: enter an integer, for example 50.");
+    set_tooltip(&page_token_entry, "What: Pagination token from a previous response. Why: continue listing from where you left off. How: paste the token string.");
+    set_tooltip(&list_btn, "What: List jobs using the filters. Why: query JobService. How: set filters and click.");
 
     list_grid.attach(&gtk::Label::new(Some("Job types")), 0, 0, 1, 1);
     list_grid.attach(&job_types_entry, 1, 0, 1, 1);
@@ -1174,6 +1226,15 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
 
     let list_history_btn = gtk::Button::with_label("List history");
     let export_btn = gtk::Button::with_label("Export logs");
+    set_tooltip(&job_id_entry, "What: Job id to fetch event history for. Why: history is per job. How: paste a job id from the list or Home.");
+    set_tooltip(&kinds_entry, "What: Event kinds to include. Why: focus on state, progress, or log events. How: use state,progress,log,completed,failed.");
+    set_tooltip(&after_entry, "What: Lower bound for event timestamps in unix millis. Why: limit history size. How: paste an epoch millis value.");
+    set_tooltip(&before_entry, "What: Upper bound for event timestamps in unix millis. Why: limit history size. How: paste an epoch millis value.");
+    set_tooltip(&history_page_size_entry, "What: Maximum events per page. Why: control output volume. How: enter an integer, for example 200.");
+    set_tooltip(&history_page_token_entry, "What: Pagination token for event history. Why: continue listing events. How: paste the token string.");
+    set_tooltip(&output_path_entry, "What: Optional output path for exported logs. Why: save logs to a specific file. How: leave blank to use the default export path.");
+    set_tooltip(&list_history_btn, "What: List event history for a job. Why: review the full timeline. How: enter a job id and click.");
+    set_tooltip(&export_btn, "What: Export job logs as JSON. Why: share or archive logs. How: enter a job id and optional output path, then click.");
 
     history_grid.attach(&gtk::Label::new(Some("Job id")), 0, 0, 1, 1);
     history_grid.attach(&job_id_entry, 1, 0, 1, 1);
@@ -1197,8 +1258,7 @@ fn page_jobs_history(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender
     controls.append(&list_frame);
     controls.append(&history_frame);
 
-    page.container
-        .insert_child_after(&controls, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&controls, Some(&page.intro));
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1310,7 +1370,11 @@ fn page_toolchains(
     cfg: Arc<std::sync::Mutex<AppConfig>>,
     cmd_tx: mpsc::Sender<UiCommand>,
 ) -> ToolchainsPage {
-    let page = make_page("Toolchains — ToolchainService");
+    let page = make_page(
+        "Toolchains - SDK/NDK management and sets",
+        "Overview: Discover providers, list available versions, install or verify SDK/NDK toolchains, and manage toolchain sets.",
+        "Connections: Projects can point at toolchain sets; Console builds use installed toolchains; Toolchain jobs stream in Home and Job History; Evidence bundles can include toolchain provenance; Settings controls ToolchainService address.",
+    );
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let job_grid = gtk::Grid::builder()
@@ -1326,6 +1390,9 @@ fn page_toolchains(
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this toolchain action to an existing job stream. How: enable it and fill Job id below.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group toolchain work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
@@ -1336,6 +1403,10 @@ fn page_toolchains(
     let list_sdk = gtk::Button::with_label("List available SDKs");
     let list_ndk = gtk::Button::with_label("List available NDKs");
     let list_sets = gtk::Button::with_label("List sets");
+    set_tooltip(&list, "What: List toolchain providers. Why: discover provider ids and supported kinds. How: click to query ToolchainService.");
+    set_tooltip(&list_sdk, "What: List available SDK versions. Why: populate the SDK version dropdown. How: click then select a version.");
+    set_tooltip(&list_ndk, "What: List available NDK versions. Why: populate the NDK version dropdown. How: click then select a version.");
+    set_tooltip(&list_sets, "What: List toolchain sets. Why: see existing SDK/NDK pairings. How: click to query ToolchainService.");
     row1.append(&list);
     row1.append(&list_sdk);
     row1.append(&list_ndk);
@@ -1353,6 +1424,8 @@ fn page_toolchains(
     ndk_version_combo.set_hexpand(true);
     ndk_version_combo.append(Some(NDK_VERSION), NDK_VERSION);
     ndk_version_combo.set_active(Some(0));
+    set_tooltip(&sdk_version_combo, "What: SDK version to install. Why: install requires an explicit version. How: select a version from the available list.");
+    set_tooltip(&ndk_version_combo, "What: NDK version to install. Why: install requires an explicit version. How: select a version from the available list.");
     let label_sdk_version = gtk::Label::builder().label("SDK version").xalign(0.0).build();
     let label_ndk_version = gtk::Label::builder().label("NDK version").xalign(0.0).build();
     version_grid.attach(&label_sdk_version, 0, 0, 1, 1);
@@ -1365,6 +1438,10 @@ fn page_toolchains(
     let install_ndk = gtk::Button::with_label("Install NDK");
     let list_installed = gtk::Button::with_label("List installed");
     let verify_installed = gtk::Button::with_label("Verify installed");
+    set_tooltip(&install_sdk, "What: Install the selected SDK version. Why: makes the SDK available for builds. How: pick a version, set optional job/correlation ids, then click.");
+    set_tooltip(&install_ndk, "What: Install the selected NDK version. Why: builds with native code require the NDK. How: pick a version, set optional job/correlation ids, then click.");
+    set_tooltip(&list_installed, "What: List installed toolchains. Why: verify what is already available. How: click to query ToolchainService.");
+    set_tooltip(&verify_installed, "What: Verify installed toolchains against expected hashes. Why: detect corruption or mismatches. How: click to start a verification job.");
     row2.append(&install_sdk);
     row2.append(&install_ndk);
     row2.append(&list_installed);
@@ -1392,6 +1469,16 @@ fn page_toolchains(
     let dry_run_check = gtk::CheckButton::with_label("Dry run");
     dry_run_check.set_active(true);
     let remove_all_check = gtk::CheckButton::with_label("Remove all cached");
+    set_tooltip(&toolchain_id_entry, "What: Toolchain id to update or uninstall. Why: target a specific installed toolchain. How: paste an id from the installed list output.");
+    set_tooltip(&update_version_entry, "What: Target version to update to. Why: upgrade or switch the toolchain version. How: enter a version string.");
+    set_tooltip(&verify_update_check, "What: Verify hashes after update. Why: ensure downloaded artifacts are intact. How: leave checked for safety.");
+    set_tooltip(&remove_cached_check, "What: Remove cached artifact during update/uninstall. Why: force a fresh download or free space. How: check to delete cache entries.");
+    set_tooltip(&force_uninstall_check, "What: Force uninstall even if in use. Why: clean up stubborn installs. How: check only if you know it is safe.");
+    set_tooltip(&update_btn, "What: Update the specified toolchain. Why: move to a newer version. How: fill Toolchain id and Target version, set options, then click.");
+    set_tooltip(&uninstall_btn, "What: Uninstall the specified toolchain. Why: remove unused versions. How: fill Toolchain id and options, then click.");
+    set_tooltip(&cleanup_btn, "What: Clean cached downloads. Why: reclaim disk space or reset downloads. How: set dry run/remove all options and click.");
+    set_tooltip(&dry_run_check, "What: Dry run for cache cleanup. Why: preview what would be deleted. How: leave checked to inspect output first.");
+    set_tooltip(&remove_all_check, "What: Remove all cached artifacts. Why: full cache reset. How: check only when you want a complete purge.");
 
     let label_toolchain_id = gtk::Label::builder().label("Toolchain id").xalign(0.0).build();
     let label_update_version = gtk::Label::builder().label("Target version").xalign(0.0).build();
@@ -1443,6 +1530,13 @@ fn page_toolchains(
         .build();
     let set_active_btn = gtk::Button::with_label("Set active");
     let get_active_btn = gtk::Button::with_label("Get active");
+    set_tooltip(&sdk_set_entry, "What: SDK toolchain id for the set. Why: sets tie specific SDK/NDK versions together. How: paste an SDK toolchain id.");
+    set_tooltip(&ndk_set_entry, "What: NDK toolchain id for the set. Why: sets tie specific SDK/NDK versions together. How: paste an NDK toolchain id.");
+    set_tooltip(&display_name_entry, "What: Display name for the toolchain set. Why: human-friendly label used in other tabs. How: type a short descriptive name.");
+    set_tooltip(&create_set_btn, "What: Create a new toolchain set. Why: use a consistent SDK+NDK pair in projects and builds. How: fill ids and name, then click.");
+    set_tooltip(&active_set_entry, "What: Toolchain set id to mark active. Why: projects can use the active set by default. How: paste a set id and click Set active.");
+    set_tooltip(&set_active_btn, "What: Set the active toolchain set. Why: update default toolchain selection. How: enter a set id and click.");
+    set_tooltip(&get_active_btn, "What: Fetch the current active toolchain set. Why: confirm the default toolchain selection. How: click to query ToolchainService.");
 
     let label_sdk_set = gtk::Label::builder().label("SDK id").xalign(0.0).build();
     let label_ndk_set = gtk::Label::builder().label("NDK id").xalign(0.0).build();
@@ -1470,7 +1564,7 @@ fn page_toolchains(
     actions.append(&row2);
     actions.append(&maintenance_grid);
     actions.append(&set_grid);
-    page.container.insert_child_after(&actions, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&actions, Some(&page.intro));
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1840,20 +1934,28 @@ fn page_projects(
     cmd_tx: mpsc::Sender<UiCommand>,
     parent: &gtk::ApplicationWindow,
 ) -> ProjectsPage {
-    let page = make_page("Projects — ProjectService");
+    let page = make_page(
+        "Projects - Templates, create/open, defaults",
+        "Overview: Create or open projects from templates, list recent workspaces, and set per-project defaults like toolchain sets and default targets.",
+        "Connections: Console builds reference these projects by id or path; Targets can use default target ids set here; Toolchains supply toolchain sets; jobs appear in Home and Job History; Settings controls ProjectService address.",
+    );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let refresh_templates = gtk::Button::with_label("Refresh templates");
     let refresh_defaults = gtk::Button::with_label("Refresh defaults");
     let list_recent = gtk::Button::with_label("List recent");
     let open_btn = gtk::Button::with_label("Open project");
     let create_btn = gtk::Button::with_label("Create project");
+    set_tooltip(&refresh_templates, "What: Reload template list. Why: reflect new or updated templates. How: click to query ProjectService.");
+    set_tooltip(&refresh_defaults, "What: Reload active defaults. Why: keep dropdowns in sync with Toolchain/Target defaults. How: click to fetch from ProjectService.");
+    set_tooltip(&list_recent, "What: List recent projects. Why: reuse recent workspaces. How: click to query ProjectService.");
+    set_tooltip(&open_btn, "What: Open a project by path. Why: register it in ProjectService and recents. How: enter a path and click.");
+    set_tooltip(&create_btn, "What: Create a new project from a template. Why: bootstrap a new workspace. How: select template, name, and path, then click.");
     row.append(&refresh_templates);
     row.append(&refresh_defaults);
     row.append(&list_recent);
     row.append(&open_btn);
     row.append(&create_btn);
-    page.container
-        .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&row, Some(&page.intro));
 
     let job_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -1868,6 +1970,9 @@ fn page_projects(
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this project action to an existing job stream. How: enable it and fill Job id below.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group project work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
@@ -1890,6 +1995,10 @@ fn page_projects(
         .hexpand(true)
         .build();
     let browse_btn = gtk::Button::with_label("Browse...");
+    set_tooltip(&template_combo, "What: Template to create the project from. Why: ProjectService uses the template id to generate files. How: refresh templates, then pick one.");
+    set_tooltip(&name_entry, "What: Project name. Why: used in generated project metadata. How: type a short, descriptive name.");
+    set_tooltip(&path_entry, "What: Filesystem path for the project root. Why: ProjectService creates or opens the project here. How: enter a directory path or use Browse.");
+    set_tooltip(&browse_btn, "What: Open a folder picker. Why: choose the project directory accurately. How: click and select a folder.");
 
     let label_template = gtk::Label::builder().label("Template").xalign(0.0).build();
     let label_name = gtk::Label::builder().label("Name").xalign(0.0).build();
@@ -1925,6 +2034,11 @@ fn page_projects(
     default_target_combo.set_active(Some(0));
     let config_btn = gtk::Button::with_label("Set config");
     let use_defaults_btn = gtk::Button::with_label("Use active defaults");
+    set_tooltip(&project_id_entry, "What: Project id to update config for. Why: set defaults on a specific project. How: copy an id from ProjectService output or Job History.");
+    set_tooltip(&toolchain_set_combo, "What: Default toolchain set for the project. Why: builds and workflows can use it when none is specified. How: pick a set (or None).");
+    set_tooltip(&default_target_combo, "What: Default target for the project. Why: target-aware workflows can use it when none is specified. How: pick a target (or None).");
+    set_tooltip(&config_btn, "What: Persist project defaults. Why: saves toolchain set and target selections in ProjectService. How: choose values and click.");
+    set_tooltip(&use_defaults_btn, "What: Apply the active defaults to this project. Why: sync project config with current global defaults. How: enter project id and click.");
 
     let label_project_id = gtk::Label::builder().label("Project id").xalign(0.0).build();
     let label_toolchain = gtk::Label::builder().label("Toolchain set").xalign(0.0).build();
@@ -2131,13 +2245,19 @@ fn page_targets(
     cmd_tx: mpsc::Sender<UiCommand>,
     parent: &gtk::ApplicationWindow,
 ) -> TargetsPage {
-    let page = make_page("Targets — TargetService (ADB + Cuttlefish + live logcat stream)");
+    let page = make_page(
+        "Targets - Devices, ADB, and Cuttlefish",
+        "Overview: Manage ADB targets and Cuttlefish instances, install APKs, and launch apps via TargetService.",
+        "Connections: Console builds produce APKs used here; Projects can set a default target; target jobs stream in Home and Job History; Evidence exports can capture target run context; Settings controls TargetService address.",
+    );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list = gtk::Button::with_label("List targets");
     let stream = gtk::Button::with_label("Stream logcat (sample)");
+    set_tooltip(&list, "What: List registered targets. Why: discover target ids and status. How: click to query TargetService.");
+    set_tooltip(&stream, "What: Stream sample logcat output. Why: verify log streaming from a target. How: click to start a sample stream (uses target-sample-pixel).");
     row.append(&list);
     row.append(&stream);
-    page.container.insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&row, Some(&page.intro));
 
     let job_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -2152,6 +2272,9 @@ fn page_targets(
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this target action to an existing job stream. How: enable it and fill Job id below.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group target work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
@@ -2166,6 +2289,14 @@ fn page_targets(
     let resolve_build = gtk::Button::with_label("Resolve build");
     let start = gtk::Button::with_label("Start");
     let stop = gtk::Button::with_label("Stop");
+    set_tooltip(&status, "What: Check Cuttlefish status. Why: verify host readiness and running state. How: click to query TargetService.");
+    set_tooltip(&web_ui, "What: Open the Cuttlefish WebRTC UI in your browser. Why: access the virtual device UI. How: click; uses AADK_CUTTLEFISH_WEBRTC_URL or https://localhost:8443.");
+    set_tooltip(&env_ui, "What: Open the Cuttlefish environment control UI. Why: manage environment toggles. How: click; uses AADK_CUTTLEFISH_ENV_URL or https://localhost:1443.");
+    set_tooltip(&docs, "What: Open Cuttlefish documentation. Why: reference setup instructions. How: click to open the official docs.");
+    set_tooltip(&install, "What: Install Cuttlefish build tools. Why: required before starting virtual devices. How: fill branch/target/build id as needed and click.");
+    set_tooltip(&resolve_build, "What: Resolve a Cuttlefish build id. Why: convert branch/target hints into a build id. How: fill branch/target/build id fields and click.");
+    set_tooltip(&start, "What: Start a Cuttlefish instance. Why: launch a virtual device. How: set optional job/correlation ids and click.");
+    set_tooltip(&stop, "What: Stop the Cuttlefish instance. Why: shut down a running virtual device. How: set optional job/correlation ids and click.");
 
     let cuttlefish_buttons = gtk::Grid::builder()
         .row_spacing(8)
@@ -2209,6 +2340,9 @@ fn page_targets(
         .text(default_build_id)
         .hexpand(true)
         .build();
+    set_tooltip(&cuttlefish_branch_entry, "What: Android build branch for Cuttlefish (optional). Why: used to resolve build ids or install tools. How: leave blank for defaults or enter a branch name.");
+    set_tooltip(&cuttlefish_target_entry, "What: Cuttlefish target name (optional). Why: used to resolve or install builds. How: leave blank for defaults or enter a target like aosp_cf_x86_64_phone.");
+    set_tooltip(&cuttlefish_build_entry, "What: Cuttlefish build id (optional). Why: start or install a specific build. How: paste a build id or click Resolve build.");
 
     let label_branch = gtk::Label::builder().label("Branch").xalign(0.0).build();
     let label_target = gtk::Label::builder().label("Target").xalign(0.0).build();
@@ -2243,6 +2377,11 @@ fn page_targets(
         .text(".MainActivity")
         .hexpand(true)
         .build();
+    set_tooltip(&target_entry, "What: Target id or adb serial. Why: install/launch actions run against this target. How: use the default or paste from List targets.");
+    set_tooltip(&apk_entry, "What: Absolute path to an APK file. Why: used by the install action. How: browse or paste a file path.");
+    set_tooltip(&apk_browse, "What: Open file picker for APK. Why: avoid typing the file path. How: click and select an .apk file.");
+    set_tooltip(&app_id_entry, "What: Android application id (package name). Why: used to launch the app. How: enter a package like com.example.app.");
+    set_tooltip(&activity_entry, "What: Activity class to launch. Why: defines the app entry point. How: enter .MainActivity or a full class name.");
 
     let label_target = gtk::Label::builder().label("Target id").xalign(0.0).build();
     let label_apk = gtk::Label::builder().label("APK path").xalign(0.0).build();
@@ -2264,6 +2403,8 @@ fn page_targets(
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let install_apk = gtk::Button::with_label("Install APK");
     let launch_app = gtk::Button::with_label("Launch app");
+    set_tooltip(&install_apk, "What: Install APK on the target. Why: deploy build output for testing. How: set Target id and APK path, then click.");
+    set_tooltip(&launch_app, "What: Launch the app on the target. Why: verify install and run. How: set Target id, application id, and activity, then click.");
     action_row.append(&install_apk);
     action_row.append(&launch_app);
     form.attach(&action_row, 1, 4, 1, 1);
@@ -2271,6 +2412,8 @@ fn page_targets(
     let default_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let set_default_btn = gtk::Button::with_label("Set default");
     let get_default_btn = gtk::Button::with_label("Get default");
+    set_tooltip(&set_default_btn, "What: Set the default target. Why: other pages use it when no target id is specified. How: enter Target id and click.");
+    set_tooltip(&get_default_btn, "What: Get the current default target. Why: confirm which target is used by default. How: click to query TargetService.");
     default_row.append(&set_default_btn);
     default_row.append(&get_default_btn);
     form.attach(&default_row, 1, 5, 1, 1);
@@ -2639,7 +2782,11 @@ fn page_console(
     cmd_tx: mpsc::Sender<UiCommand>,
     parent: &gtk::ApplicationWindow,
 ) -> Page {
-    let page = make_page("Console — BuildService (Gradle)");
+    let page = make_page(
+        "Console - BuildService (Gradle) runner",
+        "Overview: Run Gradle builds with module/variant/task overrides and list artifacts from the build output.",
+        "Connections: Projects provide ids/paths; Toolchains provide SDK/NDK; Targets use APKs produced here; build jobs stream in Home and Job History; Evidence exports run bundles; Settings controls BuildService address.",
+    );
 
     let form = gtk::Grid::builder()
         .row_spacing(8)
@@ -2674,6 +2821,15 @@ fn page_console(
     let clean_check = gtk::CheckButton::with_label("Clean first");
 
     let run = gtk::Button::with_label("Build");
+    set_tooltip(&project_entry, "What: Project path or project id. Why: BuildService resolves the project root from this reference. How: paste a filesystem path or a recent project id.");
+    set_tooltip(&project_browse, "What: Open a folder picker for the project. Why: choose a valid project path quickly. How: click and select a folder.");
+    set_tooltip(&module_entry, "What: Gradle module to build (optional). Why: target a single module instead of the whole project. How: enter app or :app.");
+    set_tooltip(&variant_name_entry, "What: Explicit variant name override. Why: use a custom variant beyond debug/release. How: enter a variant like demoDebug.");
+    set_tooltip(&tasks_entry, "What: Explicit Gradle tasks. Why: override the default task selection. How: enter space or comma separated tasks.");
+    set_tooltip(&args_entry, "What: Extra Gradle args. Why: pass flags or properties to Gradle. How: enter args like --stacktrace -Pfoo=bar.");
+    set_tooltip(&variant_combo, "What: Base build variant (debug/release). Why: used when Variant name is empty. How: choose from the dropdown.");
+    set_tooltip(&clean_check, "What: Clean before build. Why: ensure a fresh build with no stale outputs. How: check to run clean first.");
+    set_tooltip(&run, "What: Start the build job. Why: run BuildService and stream logs. How: fill inputs and click.");
 
     let label_project = gtk::Label::builder().label("Project").xalign(0.0).build();
     let label_module = gtk::Label::builder().label("Module").xalign(0.0).build();
@@ -2711,7 +2867,7 @@ fn page_console(
     action_row.append(&run);
     form.attach(&action_row, 1, 7, 1, 1);
 
-    page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&form, Some(&page.intro));
 
     let job_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -2726,6 +2882,9 @@ fn page_console(
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this build to an existing job stream. How: enable it and fill Job id below.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group build work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
@@ -2774,6 +2933,12 @@ fn page_console(
         .build();
 
     let list_artifacts = gtk::Button::with_label("List artifacts");
+    set_tooltip(&artifact_modules_entry, "What: Module filter list. Why: narrow artifact listing to specific modules. How: enter comma/space separated module names.");
+    set_tooltip(&artifact_variant_entry, "What: Variant filter override. Why: list artifacts for a specific variant; overrides the dropdown if set. How: enter a variant name or leave blank.");
+    set_tooltip(&artifact_types_entry, "What: Artifact types filter. Why: limit results to apk/aab/aar/mapping/test. How: enter a comma/space list of types.");
+    set_tooltip(&artifact_name_entry, "What: Substring to match artifact name. Why: filter results by name. How: enter a partial name.");
+    set_tooltip(&artifact_path_entry, "What: Substring to match artifact path. Why: filter results by path. How: enter a partial path.");
+    set_tooltip(&list_artifacts, "What: List artifacts for the project. Why: find build outputs to install or share. How: set filters and click.");
 
     let label_artifact_modules = gtk::Label::builder().label("Modules").xalign(0.0).build();
     let label_artifact_variant = gtk::Label::builder().label("Variant").xalign(0.0).build();
@@ -2935,16 +3100,22 @@ fn page_console(
 }
 
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
-    let page = make_page("Evidence — ObserveService (runs + bundle export)");
+    let page = make_page(
+        "Evidence - ObserveService runs and bundles",
+        "Overview: List workflow runs and export support or evidence bundles for auditing and sharing.",
+        "Connections: Jobs started in Home, Console, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
+    );
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list_runs = gtk::Button::with_label("List runs");
     let export_support = gtk::Button::with_label("Export support bundle");
     let export_evidence = gtk::Button::with_label("Export evidence bundle");
+    set_tooltip(&list_runs, "What: List runs from ObserveService. Why: discover run ids for evidence exports. How: click to query.");
+    set_tooltip(&export_support, "What: Export a support bundle. Why: capture logs and config for troubleshooting. How: set options and click.");
+    set_tooltip(&export_evidence, "What: Export an evidence bundle for a run. Why: capture run artifacts for audit or sharing. How: enter run id and click.");
     row.append(&list_runs);
     row.append(&export_support);
     row.append(&export_evidence);
-    page.container
-        .insert_child_after(&row, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&row, Some(&page.intro));
 
     let job_grid = gtk::Grid::builder()
         .row_spacing(8)
@@ -2959,6 +3130,9 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
+    set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this export to an existing job stream. How: enable it and fill Job id below.");
+    set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Home or Job History.");
+    set_tooltip(&correlation_id_entry, "What: Correlation id to group evidence work into a run. Why: enables Observe run tracking across services. How: set a stable string and reuse it.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
@@ -2987,6 +3161,12 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     include_toolchain.set_active(true);
     let include_recent = gtk::CheckButton::with_label("Include recent runs");
     include_recent.set_active(true);
+    set_tooltip(&run_id_entry, "What: Run id to export evidence for. Why: evidence bundles are run-specific. How: copy from List runs or Job History run_id.");
+    set_tooltip(&recent_limit_entry, "What: Limit for recent runs included in support bundle. Why: control bundle size. How: enter an integer, for example 10.");
+    set_tooltip(&include_logs, "What: Include job logs. Why: logs are essential for troubleshooting. How: check to include.");
+    set_tooltip(&include_config, "What: Include config snapshot. Why: capture environment and service settings. How: check to include.");
+    set_tooltip(&include_toolchain, "What: Include toolchain provenance. Why: record SDK/NDK versions used. How: check to include.");
+    set_tooltip(&include_recent, "What: Include recent runs. Why: add context around the target run. How: check and set a limit.");
 
     let label_run_id = gtk::Label::builder()
         .label("Evidence run id")
@@ -3118,16 +3298,25 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
 }
 
 fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
-    let page = make_page("Settings — service addresses");
+    let page = make_page(
+        "Settings - Service endpoints",
+        "Overview: Edit the host:port addresses the UI uses to connect to each service.",
+        "Connections: Every other tab depends on these addresses; if a page cannot connect, update it here.",
+    );
 
     let form = gtk::Grid::builder()
         .row_spacing(8)
         .column_spacing(8)
         .build();
 
-    let add_row = |row: i32, label: &str, initial: String, setter: Box<dyn Fn(String) + 'static>| {
+    let add_row = |row: i32,
+                   label: &str,
+                   tooltip: &str,
+                   initial: String,
+                   setter: Box<dyn Fn(String) + 'static>| {
         let l = gtk::Label::builder().label(label).xalign(0.0).build();
         let e = gtk::Entry::builder().text(initial).hexpand(true).build();
+        set_tooltip(&e, tooltip);
         e.connect_changed(move |ent| setter(ent.text().to_string()));
         form.attach(&l, 0, row, 1, 1);
         form.attach(&e, 1, row, 1, 1);
@@ -3137,6 +3326,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         0,
         "JobService",
+        "What: JobService address (host:port). Why: Home and Job History use it for job control/logs. How: enter an address like 127.0.0.1:50051.",
         cfg.lock().unwrap().job_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg1.lock().unwrap();
@@ -3151,6 +3341,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         1,
         "ToolchainService",
+        "What: ToolchainService address (host:port). Why: Toolchains tab uses it for SDK/NDK operations. How: enter an address like 127.0.0.1:50052.",
         cfg.lock().unwrap().toolchain_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg2.lock().unwrap();
@@ -3165,6 +3356,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         2,
         "ProjectService",
+        "What: ProjectService address (host:port). Why: Projects tab uses it to create/open projects. How: enter an address like 127.0.0.1:50053.",
         cfg.lock().unwrap().project_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg3.lock().unwrap();
@@ -3179,6 +3371,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         3,
         "BuildService",
+        "What: BuildService address (host:port). Why: Console tab uses it for builds and artifacts. How: enter an address like 127.0.0.1:50054.",
         cfg.lock().unwrap().build_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg4.lock().unwrap();
@@ -3193,6 +3386,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         4,
         "TargetService",
+        "What: TargetService address (host:port). Why: Targets tab uses it for ADB and Cuttlefish actions. How: enter an address like 127.0.0.1:50055.",
         cfg.lock().unwrap().targets_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg5.lock().unwrap();
@@ -3207,6 +3401,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     add_row(
         5,
         "ObserveService",
+        "What: ObserveService address (host:port). Why: Evidence tab uses it for runs and bundles. How: enter an address like 127.0.0.1:50056.",
         cfg.lock().unwrap().observe_addr.clone(),
         Box::new(move |v| {
             let mut cfg = cfg6.lock().unwrap();
@@ -3217,7 +3412,7 @@ fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
         }),
     );
 
-    page.container.insert_child_after(&form, Some(&page.container.first_child().unwrap()));
+    page.container.insert_child_after(&form, Some(&page.intro));
     page
 }
 

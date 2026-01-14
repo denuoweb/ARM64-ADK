@@ -17,6 +17,8 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - UiCommand enum defines all async work; a background worker executes these commands and emits
   AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
+- Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
+- All interactive fields and selections include verbose tooltips describing what, why, and how to use them.
 - Toolchains page fetches available SDK/NDK versions and populates dropdowns; install/verify actions
   use the selected version and default to the latest SDK_VERSION/NDK_VERSION.
 - The Cuttlefish docs button opens https://source.android.com/docs/devices/cuttlefish/get-started.

@@ -94,4 +94,5 @@ Default addresses (override with env vars):
 ### TargetService (aadk-targets)
 
 ### Clients (aadk-ui, aadk-cli)
+- GTK UI now includes per-tab overview/connection copy and verbose tooltips for inputs and selections.
 Completed job flow expansions are tracked in README.
