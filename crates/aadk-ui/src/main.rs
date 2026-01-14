@@ -20,19 +20,21 @@ use aadk_proto::aadk::v1::{
     CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
     ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
     GetCuttlefishStatusRequest, GetDefaultTargetRequest, GetJobRequest, Id, InstallApkRequest,
-    InstallCuttlefishRequest, InstallToolchainRequest, Job, JobEvent, JobEventKind, JobFilter,
-    JobHistoryFilter, JobState, KeyValue, LaunchRequest, ListJobHistoryRequest, ListJobsRequest,
-    ListArtifactsRequest, ListAvailableRequest, ListInstalledRequest, ListProvidersRequest,
-    ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ResolveCuttlefishBuildRequest,
-    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
-    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
-    StreamLogcatRequest, Timestamp, ToolchainKind, UninstallToolchainRequest, UpdateToolchainRequest,
-    VerifyToolchainRequest, RunId,
+    InstallCuttlefishRequest, InstallToolchainRequest, InstalledToolchain, Job, JobEvent,
+    JobEventKind, JobFilter, JobHistoryFilter, JobState, KeyValue, LaunchRequest,
+    ListJobHistoryRequest, ListJobsRequest, ListArtifactsRequest, ListAvailableRequest,
+    ListInstalledRequest, ListProvidersRequest, ListRecentProjectsRequest, ListRunsRequest,
+    ListTargetsRequest, ListTemplatesRequest, ListToolchainSetsRequest, OpenProjectRequest,
+    Pagination, ResolveCuttlefishBuildRequest, SetActiveToolchainSetRequest, SetDefaultTargetRequest,
+    SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
+    StreamJobEventsRequest, StreamLogcatRequest, Timestamp, ToolchainKind,
+    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest, RunId,
 };
 use futures_util::StreamExt;
 use gtk4 as gtk;
-use gtk::gio::prelude::FileExt;
+use gtk::gdk;
+use gtk::gdk::prelude::{DisplayExt, MonitorExt};
+use gtk::gio::prelude::{FileExt, ListModelExt};
 use gtk::prelude::*;
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
@@ -291,6 +293,7 @@ enum UiCommand {
         ndk_toolchain_id: Option<String>,
         display_name: String,
     },
+    ToolchainCreateActiveLatest { cfg: AppConfig, display_name: String },
     ToolchainSetActive { cfg: AppConfig, toolchain_set_id: String },
     ToolchainGetActive { cfg: AppConfig },
     ProjectListTemplates { cfg: AppConfig },
@@ -409,6 +412,7 @@ enum AppEvent {
     ProjectTemplates { templates: Vec<ProjectTemplateOption> },
     ProjectToolchainSets { sets: Vec<ToolchainSetOption> },
     ProjectTargets { targets: Vec<TargetOption> },
+    ProjectSelected { project_id: String, project_path: String },
 }
 
 fn main() {
@@ -420,12 +424,40 @@ fn main() {
     app.run();
 }
 
+fn default_window_size() -> (i32, i32) {
+    let base_width = 1100;
+    let base_height = 700;
+    let mut width = base_width;
+    let mut height = base_height;
+
+    if let Some(display) = gdk::Display::default() {
+        let monitors = display.monitors();
+        if let Some(item) = monitors.item(0) {
+            if let Ok(monitor) = item.downcast::<gdk::Monitor>() {
+                let geometry = monitor.geometry();
+                let max_width = (geometry.width() as f32 * 0.9) as i32;
+                let max_height = (geometry.height() as f32 * 0.9) as i32;
+                if max_width > 0 {
+                    width = width.min(max_width);
+                }
+                if max_height > 0 {
+                    height = height.min(max_height);
+                }
+            }
+        }
+    }
+
+    (width, height)
+}
+
 fn build_ui(app: &gtk::Application) {
+    let (default_width, default_height) = default_window_size();
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("AADK UI — Full Scaffold")
-        .default_width(1100)
-        .default_height(700)
+        .default_width(default_width)
+        .default_height(default_height)
+        .resizable(true)
         .build();
 
     let cfg = Arc::new(std::sync::Mutex::new(AppConfig::load()));
@@ -480,14 +512,14 @@ fn build_ui(app: &gtk::Application) {
     let console = page_console(cfg.clone(), cmd_tx.clone(), &window);
     let settings = page_settings(cfg.clone());
 
-    stack.add_titled(&home.page.container, Some("home"), "Job Control");
-    stack.add_titled(&toolchains.page.container, Some("toolchains"), "Toolchains");
-    stack.add_titled(&projects.page.container, Some("projects"), "Projects");
-    stack.add_titled(&console.container, Some("console"), "Build");
-    stack.add_titled(&targets.page.container, Some("targets"), "Targets");
-    stack.add_titled(&jobs_history.container, Some("jobs"), "Job History");
-    stack.add_titled(&evidence.container, Some("evidence"), "Evidence");
-    stack.add_titled(&settings.container, Some("settings"), "Settings");
+    stack.add_titled(&home.page.root, Some("home"), "Job Control");
+    stack.add_titled(&toolchains.page.root, Some("toolchains"), "Toolchains");
+    stack.add_titled(&projects.page.root, Some("projects"), "Projects");
+    stack.add_titled(&console.page.root, Some("console"), "Build");
+    stack.add_titled(&targets.page.root, Some("targets"), "Targets");
+    stack.add_titled(&jobs_history.root, Some("jobs"), "Job History");
+    stack.add_titled(&evidence.root, Some("evidence"), "Evidence");
+    stack.add_titled(&settings.root, Some("settings"), "Settings");
 
     // Clone page handles for event routing closure.
     let home_page_for_events = home.clone();
@@ -560,6 +592,25 @@ fn build_ui(app: &gtk::Application) {
                     AppEvent::ProjectTargets { targets } => {
                         projects_for_events.set_targets(&targets);
                     }
+                    AppEvent::ProjectSelected {
+                        project_id,
+                        project_path,
+                    } => {
+                        let project_ref = if project_id.trim().is_empty() {
+                            project_path.clone()
+                        } else {
+                            project_id.clone()
+                        };
+                        projects_for_events.set_project_id(&project_id);
+                        console_for_events.set_project_ref(&project_ref);
+                        let mut cfg = cfg_for_events.lock().unwrap();
+                        if !project_ref.trim().is_empty() {
+                            cfg.last_job_project_id = project_ref;
+                            if let Err(err) = cfg.save() {
+                                eprintln!("Failed to persist UI config: {err}");
+                            }
+                        }
+                    }
                 },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return glib::ControlFlow::Break,
@@ -588,6 +639,7 @@ fn build_ui(app: &gtk::Application) {
 
 #[derive(Clone)]
 struct Page {
+    root: gtk::ScrolledWindow,
     container: gtk::Box,
     intro: gtk::Box,
     buffer: gtk::TextBuffer,
@@ -667,6 +719,12 @@ struct ToolchainsPage {
     ndk_version_combo: gtk::ComboBoxText,
 }
 
+#[derive(Clone)]
+struct BuildPage {
+    page: Page,
+    project_entry: gtk::Entry,
+}
+
 #[derive(Clone, Debug)]
 struct ProjectTemplateOption {
     id: String,
@@ -691,6 +749,7 @@ struct ProjectsPage {
     template_combo: gtk::ComboBoxText,
     toolchain_set_combo: gtk::ComboBoxText,
     target_combo: gtk::ComboBoxText,
+    project_id_entry: gtk::Entry,
 }
 
 impl TargetsPage {
@@ -735,6 +794,18 @@ impl ToolchainsPage {
     }
 }
 
+impl BuildPage {
+    fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    fn set_project_ref(&self, project_ref: &str) {
+        if !project_ref.trim().is_empty() {
+            self.project_entry.set_text(project_ref);
+        }
+    }
+}
+
 impl ProjectsPage {
     fn append(&self, s: &str) {
         self.page.append(s);
@@ -768,6 +839,12 @@ impl ProjectsPage {
             self.target_combo.append(Some(target.id.as_str()), &target.label);
         }
         self.target_combo.set_active(Some(0));
+    }
+
+    fn set_project_id(&self, project_id: &str) {
+        if !project_id.trim().is_empty() {
+            self.project_id_entry.set_text(project_id);
+        }
     }
 }
 
@@ -837,7 +914,7 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
     intro.append(&description_label);
     intro.append(&connections_label);
 
-    let scroller = gtk::ScrolledWindow::builder()
+    let log_scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .build();
@@ -849,16 +926,29 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
         .build();
 
     let buffer = textview.buffer();
-    scroller.set_child(Some(&textview));
+    log_scroller.set_child(Some(&textview));
 
     container.append(&intro);
-    container.append(&scroller);
+    container.append(&log_scroller);
 
-    Page { container, intro, buffer, textview }
+    let root = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .build();
+    root.set_child(Some(&container));
+
+    Page {
+        root,
+        container,
+        intro,
+        buffer,
+        textview,
+    }
 }
 
 const KNOWN_JOB_TYPES: &[&str] = &[
-    "demo.job",
     "workflow.pipeline",
     "project.create",
     "build.run",
@@ -1524,6 +1614,7 @@ fn page_toolchains(
         .hexpand(true)
         .build();
     let create_set_btn = gtk::Button::with_label("Create set");
+    let create_set_latest_btn = gtk::Button::with_label("Use latest installed");
     let active_set_entry = gtk::Entry::builder()
         .placeholder_text("Active toolchain set id")
         .hexpand(true)
@@ -1534,6 +1625,7 @@ fn page_toolchains(
     set_tooltip(&ndk_set_entry, "What: NDK toolchain id for the set. Why: sets tie specific SDK/NDK versions together. How: paste an NDK toolchain id.");
     set_tooltip(&display_name_entry, "What: Display name for the toolchain set. Why: human-friendly label used in other tabs. How: type a short descriptive name.");
     set_tooltip(&create_set_btn, "What: Create a new toolchain set. Why: use a consistent SDK+NDK pair in projects and builds. How: fill ids and name, then click.");
+    set_tooltip(&create_set_latest_btn, "What: Create and activate a toolchain set from the most recently installed SDK+NDK. Why: minimize clicks after installing toolchains. How: install SDK/NDK, optionally set a display name, then click.");
     set_tooltip(&active_set_entry, "What: Toolchain set id to mark active. Why: projects can use the active set by default. How: paste a set id and click Set active.");
     set_tooltip(&set_active_btn, "What: Set the active toolchain set. Why: update default toolchain selection. How: enter a set id and click.");
     set_tooltip(&get_active_btn, "What: Fetch the current active toolchain set. Why: confirm the default toolchain selection. How: click to query ToolchainService.");
@@ -1549,7 +1641,10 @@ fn page_toolchains(
     set_grid.attach(&ndk_set_entry, 1, 1, 1, 1);
     set_grid.attach(&label_display, 0, 2, 1, 1);
     set_grid.attach(&display_name_entry, 1, 2, 1, 1);
-    set_grid.attach(&create_set_btn, 1, 3, 1, 1);
+    let set_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    set_actions.append(&create_set_btn);
+    set_actions.append(&create_set_latest_btn);
+    set_grid.attach(&set_actions, 1, 3, 1, 1);
 
     set_grid.attach(&label_active, 0, 4, 1, 1);
     let active_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -1886,6 +1981,19 @@ fn page_toolchains(
             .ok();
     });
 
+    let cfg_create_latest = cfg.clone();
+    let cmd_tx_create_latest = cmd_tx.clone();
+    let display_entry_latest = display_name_entry.clone();
+    create_set_latest_btn.connect_clicked(move |_| {
+        let cfg = cfg_create_latest.lock().unwrap().clone();
+        cmd_tx_create_latest
+            .send(UiCommand::ToolchainCreateActiveLatest {
+                cfg,
+                display_name: display_entry_latest.text().to_string(),
+            })
+            .ok();
+    });
+
     let cfg_set_active = cfg.clone();
     let cmd_tx_set_active = cmd_tx.clone();
     let active_entry_set = active_set_entry.clone();
@@ -2034,7 +2142,7 @@ fn page_projects(
     default_target_combo.set_active(Some(0));
     let config_btn = gtk::Button::with_label("Set config");
     let use_defaults_btn = gtk::Button::with_label("Use active defaults");
-    set_tooltip(&project_id_entry, "What: Project id to update config for. Why: set defaults on a specific project. How: copy an id from ProjectService output or Job History.");
+    set_tooltip(&project_id_entry, "What: Project id to update config for. Why: set defaults on a specific project. How: copy an id from ProjectService output or Job History (auto-filled after create/open).");
     set_tooltip(&toolchain_set_combo, "What: Default toolchain set for the project. Why: builds and workflows can use it when none is specified. How: pick a set (or None).");
     set_tooltip(&default_target_combo, "What: Default target for the project. Why: target-aware workflows can use it when none is specified. How: pick a target (or None).");
     set_tooltip(&config_btn, "What: Persist project defaults. Why: saves toolchain set and target selections in ProjectService. How: choose values and click.");
@@ -2237,6 +2345,7 @@ fn page_projects(
         template_combo,
         toolchain_set_combo,
         target_combo: default_target_combo,
+        project_id_entry,
     }
 }
 
@@ -2781,7 +2890,7 @@ fn page_console(
     cfg: Arc<std::sync::Mutex<AppConfig>>,
     cmd_tx: mpsc::Sender<UiCommand>,
     parent: &gtk::ApplicationWindow,
-) -> Page {
+) -> BuildPage {
     let page = make_page(
         "Build - BuildService (Gradle) runner",
         "Overview: Run Gradle builds with module/variant/task overrides and list artifacts from the build output.",
@@ -2821,7 +2930,7 @@ fn page_console(
     let clean_check = gtk::CheckButton::with_label("Clean first");
 
     let run = gtk::Button::with_label("Build");
-    set_tooltip(&project_entry, "What: Project path or project id. Why: BuildService resolves the project root from this reference. How: paste a filesystem path or a recent project id.");
+    set_tooltip(&project_entry, "What: Project path or project id. Why: BuildService resolves the project root from this reference. How: paste a filesystem path or a recent project id (auto-filled after create/open).");
     set_tooltip(&project_browse, "What: Open a folder picker for the project. Why: choose a valid project path quickly. How: click and select a folder.");
     set_tooltip(&module_entry, "What: Gradle module to build (optional). Why: target a single module instead of the whole project. How: enter app or :app.");
     set_tooltip(&variant_name_entry, "What: Explicit variant name override. Why: use a custom variant beyond debug/release. How: enter a variant like demoDebug.");
@@ -3096,7 +3205,10 @@ fn page_console(
             .ok();
     });
 
-    page
+    BuildPage {
+        page,
+        project_entry,
+    }
 }
 
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
@@ -3683,6 +3795,35 @@ fn job_event_lines(event: &JobEvent) -> Vec<String> {
     lines
 }
 
+fn stream_job_event_lines(job_id: &str, event: &JobEvent) -> Vec<String> {
+    match event.payload.as_ref() {
+        Some(JobPayload::Log(log)) => {
+            if let Some(chunk) = log.chunk.as_ref() {
+                let mut text = String::from_utf8_lossy(&chunk.data).to_string();
+                if text.is_empty() {
+                    return vec![format!(
+                        "job {job_id}: log: stream={} truncated={}\n",
+                        chunk.stream, chunk.truncated
+                    )];
+                }
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                vec![text]
+            } else {
+                vec![format!("job {job_id}: log: missing chunk\n")]
+            }
+        }
+        _ => {
+            let export = LogExportEvent::from_proto(event);
+            vec![format!(
+                "job {job_id}: {} {}: {}\n",
+                export.at_unix_millis, export.kind, export.summary
+            )]
+        }
+    }
+}
+
 fn format_job_row(job: &Job) -> String {
     let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
     let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
@@ -3746,6 +3887,16 @@ fn format_artifact_line(artifact: &Artifact) -> String {
         artifact.size_bytes,
         artifact.path
     )
+}
+
+fn latest_installed_by_kind<'a>(
+    items: &'a [InstalledToolchain],
+    kind: ToolchainKind,
+) -> Option<&'a InstalledToolchain> {
+    items
+        .iter()
+        .filter(|item| item.provider.as_ref().map(|p| p.kind) == Some(kind as i32))
+        .max_by_key(|item| item.installed_at.as_ref().map(|ts| ts.unix_millis).unwrap_or(0))
 }
 
 async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::Sender<AppEvent>) -> Result<(), Box<dyn std::error::Error>> {
@@ -4387,6 +4538,131 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             }
         }
 
+        UiCommand::ToolchainCreateActiveLatest { cfg, display_name } => {
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Creating active toolchain set from latest installed via {}\n", cfg.toolchain_addr) }).ok();
+            let channel = match connect(&cfg.toolchain_addr).await {
+                Ok(channel) => channel,
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("ToolchainService connection failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let mut client = ToolchainServiceClient::new(channel);
+            let installed = match client
+                .list_installed(ListInstalledRequest { kind: ToolchainKind::Unspecified as i32 })
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("List installed toolchains failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+            let items = installed.items;
+            let Some(sdk) = latest_installed_by_kind(&items, ToolchainKind::Sdk) else {
+                ui.send(AppEvent::Log { page: "toolchains", line: "No installed SDK toolchains found. Install an SDK first.\n".into() }).ok();
+                return Ok(());
+            };
+            let Some(ndk) = latest_installed_by_kind(&items, ToolchainKind::Ndk) else {
+                ui.send(AppEvent::Log { page: "toolchains", line: "No installed NDK toolchains found. Install an NDK first.\n".into() }).ok();
+                return Ok(());
+            };
+
+            let sdk_id = match sdk
+                .toolchain_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(value) => value.to_string(),
+                None => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: "Latest SDK toolchain is missing an id.\n".into() }).ok();
+                    return Ok(());
+                }
+            };
+            let ndk_id = match ndk
+                .toolchain_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(value) => value.to_string(),
+                None => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: "Latest NDK toolchain is missing an id.\n".into() }).ok();
+                    return Ok(());
+                }
+            };
+            let sdk_version = sdk
+                .version
+                .as_ref()
+                .map(|v| v.version.as_str())
+                .unwrap_or("unknown");
+            let ndk_version = ndk
+                .version
+                .as_ref()
+                .map(|v| v.version.as_str())
+                .unwrap_or("unknown");
+
+            let display_name = display_name.trim();
+            let display_name = if display_name.is_empty() {
+                format!("SDK {sdk_version} + NDK {ndk_version}")
+            } else {
+                display_name.to_string()
+            };
+
+            let created = match client
+                .create_toolchain_set(CreateToolchainSetRequest {
+                    sdk_toolchain_id: Some(Id { value: sdk_id.clone() }),
+                    ndk_toolchain_id: Some(Id { value: ndk_id.clone() }),
+                    display_name: display_name.clone(),
+                })
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("Create toolchain set failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            let Some(set) = created.set else {
+                ui.send(AppEvent::Log { page: "toolchains", line: "Create toolchain set returned no set.\n".into() }).ok();
+                return Ok(());
+            };
+            let set_id = match set
+                .toolchain_set_id
+                .as_ref()
+                .map(|id| id.value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(value) => value.to_string(),
+                None => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: "Created toolchain set is missing an id.\n".into() }).ok();
+                    return Ok(());
+                }
+            };
+            ui.send(AppEvent::Log { page: "toolchains", line: format!("Created set {set_id}\n  display_name={}\n  sdk={}\n  ndk={}\n", set.display_name, sdk_id, ndk_id) }).ok();
+
+            let resp = match client
+                .set_active_toolchain_set(SetActiveToolchainSetRequest {
+                    toolchain_set_id: Some(Id { value: set_id.clone() }),
+                })
+                .await
+            {
+                Ok(resp) => resp.into_inner(),
+                Err(err) => {
+                    ui.send(AppEvent::Log { page: "toolchains", line: format!("Set active toolchain set failed: {err}\n") }).ok();
+                    return Ok(());
+                }
+            };
+
+            if resp.ok {
+                ui.send(AppEvent::Log { page: "toolchains", line: format!("Active toolchain set updated to {set_id}\n") }).ok();
+            } else {
+                ui.send(AppEvent::Log { page: "toolchains", line: "Failed to set active toolchain set.\n".into() }).ok();
+            }
+        }
+
         UiCommand::ToolchainSetActive { cfg, toolchain_set_id } => {
             let set_id = toolchain_set_id.trim().to_string();
             if set_id.is_empty() {
@@ -4628,6 +4904,13 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
             let project_id = resp.project_id.map(|i| i.value).unwrap_or_default();
             ui.send(AppEvent::Log { page: "projects", line: format!("Create queued: project_id={project_id} job_id={job_id}\n") }).ok();
+            if !project_id.trim().is_empty() {
+                ui.send(AppEvent::ProjectSelected {
+                    project_id: project_id.clone(),
+                    project_path: path.clone(),
+                })
+                .ok();
+            }
 
             if !job_id.is_empty() {
                 let job_addr = cfg.job_addr.clone();
@@ -4668,6 +4951,13 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             if let Some(project) = resp.project {
                 let id = project.project_id.as_ref().map(|i| i.value.as_str()).unwrap_or("");
                 ui.send(AppEvent::Log { page: "projects", line: format!("Opened: {} ({})\n  path={}\n", project.name, id, project.path) }).ok();
+                if !id.trim().is_empty() {
+                    ui.send(AppEvent::ProjectSelected {
+                        project_id: id.to_string(),
+                        project_path: project.path.clone(),
+                    })
+                    .ok();
+                }
             } else {
                 ui.send(AppEvent::Log { page: "projects", line: "Open project returned no project.\n".into() }).ok();
             }
@@ -5512,8 +5802,9 @@ async fn stream_job_events(
                         }
                     }
                 }
-                let line = format!("job {job_id}: {:?}\n", evt.payload);
-                ui.send(AppEvent::Log { page, line }).ok();
+                for line in stream_job_event_lines(&job_id, &evt) {
+                    ui.send(AppEvent::Log { page, line }).ok();
+                }
             }
             Err(err) => {
                 ui.send(AppEvent::Log { page, line: format!("job {job_id} stream error: {err}\n") }).ok();

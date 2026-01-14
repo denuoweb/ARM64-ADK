@@ -18,11 +18,16 @@ Update this file whenever UI behavior changes or when commits touching this crat
   AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
 - Core flow actions log connection/RPC failures to the page output so bad inputs and service errors are visible.
+- The main window default size is clamped to 90% of the primary monitor so it stays on-screen.
+- Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
+- Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
+- Projects auto-fill the project id after create/open and sync the Build project field to the latest selection.
 - Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
 - All interactive fields and selections include verbose tooltips describing what, why, and how to use them.
 - Sidebar order is Job Control, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).
 - Toolchains page fetches available SDK/NDK versions and populates dropdowns; install/verify actions
   use the selected version and default to the latest SDK_VERSION/NDK_VERSION.
+- Toolchains page includes a "Use latest installed" shortcut to create and activate a toolchain set from the most recently installed SDK/NDK.
 - The Cuttlefish docs button opens https://source.android.com/docs/devices/cuttlefish/get-started.
 - The Targets page includes an "Open Cuttlefish Env" button using AADK_CUTTLEFISH_ENV_URL (default https://localhost:1443).
 - Observe export requests include optional metadata fields (project/target/toolchain ids), currently unset in the UI.

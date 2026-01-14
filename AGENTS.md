@@ -101,5 +101,7 @@ Default addresses (override with env vars):
 ### Clients (aadk-ui, aadk-cli)
 - GTK UI now includes per-tab overview/connection copy and verbose tooltips for inputs and selections.
 - Core flow actions in the UI surface connection/RPC failures in the page log so bad inputs are visible.
+- Toolchains includes a "Use latest installed" action to create and activate a toolchain set from the most recent SDK/NDK installs.
+- Projects auto-fill project id after create/open and sync the Build project field to the latest selection.
 - Sidebar order is Job Control, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).
 Completed job flow expansions are tracked in README.
