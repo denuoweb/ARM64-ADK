@@ -7,6 +7,7 @@ export AADK_PROJECT_ADDR="${AADK_PROJECT_ADDR:-127.0.0.1:50053}"
 export AADK_BUILD_ADDR="${AADK_BUILD_ADDR:-127.0.0.1:50054}"
 export AADK_TARGETS_ADDR="${AADK_TARGETS_ADDR:-127.0.0.1:50055}"
 export AADK_OBSERVE_ADDR="${AADK_OBSERVE_ADDR:-127.0.0.1:50056}"
+export AADK_WORKFLOW_ADDR="${AADK_WORKFLOW_ADDR:-127.0.0.1:50057}"
 
 pick_latest_dir() {
   local base="$1"
@@ -199,6 +200,10 @@ pids+=($!)
 
 echo "Starting aadk-observe on $AADK_OBSERVE_ADDR"
 cargo run -p aadk-observe --quiet &
+pids+=($!)
+
+echo "Starting aadk-workflow on $AADK_WORKFLOW_ADDR"
+cargo run -p aadk-workflow --quiet &
 pids+=($!)
 
 echo

@@ -142,6 +142,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aadk-workflow"
+version = "0.1.0"
+dependencies = [
+ "aadk-proto",
+ "futures-util",
+ "prost",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

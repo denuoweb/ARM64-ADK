@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/aadk-proto",
   "crates/aadk-core",
+  "crates/aadk-workflow",
   "crates/aadk-toolchain",
   "crates/aadk-project",
   "crates/aadk-build",
