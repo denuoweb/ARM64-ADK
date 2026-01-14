@@ -33,3 +33,4 @@ Update this file whenever WorkflowService behavior changes or when commits touch
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR configure upstream services.
 
 ## Prioritized TODO checklist by service
+- Emit richer pipeline summary outputs (artifact/bundle paths) for run dashboards.

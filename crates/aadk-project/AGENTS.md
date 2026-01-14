@@ -41,3 +41,4 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - AADK_PROJECT_ADDR sets the bind address (default 127.0.0.1:50053).
 
 ## Prioritized TODO checklist by service
+- None (workflow UI consumes existing project RPCs).

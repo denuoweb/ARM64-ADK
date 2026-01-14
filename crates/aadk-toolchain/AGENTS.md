@@ -58,3 +58,4 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - InstallToolchain clones artifact URL/hash when persisting InstalledToolchain so post-install metrics can reuse artifact metadata.
 
 ## Prioritized TODO checklist by service
+- None (workflow UI consumes existing toolchain RPCs).

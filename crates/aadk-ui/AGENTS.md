@@ -2,8 +2,8 @@
 
 ## Role and scope
 The GTK4 UI is a thin client for the gRPC services. It provides pages for Job Control (job run/status),
-Job History, Toolchains, Projects, Targets, Build, and Evidence. It uses a background tokio runtime
-thread to keep the GTK main thread responsive.
+Workflow pipelines, Job History, Toolchains, Projects, Targets, Build, and Evidence. It uses a
+background tokio runtime thread to keep the GTK main thread responsive.
 
 ## Maintenance
 Update this file whenever UI behavior changes or when commits touching this crate are made.
@@ -21,10 +21,13 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - The main window default size is clamped to 90% of the primary monitor so it stays on-screen.
 - Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
 - Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
+- Workflow page runs workflow.pipeline with explicit inputs, optional step overrides, and run-level StreamRunEvents output.
 - Projects auto-fill the project id after create/open and sync the Build project field to the latest selection.
 - Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
 - All interactive fields and selections include verbose tooltips describing what, why, and how to use them.
-- Sidebar order is Job Control, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).
+- Evidence page includes run dashboards: list runs with job ids, list jobs by run, stream run events, and export job logs alongside bundles.
+- Sidebar order is Job Control, Workflow, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).
+- Settings now includes WorkflowService alongside the other service endpoints.
 - Toolchains page fetches available SDK/NDK versions and populates dropdowns; install/verify actions
   use the selected version and default to the latest SDK_VERSION/NDK_VERSION.
 - Toolchains page includes a "Use latest installed" shortcut to create and activate a toolchain set from the most recently installed SDK/NDK.
@@ -37,6 +40,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
+- Workflow: run workflow.pipeline with step inputs and stream run-level events.
 - Job History: list jobs and event history with filters; export logs.
 - Toolchains: list providers/available/installed/sets, install/verify, update/uninstall, cache cleanup, create/set/get toolchain sets.
 - Projects: list templates, create/open, list recent, set project config, use active defaults.
@@ -53,4 +57,6 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
-Completed UI job flow expansions are tracked in README.
+- Add template/toolchain/target pickers to the Workflow page to avoid manual id entry.
+- Add run filters (project/target/toolchain/result) and local bundle inventory to the Evidence dashboard.
+- Persist last workflow inputs (run id, project refs, target id) in UI config.

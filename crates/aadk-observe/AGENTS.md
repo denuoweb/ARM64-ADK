@@ -39,3 +39,4 @@ Update this file whenever observe behavior changes or when commits touching this
 - AADK_OBSERVE_TMP_RETENTION_HOURS controls tmp directory retention (default 24, 0 disables).
 
 ## Prioritized TODO checklist by service
+- Persist bundle export paths in run summaries (or add a list bundles RPC) to support dashboards.

@@ -35,7 +35,7 @@ Update this file whenever JobService behavior changes or when commits touching t
 - ToolchainService, BuildService, TargetService, and ObserveService are expected to create jobs
   and publish progress/log events to this service.
 - The GTK UI and CLI stream job events from JobService.
-- CLI can also stream run-level events via StreamRunEvents for multi-job pipelines.
+- UI and CLI can stream run-level events via StreamRunEvents for multi-job pipelines.
 
 ## Environment / config
 - AADK_JOB_ADDR sets the bind address (default 127.0.0.1:50051).
@@ -47,3 +47,4 @@ Update this file whenever JobService behavior changes or when commits touching t
 - AADK_RUN_STREAM_FLUSH_MS controls buffer flush cadence (default 200ms).
 
 ## Prioritized TODO checklist by service
+- No core changes required for the workflow UI and run dashboards; keep StreamRunEvents defaults documented.

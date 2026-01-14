@@ -29,4 +29,4 @@ Update this file whenever CLI behavior changes or when commits touching this cra
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-ui.)
-Completed UI/CLI job flow expansions are tracked in README.
+- Add a workflow run helper that tails StreamRunEvents after run-pipeline.
