@@ -6,12 +6,14 @@ streams job state/progress/logs to clients.
 
 ## Architecture at a glance
 - GTK4 UI and CLI call gRPC services; they do not implement business logic.
-- JobService stores job records, replays history, and streams live events.
+- JobService stores job records, replays history, and streams live events (including run-level aggregation).
 - Toolchain/Build/Targets/Observe services create jobs and publish events to JobService.
 - ProjectService is the source of truth for project metadata and template scaffolding.
+- WorkflowService orchestrates multi-step pipelines and upserts run records for observability.
 
 ## Source map (main entry points)
 - JobService: `crates/aadk-core/src/main.rs`
+- WorkflowService: `crates/aadk-workflow/src/main.rs`
 - ToolchainService: `crates/aadk-toolchain/src/main.rs`
 - ProjectService: `crates/aadk-project/src/main.rs`
 - BuildService: `crates/aadk-build/src/main.rs`
@@ -32,6 +34,7 @@ Default addresses (override via env):
 - Build:        127.0.0.1:50054 (AADK_BUILD_ADDR)
 - Targets:      127.0.0.1:50055 (AADK_TARGETS_ADDR)
 - Observe:      127.0.0.1:50056 (AADK_OBSERVE_ADDR)
+- Workflow:     127.0.0.1:50057 (AADK_WORKFLOW_ADDR)
 
 ## Data and state locations
 - Jobs: `~/.local/share/aadk/state/jobs.json`
@@ -51,8 +54,27 @@ Default addresses (override via env):
 This repo does not bundle third-party toolchains; services download or invoke them when requested.
 - Android SDK/NDK custom archives (ToolchainService catalog in `crates/aadk-toolchain/catalog.json`,
   override with `AADK_TOOLCHAIN_CATALOG`):
-  - SDK: `https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz`
-  - NDK: `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz`
+  - SDK (aarch64-linux-musl):
+    - 36.0.0 (2025-11-19): `https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz`
+    - 35.0.2 (2025-10-11): `https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz`
+  - SDK (aarch64_be-linux-musl):
+    - 36.0.0 (2025-11-19): `https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64_be-linux-musl.tar.xz`
+    - 35.0.2 (2025-10-11): `https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64_be-linux-musl.tar.xz`
+  - NDK (aarch64-linux-musl):
+    - r29 (2025-09-08): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz`
+    - r28c (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-linux-musl.tar.xz`
+    - r27d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-linux-musl.tar.xz`
+    - r26d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64-linux-musl.tar.xz`
+  - NDK (aarch64-linux-android):
+    - r29 (2025-09-08): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-android.tar.xz`
+    - r28c (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-linux-android.tar.xz`
+    - r27d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-linux-android.tar.xz`
+    - r26d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64-linux-android.tar.xz`
+  - NDK (aarch64_be-linux-musl):
+    - r29 (2025-09-08): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64_be-linux-musl.tar.xz`
+    - r28c (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64_be-linux-musl.tar.xz`
+    - r27d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64_be-linux-musl.tar.xz`
+    - r26d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64_be-linux-musl.tar.xz`
   - These repos are MIT licensed; review upstream Android SDK/NDK terms if you plan to redistribute.
 - Cuttlefish host packages from `https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts`.
 - Cuttlefish images from `ci.android.com` / `android-ci.googleusercontent.com`.
@@ -123,14 +145,15 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ### JobService (aadk-core)
 - Persisted job registry with bounded history, retention cleanup, and broadcast streaming.
 - `include_history` replay followed by live event streaming.
-- ListJobs/ListJobHistory APIs with pagination and filters (type/state/time, event kinds).
+- StreamRunEvents aggregates run events across jobs with bounded buffering and best-effort timestamp ordering.
+- ListJobs/ListJobHistory APIs with pagination and filters (type/state/time/run_id, event kinds).
 - Validates job types; demo job runner remains for smoke tests while services publish real jobs.
-- Supports correlation_id grouping (StartJob + ListJobs filter) and reserves workflow.pipeline for multi-step orchestration.
+- Supports run_id + correlation_id grouping (StartJob + ListJobs filter) and reserves workflow.pipeline for multi-step orchestration.
 
 ### ToolchainService (aadk-toolchain)
 - Provider catalog with host-aware artifacts (override via `AADK_TOOLCHAIN_CATALOG`).
 - Installs, updates, uninstalls, and verifies SDK/NDK toolchains with JobService events; supports cache cleanup.
-- Verification validates provenance, catalog entries, artifact size, signatures (when configured), and layout; supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
+- Verification validates provenance, catalog entries, artifact size, signatures and transparency log entries (when configured), and layout; supports fixture archives via `AADK_TOOLCHAIN_FIXTURES_DIR`.
 
 ### ProjectService (aadk-project)
 - Template registry backed by JSON (`AADK_PROJECT_TEMPLATES` or default registry).
@@ -148,9 +171,15 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Install APK, launch/stop app, stream logcat, and manage Cuttlefish; publishes job events.
 
 ### ObserveService (aadk-observe)
-- Persists run history and paginated listing with project/target/toolchain ids.
+- Persists run history and paginated listing with run_id/correlation_id and project/target/toolchain ids.
 - Exports support/evidence bundles as JobService jobs with progress/log streaming and retention.
 - Support bundles include job log history plus config/state snapshots.
+- UpsertRun supports best-effort run tracking from multi-service pipelines.
+
+### WorkflowService (aadk-workflow)
+- Runs workflow.pipeline to orchestrate project creation/opening, toolchain verify, build, install, launch, and bundle export steps.
+- Emits job progress/logs for each step and waits for step jobs to complete before proceeding.
+- Uses run_id to correlate jobs and upserts run records to ObserveService.
 
 ### GTK UI (aadk-ui)
 - Home: run jobs with type/params/ids, watch streams, live status panel.
@@ -163,16 +192,18 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
 
 ### CLI (aadk-cli)
-- Job run/list/watch/history/export + demo start/cancel.
+- Job run/list/watch/history/export + demo start/cancel + watch-run (aggregated run stream).
 - Toolchain list-providers/list-sets/update/uninstall/cleanup-cache.
 - Targets list/start/stop/status/install Cuttlefish.
 - Projects list-templates/list-recent/create/open/use-active-defaults.
 - Observe list-runs/export-support/export-evidence.
 - Build run/list-artifacts with module/variant/tasks + artifact filters.
-- Long-running commands accept --job-id/--correlation-id for workflow grouping.
+- Workflow run-pipeline to orchestrate multi-step flows.
+- Long-running commands accept --job-id/--correlation-id/--run-id for workflow grouping.
 
 ## Extending from here (recommended order)
-1. Add transparency log validation to ToolchainService verification.
+1. Add a GTK UI page for workflow.pipeline inputs and run stream visualization.
+2. Add a RunId-aware dashboard view that groups multi-service jobs and surface bundle exports.
 
 
 ## Development notes

@@ -13,6 +13,7 @@ completed items or move them into the implementation notes.
 
 ## Repository map
 - crates/aadk-core: JobService (event streaming and job registry)
+- crates/aadk-workflow: WorkflowService (multi-step pipeline orchestration)
 - crates/aadk-toolchain: ToolchainService (SDK/NDK provider, install, verify)
 - crates/aadk-project: ProjectService (templates, create/open, recent list)
 - crates/aadk-build: BuildService (Gradle builds and artifact listing)
@@ -34,6 +35,7 @@ Default addresses (override with env vars):
 - Build:        127.0.0.1:50054 (AADK_BUILD_ADDR)
 - Targets:      127.0.0.1:50055 (AADK_TARGETS_ADDR)
 - Observe:      127.0.0.1:50056 (AADK_OBSERVE_ADDR)
+- Workflow:     127.0.0.1:50057 (AADK_WORKFLOW_ADDR)
 
 ## Cross-service flows
 - UI/CLI call gRPC services; they do not implement business logic.
@@ -43,9 +45,13 @@ Default addresses (override with env vars):
 - BuildService loads a Gradle model snapshot after project evaluation to validate modules/variants.
 - TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
+- ToolchainService catalog pins linux-aarch64 SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d for the
+  custom providers, with aarch64-linux-musl, aarch64-linux-android, and aarch64_be-linux-musl
+  artifacts where available.
 - ObserveService persists run history and uses JobService history plus state/env snapshots for bundle contents.
-- Correlation ids group related jobs across services; JobService ListJobs can filter by correlation_id.
-- workflow.pipeline is reserved for multi-step orchestration that spans multiple services.
+- RunId is a first-class identifier for multi-service workflows; correlation_id remains a secondary grouping key.
+- JobService StreamRunEvents aggregates run events across jobs using bounded buffering and best-effort timestamp ordering for late discovery.
+- WorkflowService orchestrates workflow.pipeline runs and upserts run records to ObserveService.
 
 ## Shared data and locations
 - Job state: ~/.local/share/aadk/state/jobs.json
@@ -64,6 +70,7 @@ Default addresses (override with env vars):
 ## Per-service AGENT files
 - crates/aadk-project/AGENTS.md
 - crates/aadk-core/AGENTS.md
+- crates/aadk-workflow/AGENTS.md
 - crates/aadk-observe/AGENTS.md
 - crates/aadk-build/AGENTS.md
 - crates/aadk-toolchain/AGENTS.md
@@ -83,7 +90,6 @@ Default addresses (override with env vars):
 ### BuildService (aadk-build)
 
 ### ToolchainService (aadk-toolchain)
-- P2: Add transparency log validation for toolchain artifacts. main.rs (line 1108)
 
 ### TargetService (aadk-targets)
 
