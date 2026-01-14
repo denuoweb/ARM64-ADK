@@ -187,13 +187,14 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 
 ### GTK UI (aadk-ui)
 - Home: run jobs with type/params/ids, watch streams, live status panel.
+- Workflow: run workflow.pipeline with step inputs and stream run-level events.
 - Job History: list jobs and event history with filters; export logs.
 - Toolchains: list/install/verify/update/uninstall, cache cleanup, list toolchain sets.
 - Projects: list templates, create/open, list recents, set config, use active defaults.
 - Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
 - Console: run Gradle builds with module/variant/task selection, list artifacts with filters grouped by module, stream logs.
-- Evidence: list runs, export support/evidence bundles and stream job events.
-- Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
+- Evidence: list runs, group jobs by run, stream run events, export support/evidence bundles, and export job logs.
+- Workflow/Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
 
 ### CLI (aadk-cli)
 - Job run/list/watch/history/export/cancel + watch-run (aggregated run stream).
@@ -206,8 +207,9 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Long-running commands accept --job-id/--correlation-id/--run-id for workflow grouping.
 
 ## Extending from here (recommended order)
-1. Add a GTK UI page for workflow.pipeline inputs and run stream visualization.
-2. Add a RunId-aware dashboard view that groups multi-service jobs and surface bundle exports.
+1. Add pickers for workflow inputs (templates/toolchain sets/targets) and persist last workflow fields in UI config.
+2. Expand the Evidence dashboard with run filters, bundle inventory, and open/export shortcuts.
+3. Add a CLI helper to tail StreamRunEvents after workflow runs.
 
 
 ## Development notes
