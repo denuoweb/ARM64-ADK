@@ -9,18 +9,20 @@ Update this file whenever observe behavior changes or when commits touching this
 
 ## gRPC contract
 - proto/aadk/v1/observe.proto
-- RPCs: ListRuns, ExportSupportBundle, ExportEvidenceBundle
+- RPCs: ListRuns, ExportSupportBundle, ExportEvidenceBundle, UpsertRun
 
 ## Current implementation details
 - Implementation lives in crates/aadk-observe/src/main.rs with a tonic server.
 - Run history is persisted in ~/.local/share/aadk/state/observe.json and paged in list_runs.
+- ListRuns accepts RunFilter (run_id, correlation_id, project/target/toolchain ids, result).
+- UpsertRun merges partial updates (job ids, summary entries, timestamps, result) for best-effort run tracking.
 - export_support_bundle creates a JobService job, writes a zip bundle under
   ~/.local/share/aadk/bundles, and streams progress/log events.
 - export_evidence_bundle does the same for a single run id.
 - Bundle export progress metrics include run_id/output_path plus include flags and item counts.
-- ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs and
-  correlation_id to group multi-service workflows.
-- Runs capture project/target/toolchain ids when provided for filtering.
+- ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs plus
+  correlation_id and run_id to group multi-service workflows.
+- Runs capture project/target/toolchain ids and correlation_id when provided for filtering.
 - Bundle retention prunes old zip files and tmp-* directories by age/count.
 - Bundle contents include a manifest, config snapshots (env + state files), optional toolchain
   state, optional recent run snapshots, and job log capture from JobService history

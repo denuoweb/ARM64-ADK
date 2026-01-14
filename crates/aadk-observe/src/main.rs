@@ -16,8 +16,9 @@ use aadk_proto::aadk::v1::{
     ExportEvidenceBundleRequest, ExportEvidenceBundleResponse, ExportSupportBundleRequest,
     ExportSupportBundleResponse, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended,
     JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListRunsRequest,
-    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunRecord,
-    StartJobRequest, Timestamp, ErrorCode, ErrorDetail, StreamJobEventsRequest, GetJobRequest,
+    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunFilter, RunId,
+    RunRecord, StartJobRequest, Timestamp, ErrorCode, ErrorDetail, StreamJobEventsRequest,
+    GetJobRequest, UpsertRunRequest, UpsertRunResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -51,6 +52,8 @@ struct RunRecordEntry {
     schema_version: u32,
     run_id: String,
     #[serde(default)]
+    correlation_id: Option<String>,
+    #[serde(default)]
     project_id: Option<String>,
     #[serde(default)]
     target_id: Option<String>,
@@ -70,6 +73,23 @@ struct RunRecordEntry {
 struct SummaryEntry {
     key: String,
     value: String,
+}
+
+fn merge_summary(entry: &mut RunRecordEntry, updates: Vec<KeyValue>) {
+    for item in updates {
+        let key = item.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(existing) = entry.summary.iter_mut().find(|entry| entry.key == key) {
+            existing.value = item.value;
+        } else {
+            entry.summary.push(SummaryEntry {
+                key: key.to_string(),
+                value: item.value,
+            });
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -127,6 +147,7 @@ struct BundleManifest {
     bundle_type: String,
     created_at: i64,
     run_id: Option<String>,
+    correlation_id: Option<String>,
     includes: BundleIncludes,
 }
 
@@ -336,12 +357,70 @@ fn normalize_id(id: Option<&Id>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn run_matches_filter(run: &RunRecordEntry, filter: &RunFilter) -> bool {
+    if let Some(run_id) = filter
+        .run_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if run.run_id != run_id {
+            return false;
+        }
+    }
+    if !filter.correlation_id.trim().is_empty() {
+        if run
+            .correlation_id
+            .as_deref()
+            .unwrap_or("")
+            != filter.correlation_id
+        {
+            return false;
+        }
+    }
+    if let Some(project_id) = filter
+        .project_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if run.project_id.as_deref().unwrap_or("") != project_id {
+            return false;
+        }
+    }
+    if let Some(target_id) = filter
+        .target_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if run.target_id.as_deref().unwrap_or("") != target_id {
+            return false;
+        }
+    }
+    if let Some(toolchain_set_id) = filter
+        .toolchain_set_id
+        .as_ref()
+        .map(|id| id.value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if run.toolchain_set_id.as_deref().unwrap_or("") != toolchain_set_id {
+            return false;
+        }
+    }
+    if !filter.result.trim().is_empty() && run.result != filter.result {
+        return false;
+    }
+    true
+}
+
 impl RunRecordEntry {
     fn new(run_id: String, result: &str) -> Self {
         let now = now_millis();
         Self {
             schema_version: default_schema_version(),
             run_id,
+            correlation_id: None,
             project_id: None,
             target_id: None,
             toolchain_set_id: None,
@@ -355,7 +434,7 @@ impl RunRecordEntry {
 
     fn to_proto(&self) -> RunRecord {
         RunRecord {
-            run_id: Some(Id {
+            run_id: Some(RunId {
                 value: self.run_id.clone(),
             }),
             project_id: self
@@ -388,6 +467,7 @@ impl RunRecordEntry {
                     value: item.value.clone(),
                 })
                 .collect(),
+            correlation_id: self.correlation_id.clone().unwrap_or_default(),
         }
     }
 }
@@ -493,6 +573,7 @@ async fn start_job(
     project_id: Option<String>,
     target_id: Option<String>,
     toolchain_set_id: Option<String>,
+    run_id: Option<RunId>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -502,6 +583,7 @@ async fn start_job(
             target_id: target_id.map(|value| Id { value }),
             toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
             correlation_id: correlation_id.to_string(),
+            run_id,
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -829,12 +911,14 @@ fn collect_log_items(run_id: &str, runs_snapshot: &[RunRecordEntry]) -> Vec<Bund
 fn make_manifest(
     bundle_type: &str,
     run_id: Option<String>,
+    correlation_id: Option<String>,
     req: &ExportSupportBundleRequest,
 ) -> BundleManifest {
     BundleManifest {
         bundle_type: bundle_type.into(),
         created_at: now_millis(),
         run_id,
+        correlation_id,
         includes: BundleIncludes {
             include_logs: req.include_logs,
             include_config: req.include_config,
@@ -852,7 +936,16 @@ fn support_bundle_plan(
     runs_snapshot: Vec<RunRecordEntry>,
 ) -> Result<BundlePlan, Status> {
     let mut items = Vec::new();
-    let manifest = make_manifest("support", Some(run_id.to_string()), req);
+    let correlation_id = req
+        .correlation_id
+        .trim()
+        .to_string();
+    let correlation_id = if correlation_id.is_empty() {
+        None
+    } else {
+        Some(correlation_id)
+    };
+    let manifest = make_manifest("support", Some(run_id.to_string()), correlation_id, req);
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| Status::internal(format!("manifest serialization failed: {e}")))?;
     items.push(BundleItem::Generated {
@@ -918,6 +1011,7 @@ fn evidence_bundle_plan(
         bundle_type: "evidence".into(),
         created_at: now_millis(),
         run_id: Some(run.run_id.clone()),
+        correlation_id: run.correlation_id.clone(),
         includes,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -1250,13 +1344,20 @@ impl ObserveService for Svc {
         };
 
         let st = self.state.lock().await;
-        let total = st.runs.len();
+        let filter = req.filter.unwrap_or_default();
+        let mut runs = st
+            .runs
+            .iter()
+            .filter(|run| run_matches_filter(run, &filter))
+            .cloned()
+            .collect::<Vec<_>>();
+        let total = runs.len();
         if start >= total && total != 0 {
             return Err(Status::invalid_argument("page_token out of range"));
         }
 
         let end = (start + page_size).min(total);
-        let items = st.runs[start..end]
+        let items = runs[start..end]
             .iter()
             .cloned()
             .map(|run| run.to_proto())
@@ -1283,7 +1384,12 @@ impl ObserveService for Svc {
         let project_id = normalize_id(req.project_id.as_ref());
         let target_id = normalize_id(req.target_id.as_ref());
         let toolchain_set_id = normalize_id(req.toolchain_set_id.as_ref());
-        let run_id = format!("run-{}", Uuid::new_v4());
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("run-{}", Uuid::new_v4()));
         let output_path = bundles_dir().join(format!("support-{run_id}.zip"));
         let output_path_resp = output_path.to_string_lossy().to_string();
 
@@ -1325,6 +1431,7 @@ impl ObserveService for Svc {
                 project_id.clone(),
                 target_id.clone(),
                 toolchain_set_id.clone(),
+                Some(RunId { value: run_id.clone() }),
             )
             .await?
         } else {
@@ -1334,6 +1441,9 @@ impl ObserveService for Svc {
         {
             let mut st = self.state.lock().await;
             let mut run = RunRecordEntry::new(run_id.clone(), "running");
+            if !correlation_id.is_empty() {
+                run.correlation_id = Some(correlation_id.to_string());
+            }
             run.project_id = project_id.clone();
             run.target_id = target_id.clone();
             run.toolchain_set_id = toolchain_set_id.clone();
@@ -1381,22 +1491,35 @@ impl ObserveService for Svc {
         request: Request<ExportEvidenceBundleRequest>,
     ) -> Result<Response<ExportEvidenceBundleResponse>, Status> {
         let req = request.into_inner();
+        let correlation_id = req.correlation_id.trim().to_string();
         let run_id = req
             .run_id
-            .map(|id| id.value)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| Status::invalid_argument("run_id is required"))?;
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
-        let run_meta = {
+        let (run_id, run_meta) = {
             let st = self.state.lock().await;
-            let entry = st.runs.iter().find(|item| item.run_id == run_id);
-            let Some(entry) = entry else {
-                return Err(Status::not_found("run_id not found"));
+            let entry = if let Some(ref run_id) = run_id {
+                st.runs.iter().find(|item| item.run_id == *run_id)
+            } else if !correlation_id.is_empty() {
+                st.runs
+                    .iter()
+                    .find(|item| item.correlation_id.as_deref() == Some(correlation_id.as_str()))
+            } else {
+                None
             };
+            let Some(entry) = entry else {
+                return Err(Status::not_found("run not found"));
+            };
+            let run_id = entry.run_id.clone();
             (
-                entry.project_id.clone(),
-                entry.target_id.clone(),
-                entry.toolchain_set_id.clone(),
+                run_id,
+                (
+                    entry.project_id.clone(),
+                    entry.target_id.clone(),
+                    entry.toolchain_set_id.clone(),
+                ),
             )
         };
 
@@ -1407,7 +1530,6 @@ impl ObserveService for Svc {
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(String::new);
-        let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -1416,10 +1538,11 @@ impl ObserveService for Svc {
                     key: "run_id".into(),
                     value: run_id.clone(),
                 }],
-                correlation_id,
+                correlation_id.as_str(),
                 run_meta.0.clone(),
                 run_meta.1.clone(),
                 run_meta.2.clone(),
+                Some(RunId { value: run_id.clone() }),
             )
             .await?
         } else {
@@ -1432,6 +1555,9 @@ impl ObserveService for Svc {
             let mut st = self.state.lock().await;
             if let Some(entry) = st.runs.iter_mut().find(|item| item.run_id == run_id) {
                 entry.job_ids.push(job_id.clone());
+                if !correlation_id.is_empty() && entry.correlation_id.is_none() {
+                    entry.correlation_id = Some(correlation_id.clone());
+                }
                 if let Err(err) = save_state(&st) {
                     drop(st);
                     let detail = error_detail_for_io("persist observe state", &err, &job_id);
@@ -1462,6 +1588,75 @@ impl ObserveService for Svc {
         Ok(Response::new(ExportEvidenceBundleResponse {
             job_id: Some(Id { value: job_id }),
             output_path: output_path_resp,
+        }))
+    }
+
+    async fn upsert_run(
+        &self,
+        request: Request<UpsertRunRequest>,
+    ) -> Result<Response<UpsertRunResponse>, Status> {
+        let req = request.into_inner();
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::invalid_argument("run_id is required"))?;
+
+        let mut st = self.state.lock().await;
+        let mut run = st
+            .runs
+            .iter()
+            .find(|entry| entry.run_id == run_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                if req.result.trim().is_empty() {
+                    RunRecordEntry::new(run_id.clone(), "running")
+                } else {
+                    RunRecordEntry::new(run_id.clone(), &req.result)
+                }
+            });
+
+        if !req.correlation_id.trim().is_empty() {
+            run.correlation_id = Some(req.correlation_id.trim().to_string());
+        }
+        if let Some(project_id) = normalize_id(req.project_id.as_ref()) {
+            run.project_id = Some(project_id);
+        }
+        if let Some(target_id) = normalize_id(req.target_id.as_ref()) {
+            run.target_id = Some(target_id);
+        }
+        if let Some(toolchain_set_id) = normalize_id(req.toolchain_set_id.as_ref()) {
+            run.toolchain_set_id = Some(toolchain_set_id);
+        }
+        if let Some(started_at) = req.started_at.as_ref() {
+            run.started_at = started_at.unix_millis;
+        }
+        if let Some(finished_at) = req.finished_at.as_ref() {
+            run.finished_at = Some(finished_at.unix_millis);
+        }
+        if !req.result.trim().is_empty() {
+            run.result = req.result.trim().to_string();
+        }
+
+        for job_id in req.job_ids {
+            let value = job_id.value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if !run.job_ids.iter().any(|existing| existing == value) {
+                run.job_ids.push(value.to_string());
+            }
+        }
+        merge_summary(&mut run, req.summary);
+
+        upsert_run(&mut st, run.clone());
+        if let Err(err) = save_state(&st) {
+            return Err(Status::internal(format!("failed to persist state: {err}")));
+        }
+
+        Ok(Response::new(UpsertRunResponse {
+            run: Some(run.to_proto()),
         }))
     }
 }
