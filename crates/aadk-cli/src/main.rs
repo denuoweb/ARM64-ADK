@@ -15,6 +15,7 @@ use aadk_proto::aadk::v1::{
     project_service_client::ProjectServiceClient,
     toolchain_service_client::ToolchainServiceClient,
     target_service_client::TargetServiceClient,
+    workflow_service_client::WorkflowServiceClient,
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildVariant, CancelJobRequest,
     CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
     ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
@@ -22,10 +23,11 @@ use aadk_proto::aadk::v1::{
     InstallCuttlefishRequest, Job, JobEvent, JobEventKind, JobFilter, JobHistoryFilter, JobState,
     KeyValue, ListArtifactsRequest, ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest,
     ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, SetActiveToolchainSetRequest,
-    SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
-    StopCuttlefishRequest, StreamJobEventsRequest, UninstallToolchainRequest,
-    UpdateToolchainRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter, RunId,
+    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
+    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
+    StreamRunEventsRequest, UninstallToolchainRequest, UpdateToolchainRequest,
+    WorkflowPipelineOptions, WorkflowPipelineRequest,
 };
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -71,6 +73,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BuildCmd,
     },
+    /// Workflow-related commands (WorkflowService)
+    Workflow {
+        #[command(subcommand)]
+        cmd: WorkflowCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -81,6 +88,8 @@ enum JobCmd {
         addr: String,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
     /// Run a job by type and optionally stream events
     Run {
@@ -97,6 +106,8 @@ enum JobCmd {
         toolchain_set_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
         #[arg(long)]
         no_stream: bool,
     },
@@ -118,6 +129,8 @@ enum JobCmd {
         finished_before: Option<i64>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
         #[arg(long, default_value_t = 50)]
         page_size: u32,
         #[arg(long, default_value = "")]
@@ -130,6 +143,23 @@ enum JobCmd {
         job_id: String,
         #[arg(long)]
         include_history: bool,
+    },
+    /// Watch job events by run or correlation id (aggregated stream)
+    WatchRun {
+        #[arg(long, default_value_t = default_job_addr())]
+        addr: String,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
+        include_history: bool,
+        #[arg(long)]
+        buffer_max_events: Option<u32>,
+        #[arg(long)]
+        max_delay_ms: Option<u64>,
+        #[arg(long)]
+        discovery_interval_ms: Option<u64>,
     },
     /// List job event history by id
     History {
@@ -219,6 +249,8 @@ enum ToolchainCmd {
         #[arg(long)]
         correlation_id: Option<String>,
         #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// Uninstall a toolchain
@@ -237,6 +269,8 @@ enum ToolchainCmd {
         #[arg(long)]
         correlation_id: Option<String>,
         #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// Cleanup cached toolchain artifacts
@@ -253,6 +287,8 @@ enum ToolchainCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
         #[arg(long)]
         no_stream: bool,
     },
@@ -286,6 +322,8 @@ enum TargetsCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
     /// Stop Cuttlefish and return a job id
     StopCuttlefish {
@@ -295,6 +333,8 @@ enum TargetsCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
     /// Get Cuttlefish status
     CuttlefishStatus {
@@ -311,6 +351,8 @@ enum TargetsCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
 }
 
@@ -344,6 +386,8 @@ enum ProjectCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
     },
     /// Open an existing project
     Open {
@@ -383,6 +427,18 @@ enum ObserveCmd {
         page_size: u32,
         #[arg(long, default_value = "")]
         page_token: String,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        target_id: Option<String>,
+        #[arg(long)]
+        toolchain_set_id: Option<String>,
+        #[arg(long)]
+        result: Option<String>,
     },
     /// Export a support bundle and stream job events
     ExportSupport {
@@ -404,6 +460,14 @@ enum ObserveCmd {
         job_id: Option<String>,
         #[arg(long)]
         correlation_id: Option<String>,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        target_id: Option<String>,
+        #[arg(long)]
+        toolchain_set_id: Option<String>,
     },
     /// Export an evidence bundle for a run id
     ExportEvidence {
@@ -411,7 +475,7 @@ enum ObserveCmd {
         addr: String,
         #[arg(long, default_value_t = default_job_addr())]
         job_addr: String,
-        run_id: String,
+        run_id: Option<String>,
         #[arg(long)]
         job_id: Option<String>,
         #[arg(long)]
@@ -430,6 +494,7 @@ struct CliConfig {
     project_addr: String,
     build_addr: String,
     observe_addr: String,
+    workflow_addr: String,
     last_job_id: String,
     last_job_type: String,
 }
@@ -453,6 +518,7 @@ struct JobSummary {
     finished_at_unix_millis: Option<i64>,
     display_name: String,
     correlation_id: String,
+    run_id: String,
     project_id: String,
     target_id: String,
     toolchain_set_id: String,
@@ -547,6 +613,8 @@ enum BuildCmd {
         #[arg(long)]
         correlation_id: Option<String>,
         #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
         no_stream: bool,
     },
     /// List build artifacts
@@ -566,6 +634,57 @@ enum BuildCmd {
         name_contains: String,
         #[arg(long, default_value = "")]
         path_contains: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    /// Run the workflow pipeline
+    RunPipeline {
+        #[arg(long, default_value_t = default_workflow_addr())]
+        addr: String,
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        project_path: Option<String>,
+        #[arg(long)]
+        project_name: Option<String>,
+        #[arg(long)]
+        template_id: Option<String>,
+        #[arg(long)]
+        toolchain_id: Option<String>,
+        #[arg(long)]
+        toolchain_set_id: Option<String>,
+        #[arg(long)]
+        target_id: Option<String>,
+        #[arg(long, default_value = "debug")]
+        variant: String,
+        #[arg(long)]
+        module: Option<String>,
+        #[arg(long)]
+        variant_name: Option<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        task: Vec<String>,
+        #[arg(long)]
+        apk_path: Option<String>,
+        #[arg(long)]
+        application_id: Option<String>,
+        #[arg(long)]
+        activity: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        step: Vec<String>,
+        #[arg(long)]
+        stream_run: bool,
+        #[arg(long)]
+        no_stream: bool,
     },
 }
 
@@ -629,6 +748,16 @@ fn default_observe_addr() -> String {
     }
     "127.0.0.1:50056".into()
 }
+fn default_workflow_addr() -> String {
+    if let Ok(val) = std::env::var("AADK_WORKFLOW_ADDR") {
+        return val;
+    }
+    let cfg = load_cli_config();
+    if !cfg.workflow_addr.trim().is_empty() {
+        return cfg.workflow_addr;
+    }
+    "127.0.0.1:50057".into()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -636,7 +765,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
-            JobCmd::StartDemo { addr, correlation_id } => {
+            JobCmd::StartDemo { addr, correlation_id, run_id } => {
                 update_cli_config(|cfg| {
                     cfg.job_addr = addr.clone();
                     cfg.last_job_type = "demo.job".into();
@@ -649,6 +778,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target_id: None,
                     toolchain_set_id: None,
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 }).await?.into_inner();
 
                 let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
@@ -668,6 +798,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_id,
                 toolchain_set_id,
                 correlation_id,
+                run_id,
                 no_stream,
             } => {
                 if job_type.trim().is_empty() {
@@ -689,6 +820,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .map(|value| Id { value: value.clone() }),
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 }).await?.into_inner();
                 let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
@@ -708,6 +840,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 finished_after,
                 finished_before,
                 correlation_id,
+                run_id,
                 page_size,
                 page_token,
             } => {
@@ -724,6 +857,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     finished_after: finished_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
                     finished_before: finished_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 };
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client
@@ -753,6 +887,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cfg.last_job_id = job_id.clone();
                 });
                 stream_job_events(&addr, &job_id, include_history, true).await?;
+            }
+            JobCmd::WatchRun {
+                addr,
+                run_id,
+                correlation_id,
+                include_history,
+                buffer_max_events,
+                max_delay_ms,
+                discovery_interval_ms,
+            } => {
+                update_cli_config(|cfg| cfg.job_addr = addr.clone());
+                stream_run_events(
+                    &addr,
+                    run_id,
+                    correlation_id,
+                    include_history,
+                    buffer_max_events,
+                    max_delay_ms,
+                    discovery_interval_ms,
+                )
+                .await?;
             }
             JobCmd::History {
                 addr,
@@ -931,6 +1086,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 remove_cached,
                 job_id,
                 correlation_id,
+                run_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -953,6 +1109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -970,6 +1127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 force,
                 job_id,
                 correlation_id,
+                run_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -991,6 +1149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -1007,6 +1166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 remove_all,
                 job_id,
                 correlation_id,
+                run_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -1023,6 +1183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -1068,6 +1229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_full_ui,
                 job_id,
                 correlation_id,
+                run_id,
             } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
@@ -1079,6 +1241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -1089,6 +1252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 addr,
                 job_id,
                 correlation_id,
+                run_id,
             } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
@@ -1099,6 +1263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -1119,6 +1284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 force,
                 job_id,
                 correlation_id,
+                run_id,
             } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
@@ -1133,6 +1299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
                     })
                     .await?
                     .into_inner();
@@ -1189,6 +1356,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 template_id,
                 job_id,
                 correlation_id,
+                run_id,
             } => {
                 update_cli_config(|cfg| {
                     cfg.project_addr = addr.clone();
@@ -1206,6 +1374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .filter(|value| !value.trim().is_empty())
                         .map(|value| Id { value: value.clone() }),
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 }).await?.into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -1350,13 +1519,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
 
         Cmd::Observe { cmd } => match cmd {
-            ObserveCmd::ListRuns { addr, page_size, page_token } => {
+            ObserveCmd::ListRuns {
+                addr,
+                page_size,
+                page_token,
+                run_id,
+                correlation_id,
+                project_id,
+                target_id,
+                toolchain_set_id,
+                result,
+            } => {
                 update_cli_config(|cfg| cfg.observe_addr = addr.clone());
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.list_runs(ListRunsRequest {
                     page: Some(Pagination {
                         page_size,
                         page_token,
+                    }),
+                    filter: Some(RunFilter {
+                        run_id: run_id.map(|value| RunId { value }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                        project_id: project_id.map(|value| Id { value }),
+                        target_id: target_id.map(|value| Id { value }),
+                        toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
+                        result: result.unwrap_or_default(),
                     }),
                 }).await?.into_inner();
                 for run in resp.runs {
@@ -1388,6 +1575,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 recent_runs_limit,
                 job_id,
                 correlation_id,
+                run_id,
+                project_id,
+                target_id,
+                toolchain_set_id,
             } => {
                 update_cli_config(|cfg| {
                     cfg.observe_addr = addr.clone();
@@ -1404,10 +1595,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .filter(|value| !value.trim().is_empty())
                         .map(|value| Id { value: value.clone() }),
-                    project_id: None,
-                    target_id: None,
-                    toolchain_set_id: None,
+                    project_id: project_id.map(|value| Id { value }),
+                    target_id: target_id.map(|value| Id { value }),
+                    toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 }).await?.into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
@@ -1428,7 +1620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
-                    run_id: Some(Id { value: run_id }),
+                    run_id: run_id.map(|value| RunId { value }),
                     job_id: job_id
                         .as_ref()
                         .filter(|value| !value.trim().is_empty())
@@ -1456,6 +1648,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clean_first,
                 job_id,
                 correlation_id,
+                run_id,
                 no_stream,
             } => {
                 update_cli_config(|cfg| {
@@ -1500,6 +1693,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     variant_name: variant_name.unwrap_or_default().trim().to_string(),
                     tasks,
                     correlation_id: correlation_id.unwrap_or_default(),
+                    run_id: run_id.map(|value| RunId { value }),
                 }).await?.into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -1578,6 +1772,155 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+
+        Cmd::Workflow { cmd } => match cmd {
+            WorkflowCmd::RunPipeline {
+                addr,
+                job_addr,
+                run_id,
+                correlation_id,
+                job_id,
+                project_id,
+                project_path,
+                project_name,
+                template_id,
+                toolchain_id,
+                toolchain_set_id,
+                target_id,
+                variant,
+                module,
+                variant_name,
+                task,
+                apk_path,
+                application_id,
+                activity,
+                step,
+                stream_run,
+                no_stream,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.workflow_addr = addr.clone();
+                    cfg.job_addr = job_addr.clone();
+                    cfg.last_job_type = "workflow.pipeline".into();
+                });
+
+                let (options, unknown_steps) = parse_workflow_steps(&step);
+                if !unknown_steps.is_empty() {
+                    eprintln!("Unknown workflow steps: {}", unknown_steps.join(", "));
+                }
+                if let Some(opts) = options.as_ref() {
+                    let any = opts.verify_toolchain
+                        || opts.create_project
+                        || opts.open_project
+                        || opts.build
+                        || opts.install_apk
+                        || opts.launch_app
+                        || opts.export_support_bundle
+                        || opts.export_evidence_bundle;
+                    if !any {
+                        eprintln!("No workflow steps enabled; use --step all or omit --step for inference.");
+                        return Ok(());
+                    }
+                }
+
+                let Some(build_variant) = parse_build_variant(&variant) else {
+                    eprintln!("unsupported variant: {variant}");
+                    return Ok(());
+                };
+
+                let tasks = task
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>();
+
+                let mut client = WorkflowServiceClient::new(connect(&addr).await?);
+                let correlation_id = correlation_id.unwrap_or_default();
+                let resp = client
+                    .run_pipeline(WorkflowPipelineRequest {
+                        run_id: run_id.map(|value| RunId { value }),
+                        correlation_id: correlation_id.clone(),
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        project_id: project_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        project_path: project_path.unwrap_or_default().trim().to_string(),
+                        project_name: project_name.unwrap_or_default().trim().to_string(),
+                        template_id: template_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        toolchain_id: toolchain_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        toolchain_set_id: toolchain_set_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        target_id: target_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id { value: value.clone() }),
+                        build_variant: build_variant as i32,
+                        module: module.unwrap_or_default().trim().to_string(),
+                        variant_name: variant_name.unwrap_or_default().trim().to_string(),
+                        tasks,
+                        apk_path: apk_path.unwrap_or_default().trim().to_string(),
+                        application_id: application_id.unwrap_or_default().trim().to_string(),
+                        activity: activity.unwrap_or_default().trim().to_string(),
+                        options,
+                    })
+                    .await?
+                    .into_inner();
+
+                let run_id = resp.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+                let job_id = resp.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+                let project_id = resp
+                    .project_id
+                    .as_ref()
+                    .map(|id| id.value.clone())
+                    .unwrap_or_default();
+                println!("run_id={run_id}\njob_id={job_id}\nproject_id={project_id}");
+
+                if !job_id.is_empty() {
+                    update_cli_config(|cfg| cfg.last_job_id = job_id.clone());
+                }
+
+                if no_stream || job_id.is_empty() {
+                    return Ok(());
+                }
+
+                if stream_run {
+                    let run_id_opt = if !run_id.trim().is_empty() {
+                        Some(run_id)
+                    } else {
+                        None
+                    };
+                    let correlation_opt = if !correlation_id.trim().is_empty() {
+                        Some(correlation_id)
+                    } else {
+                        None
+                    };
+                    stream_run_events(
+                        &job_addr,
+                        run_id_opt,
+                        correlation_opt,
+                        true,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                } else {
+                    stream_job_events(&job_addr, &job_id, true, true).await?;
+                }
+            }
+        },
     }
 
     Ok(())
@@ -1613,6 +1956,43 @@ async fn stream_job_events(
                 if render_job_event(&evt) && stop_on_done {
                     break;
                 }
+            }
+            Err(err) => {
+                eprintln!("stream error: {err}");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn stream_run_events(
+    addr: &str,
+    run_id: Option<String>,
+    correlation_id: Option<String>,
+    include_history: bool,
+    buffer_max_events: Option<u32>,
+    max_delay_ms: Option<u64>,
+    discovery_interval_ms: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(addr).await?);
+    let mut stream = client
+        .stream_run_events(StreamRunEventsRequest {
+            run_id: run_id.map(|value| RunId { value }),
+            correlation_id: correlation_id.unwrap_or_default(),
+            include_history,
+            buffer_max_events: buffer_max_events.unwrap_or(0),
+            max_delay_ms: max_delay_ms.unwrap_or(0),
+            discovery_interval_ms: discovery_interval_ms.unwrap_or(0),
+        })
+        .await?
+        .into_inner();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(evt) => {
+                render_job_event(&evt);
             }
             Err(err) => {
                 eprintln!("stream error: {err}");
@@ -1803,13 +2183,52 @@ fn parse_job_event_kinds(values: &[String]) -> (Vec<i32>, Vec<String>) {
     (kinds, unknown)
 }
 
+fn parse_workflow_steps(
+    values: &[String],
+) -> (Option<WorkflowPipelineOptions>, Vec<String>) {
+    if values.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut opts = WorkflowPipelineOptions::default();
+    let mut unknown = Vec::new();
+    for token in split_tokens(values) {
+        match token.to_ascii_lowercase().as_str() {
+            "all" => {
+                opts.verify_toolchain = true;
+                opts.create_project = true;
+                opts.open_project = true;
+                opts.build = true;
+                opts.install_apk = true;
+                opts.launch_app = true;
+                opts.export_support_bundle = true;
+                opts.export_evidence_bundle = true;
+            }
+            "verify" | "verify_toolchain" | "toolchain.verify" => opts.verify_toolchain = true,
+            "create" | "create_project" | "project.create" => opts.create_project = true,
+            "open" | "open_project" | "project.open" => opts.open_project = true,
+            "build" | "build.run" => opts.build = true,
+            "install" | "install_apk" | "targets.install" => opts.install_apk = true,
+            "launch" | "launch_app" | "targets.launch" => opts.launch_app = true,
+            "support" | "support_bundle" | "observe.support_bundle" => {
+                opts.export_support_bundle = true
+            }
+            "evidence" | "evidence_bundle" | "observe.evidence_bundle" => {
+                opts.export_evidence_bundle = true
+            }
+            _ => unknown.push(token),
+        }
+    }
+    (Some(opts), unknown)
+}
+
 fn render_job_summary(job: &Job) {
     let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+    let run_id = job.run_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
     let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
     let created = job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
     let finished = job.finished_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
     println!(
-        "{}\t{}\tstate={state:?}\tcreated={created}\tfinished={finished}",
+        "{}\t{}\tstate={state:?}\trun_id={run_id}\tcreated={created}\tfinished={finished}",
         job_id, job.job_type
     );
 }
@@ -1834,6 +2253,7 @@ impl JobSummary {
             finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
             display_name: job.display_name.clone(),
             correlation_id: job.correlation_id.clone(),
+            run_id: job.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             project_id: job.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             target_id: job.target_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),

@@ -28,7 +28,7 @@ use aadk_proto::aadk::v1::{
     SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
     StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
     StreamLogcatRequest, Timestamp, ToolchainKind, UninstallToolchainRequest, UpdateToolchainRequest,
-    VerifyToolchainRequest,
+    VerifyToolchainRequest, RunId,
 };
 use futures_util::StreamExt;
 use gtk4 as gtk;
@@ -48,6 +48,7 @@ struct AppConfig {
     build_addr: String,
     targets_addr: String,
     observe_addr: String,
+    workflow_addr: String,
     last_job_type: String,
     last_job_params: String,
     last_job_project_id: String,
@@ -71,6 +72,8 @@ impl Default for AppConfig {
                 .unwrap_or_else(|_| "127.0.0.1:50055".into()),
             observe_addr: std::env::var("AADK_OBSERVE_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:50056".into()),
+            workflow_addr: std::env::var("AADK_WORKFLOW_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:50057".into()),
             last_job_type: String::new(),
             last_job_params: String::new(),
             last_job_project_id: String::new(),
@@ -108,6 +111,11 @@ impl AppConfig {
                     }
                     if std::env::var("AADK_OBSERVE_ADDR").is_err() && !file_cfg.observe_addr.is_empty() {
                         cfg.observe_addr = file_cfg.observe_addr;
+                    }
+                    if std::env::var("AADK_WORKFLOW_ADDR").is_err()
+                        && !file_cfg.workflow_addr.is_empty()
+                    {
+                        cfg.workflow_addr = file_cfg.workflow_addr;
                     }
                     cfg.last_job_type = file_cfg.last_job_type;
                     cfg.last_job_params = file_cfg.last_job_params;
@@ -183,6 +191,7 @@ struct JobSummary {
     finished_at_unix_millis: Option<i64>,
     display_name: String,
     correlation_id: String,
+    run_id: String,
     project_id: String,
     target_id: String,
     toolchain_set_id: String,
@@ -396,6 +405,7 @@ enum AppEvent {
     HomeResult { result: String },
     SetLastBuildApk { apk_path: String },
     SetCuttlefishBuildId { build_id: String },
+    ToolchainAvailable { provider_id: String, versions: Vec<String> },
     ProjectTemplates { templates: Vec<ProjectTemplateOption> },
     ProjectToolchainSets { sets: Vec<ToolchainSetOption> },
     ProjectTargets { targets: Vec<TargetOption> },
@@ -472,7 +482,7 @@ fn build_ui(app: &gtk::Application) {
 
     stack.add_titled(&home.page.container, Some("home"), "Home");
     stack.add_titled(&jobs_history.container, Some("jobs"), "Job History");
-    stack.add_titled(&toolchains.container, Some("toolchains"), "Toolchains");
+    stack.add_titled(&toolchains.page.container, Some("toolchains"), "Toolchains");
     stack.add_titled(&projects.page.container, Some("projects"), "Projects");
     stack.add_titled(&targets.page.container, Some("targets"), "Targets");
     stack.add_titled(&console.container, Some("console"), "Console");
@@ -534,6 +544,12 @@ fn build_ui(app: &gtk::Application) {
                     }
                     AppEvent::SetCuttlefishBuildId { build_id } => {
                         targets_for_events.set_cuttlefish_build_id(&build_id);
+                    }
+                    AppEvent::ToolchainAvailable {
+                        provider_id,
+                        versions,
+                    } => {
+                        toolchains_for_events.set_available_versions(&provider_id, &versions);
                     }
                     AppEvent::ProjectTemplates { templates } => {
                         projects_for_events.set_templates(&templates);
@@ -643,6 +659,13 @@ struct TargetsPage {
     cuttlefish_build_entry: gtk::Entry,
 }
 
+#[derive(Clone)]
+struct ToolchainsPage {
+    page: Page,
+    sdk_version_combo: gtk::ComboBoxText,
+    ndk_version_combo: gtk::ComboBoxText,
+}
+
 #[derive(Clone, Debug)]
 struct ProjectTemplateOption {
     id: String,
@@ -689,6 +712,28 @@ impl TargetsPage {
     }
 }
 
+impl ToolchainsPage {
+    fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    fn set_available_versions(&self, provider_id: &str, versions: &[String]) {
+        match provider_id {
+            PROVIDER_SDK_ID => self.set_sdk_versions(versions),
+            PROVIDER_NDK_ID => self.set_ndk_versions(versions),
+            _ => {}
+        }
+    }
+
+    fn set_sdk_versions(&self, versions: &[String]) {
+        populate_combo_versions(&self.sdk_version_combo, versions, SDK_VERSION);
+    }
+
+    fn set_ndk_versions(&self, versions: &[String]) {
+        populate_combo_versions(&self.ndk_version_combo, versions, NDK_VERSION);
+    }
+}
+
 impl ProjectsPage {
     fn append(&self, s: &str) {
         self.page.append(s);
@@ -723,6 +768,36 @@ impl ProjectsPage {
         }
         self.target_combo.set_active(Some(0));
     }
+}
+
+fn populate_combo_versions(combo: &gtk::ComboBoxText, versions: &[String], fallback: &str) {
+    let current = combo.active_id().map(|id| id.to_string());
+    combo.remove_all();
+    if versions.is_empty() {
+        if !fallback.trim().is_empty() {
+            combo.append(Some(fallback), fallback);
+            combo.set_active(Some(0));
+        }
+        return;
+    }
+    for version in versions {
+        combo.append(Some(version.as_str()), version);
+    }
+    if let Some(current) = current {
+        if let Some(index) = versions.iter().position(|v| v == &current) {
+            combo.set_active(Some(index as u32));
+            return;
+        }
+    }
+    combo.set_active(Some(0));
+}
+
+fn combo_active_value(combo: &gtk::ComboBoxText) -> String {
+    combo
+        .active_id()
+        .map(|id| id.to_string())
+        .or_else(|| combo.active_text().map(|text| text.to_string()))
+        .unwrap_or_default()
 }
 
 fn make_page(title: &str) -> Page {
@@ -1231,7 +1306,10 @@ const PROVIDER_NDK_ID: &str = "provider-android-ndk-custom";
 const SDK_VERSION: &str = "36.0.0";
 const NDK_VERSION: &str = "r29";
 
-fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
+fn page_toolchains(
+    cfg: Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: mpsc::Sender<UiCommand>,
+) -> ToolchainsPage {
     let page = make_page("Toolchains — ToolchainService");
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -1267,20 +1345,20 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
         .row_spacing(8)
         .column_spacing(8)
         .build();
-    let sdk_version_entry = gtk::Entry::builder()
-        .text(SDK_VERSION)
-        .hexpand(true)
-        .build();
-    let ndk_version_entry = gtk::Entry::builder()
-        .text(NDK_VERSION)
-        .hexpand(true)
-        .build();
+    let sdk_version_combo = gtk::ComboBoxText::new();
+    sdk_version_combo.set_hexpand(true);
+    sdk_version_combo.append(Some(SDK_VERSION), SDK_VERSION);
+    sdk_version_combo.set_active(Some(0));
+    let ndk_version_combo = gtk::ComboBoxText::new();
+    ndk_version_combo.set_hexpand(true);
+    ndk_version_combo.append(Some(NDK_VERSION), NDK_VERSION);
+    ndk_version_combo.set_active(Some(0));
     let label_sdk_version = gtk::Label::builder().label("SDK version").xalign(0.0).build();
     let label_ndk_version = gtk::Label::builder().label("NDK version").xalign(0.0).build();
     version_grid.attach(&label_sdk_version, 0, 0, 1, 1);
-    version_grid.attach(&sdk_version_entry, 1, 0, 1, 1);
+    version_grid.attach(&sdk_version_combo, 1, 0, 1, 1);
     version_grid.attach(&label_ndk_version, 0, 1, 1, 1);
-    version_grid.attach(&ndk_version_entry, 1, 1, 1, 1);
+    version_grid.attach(&ndk_version_combo, 1, 1, 1, 1);
 
     let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let install_sdk = gtk::Button::with_label("Install SDK");
@@ -1446,7 +1524,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
 
     let cfg_install_sdk = cfg.clone();
     let cmd_tx_install_sdk = cmd_tx.clone();
-    let sdk_version_entry_install = sdk_version_entry.clone();
+    let sdk_version_combo_install = sdk_version_combo.clone();
     let use_job_id_install_sdk = use_job_id_check.clone();
     let job_id_entry_install_sdk = job_id_entry.clone();
     let correlation_entry_install_sdk = correlation_id_entry.clone();
@@ -1471,7 +1549,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
             }
         }
         let cfg = cfg_install_sdk.lock().unwrap().clone();
-        let version = sdk_version_entry_install.text().to_string();
+        let version = combo_active_value(&sdk_version_combo_install);
         cmd_tx_install_sdk
             .send(UiCommand::ToolchainInstall {
                 cfg,
@@ -1486,7 +1564,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
 
     let cfg_install_ndk = cfg.clone();
     let cmd_tx_install_ndk = cmd_tx.clone();
-    let ndk_version_entry_install = ndk_version_entry.clone();
+    let ndk_version_combo_install = ndk_version_combo.clone();
     let use_job_id_install_ndk = use_job_id_check.clone();
     let job_id_entry_install_ndk = job_id_entry.clone();
     let correlation_entry_install_ndk = correlation_id_entry.clone();
@@ -1511,7 +1589,7 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
             }
         }
         let cfg = cfg_install_ndk.lock().unwrap().clone();
-        let version = ndk_version_entry_install.text().to_string();
+        let version = combo_active_value(&ndk_version_combo_install);
         cmd_tx_install_ndk
             .send(UiCommand::ToolchainInstall {
                 cfg,
@@ -1735,7 +1813,26 @@ fn page_toolchains(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<U
             .send(UiCommand::ToolchainGetActive { cfg })
             .ok();
     });
-    page
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        cmd_tx
+            .send(UiCommand::ToolchainListAvailable {
+                cfg: cfg.clone(),
+                provider_id: PROVIDER_SDK_ID.into(),
+            })
+            .ok();
+        cmd_tx
+            .send(UiCommand::ToolchainListAvailable {
+                cfg,
+                provider_id: PROVIDER_NDK_ID.into(),
+            })
+            .ok();
+    }
+    ToolchainsPage {
+        page,
+        sdk_version_combo,
+        ndk_version_combo,
+    }
 }
 
 fn page_projects(
@@ -3183,6 +3280,17 @@ fn to_optional_id(raw: &str) -> Option<Id> {
     }
 }
 
+fn run_id_from_optional(raw: &str) -> Option<RunId> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(RunId {
+            value: trimmed.to_string(),
+        })
+    }
+}
+
 fn kv_pairs(items: &[KeyValue]) -> String {
     items
         .iter()
@@ -3263,6 +3371,7 @@ impl JobSummary {
             finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
             display_name: job.display_name.clone(),
             correlation_id: job.correlation_id.clone(),
+            run_id: job.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             project_id: job.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             target_id: job.target_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
             toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
@@ -3472,6 +3581,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: to_optional_id(&target_id),
                 toolchain_set_id: to_optional_id(&toolchain_set_id),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
@@ -3564,6 +3674,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 finished_after: finished_after.map(|ms| Timestamp { unix_millis: ms }),
                 finished_before: finished_before.map(|ms| Timestamp { unix_millis: ms }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: None,
             };
 
             let mut client = JobServiceClient::new(connect(&cfg.job_addr).await?);
@@ -3705,10 +3816,17 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
         UiCommand::ToolchainListAvailable { cfg, provider_id } => {
             ui.send(AppEvent::Log { page: "toolchains", line: format!("Listing available for {provider_id} via {}\n", cfg.toolchain_addr) }).ok();
             let mut client = ToolchainServiceClient::new(connect(&cfg.toolchain_addr).await?);
+            let provider_id_value = provider_id.clone();
             let resp = client.list_available(ListAvailableRequest {
-                provider_id: Some(Id { value: provider_id }),
+                provider_id: Some(Id { value: provider_id.clone() }),
                 page: None,
             }).await?.into_inner();
+            let versions = resp
+                .items
+                .iter()
+                .filter_map(|item| item.version.as_ref().map(|v| v.version.clone()))
+                .collect::<Vec<_>>();
+            ui.send(AppEvent::ToolchainAvailable { provider_id: provider_id_value, versions }).ok();
 
             if resp.items.is_empty() {
                 ui.send(AppEvent::Log { page: "toolchains", line: "No available toolchains.\n".into() }).ok();
@@ -3750,6 +3868,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3793,6 +3912,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3833,6 +3953,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3866,6 +3987,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -3948,6 +4070,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                             .filter(|value| !value.trim().is_empty())
                             .map(|value| Id { value: value.clone() }),
                         correlation_id: correlation_id.trim().to_string(),
+                        run_id: run_id_from_optional(&correlation_id),
                     }).await?.into_inner();
 
                     if verify.verified {
@@ -4235,6 +4358,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -4467,6 +4591,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                         .filter(|value| !value.trim().is_empty())
                         .map(|value| Id { value: value.clone() }),
                     correlation_id: correlation_id.trim().to_string(),
+                    run_id: run_id_from_optional(&correlation_id),
                 })
                 .await?
                 .into_inner();
@@ -4525,6 +4650,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                         .filter(|value| !value.trim().is_empty())
                         .map(|value| Id { value: value.clone() }),
                     correlation_id: correlation_id.trim().to_string(),
+                    run_id: run_id_from_optional(&correlation_id),
                 })
                 .await?
                 .into_inner();
@@ -4558,6 +4684,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                         .filter(|value| !value.trim().is_empty())
                         .map(|value| Id { value: value.clone() }),
                     correlation_id: correlation_id.trim().to_string(),
+                    run_id: run_id_from_optional(&correlation_id),
                 })
                 .await?
                 .into_inner();
@@ -4616,6 +4743,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -4670,6 +4798,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| Id { value: value.clone() }),
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
@@ -4721,6 +4850,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                     page_size: 25,
                     page_token: String::new(),
                 }),
+                filter: None,
             }).await?.into_inner();
 
             if resp.runs.is_empty() {
@@ -4778,6 +4908,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 target_id: None,
                 toolchain_set_id: None,
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await?.into_inner();
 
             let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
@@ -4812,7 +4943,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
             ui.send(AppEvent::Log { page: "evidence", line: format!("Connecting to ObserveService at {}\n", cfg.observe_addr) }).ok();
             let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
             let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
-                run_id: Some(Id { value: run_id.clone() }),
+                run_id: Some(RunId { value: run_id.clone() }),
                 job_id: job_id
                     .as_ref()
                     .filter(|value| !value.trim().is_empty())
@@ -4871,6 +5002,7 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                 variant_name,
                 tasks,
                 correlation_id: correlation_id.trim().to_string(),
+                run_id: run_id_from_optional(&correlation_id),
             }).await {
                 Ok(resp) => resp.into_inner(),
                 Err(err) => {
