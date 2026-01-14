@@ -4,6 +4,11 @@ GUI-first, multi-service gRPC scaffold for an Android DevKit style workflow. The
 are thin clients; all real work lives in the service crates. JobService is the event bus that
 streams job state/progress/logs to clients.
 
+## Supported host
+- Linux ARM64 (aarch64) only.
+- Other host architectures are not supported; x86_64 is intentionally out of scope because Android Studio already covers it.
+- SDK/NDK catalog entries and Cuttlefish host tooling are pinned to ARM64 hosts.
+
 ## Architecture at a glance
 - GTK4 UI and CLI call gRPC services; they do not implement business logic.
 - JobService stores job records, replays history, and streams live events (including run-level aggregation).

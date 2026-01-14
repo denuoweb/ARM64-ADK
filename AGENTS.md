@@ -6,6 +6,11 @@ It is intentionally minimal but complete enough to extend. The GTK4 UI and CLI a
 the service crates contain the real workflows. The project is designed around a JobService that
 streams events to clients while long-running jobs execute in other services.
 
+## Supported host
+- Linux ARM64 (aarch64) only.
+- Other host architectures are not supported; x86_64 is intentionally out of scope because Android Studio already covers it.
+- Toolchain catalog entries and Cuttlefish host tooling are pinned to ARM64 hosts.
+
 ## Maintenance
 Keep this file and the per-service AGENTS.md files in sync with code changes. When Codex changes
 files, commits, or pushes, update the relevant AGENTS.md entries and adjust TODO lists to remove
