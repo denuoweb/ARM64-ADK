@@ -17,6 +17,31 @@
               "url": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64-linux-musl.tar.xz",
               "sha256": "3a79b9cb06351ccb31d7e29100b3f11a3ba4bd491c839c9bbbaa7e174d60146a",
               "size_bytes": 156067092
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/36.0.0/android-sdk-aarch64_be-linux-musl.tar.xz",
+              "sha256": "b553b62ce49fe909e9f6b0671bf6e8edda4fd4d01fd05703006e33b97d1435b1",
+              "size_bytes": 156037880
+            }
+          ]
+        },
+        {
+          "version": "35.0.2",
+          "channel": "stable",
+          "notes": "Pinned SDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz",
+              "sha256": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e",
+              "size_bytes": 154709104
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64_be-linux-musl.tar.xz",
+              "sha256": "7f34e3cfdddb9da8cb9e7cacbfaeaf280e738b2525fc2b890eb11e4796e8dc56",
+              "size_bytes": 154662484
             }
           ]
         }
@@ -38,6 +63,93 @@
               "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz",
               "sha256": "1eae8941df23773f8dc70cdbf019d755f82332f0956f8062072b676f89094bc2",
               "size_bytes": 196684092
+            },
+            {
+              "host": "aarch64-linux-android",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-android.tar.xz",
+              "sha256": "cb7e2be23c9029f928da61bfdb5314a7ff7bae972c4ec55c353bb08c4874d15d",
+              "size_bytes": 198885928
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64_be-linux-musl.tar.xz",
+              "sha256": "3fec28f19335fde0e58d345f922c296d4e67713e1e96a7bbfd5d9d398a4e48d9",
+              "size_bytes": 198670936
+            }
+          ]
+        },
+        {
+          "version": "r28c",
+          "channel": "stable",
+          "notes": "Pinned NDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-linux-musl.tar.xz",
+              "sha256": "e9f0a35cc908ac231abda69cf7b75e61b40895ebd9c03556b0a14c1b1756774d",
+              "size_bytes": 291399204
+            },
+            {
+              "host": "aarch64-linux-android",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-linux-android.tar.xz",
+              "sha256": "e4f6256c7ea05c3910b845104b6fe19b2172ced9c7f9cdd2b2d1d6303f1bd10f",
+              "size_bytes": 179506112
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64_be-linux-musl.tar.xz",
+              "sha256": "ff7b7e219b824c7ca4ae493fd69fd854a2a11dd8e5d31ad6a8751eaf0f19806a",
+              "size_bytes": 294017020
+            }
+          ]
+        },
+        {
+          "version": "r27d",
+          "channel": "stable",
+          "notes": "Pinned NDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-linux-musl.tar.xz",
+              "sha256": "457bbc5da8959a90fec3ceabf82bd922293231ec9a15a083df992e107587a157",
+              "size_bytes": 283773452
+            },
+            {
+              "host": "aarch64-linux-android",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-linux-android.tar.xz",
+              "sha256": "0b7ba8e55bbb9ebffc0ecf56d000c4b61aad86da4a51c4d73fc008a7661e13fb",
+              "size_bytes": 158174500
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64_be-linux-musl.tar.xz",
+              "sha256": "58f3697f528dffd37de687d632f5981af7e1b6012b593bb8c41cb952e3e259e3",
+              "size_bytes": 283945528
+            }
+          ]
+        },
+        {
+          "version": "r26d",
+          "channel": "stable",
+          "notes": "Pinned NDK artifact",
+          "artifacts": [
+            {
+              "host": "linux-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64-linux-musl.tar.xz",
+              "sha256": "763028800f59cfa172ff195e9aa628859171fe5a027018fc9fcce1bf0cd60ffd",
+              "size_bytes": 236198868
+            },
+            {
+              "host": "aarch64-linux-android",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64-linux-android.tar.xz",
+              "sha256": "66b40880ac85c2b361ae30c96d5e920495a55627698a315c77d7cd1b4fb42568",
+              "size_bytes": 145803336
+            },
+            {
+              "host": "aarch64_be-linux-musl",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64_be-linux-musl.tar.xz",
+              "sha256": "fc08ed27ceab16efd8256fd287b47cbc9225ef50c01914e20134c8d568a0163c",
+              "size_bytes": 236168864
             }
           ]
         }

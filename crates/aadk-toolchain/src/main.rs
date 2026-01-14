@@ -18,7 +18,7 @@ use aadk_proto::aadk::v1::{
     JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
     ListAvailableRequest, ListAvailableResponse, ListInstalledRequest, ListInstalledResponse,
     ListProvidersRequest, ListProvidersResponse, ListToolchainSetsRequest, ListToolchainSetsResponse,
-    LogChunk, PageInfo, PublishJobEventRequest, SetActiveToolchainSetRequest,
+    LogChunk, PageInfo, PublishJobEventRequest, RunId, SetActiveToolchainSetRequest,
     SetActiveToolchainSetResponse, StartJobRequest, StreamJobEventsRequest, Timestamp,
     ToolchainArtifact, ToolchainKind, ToolchainProvider, ToolchainSet, ToolchainVersion,
     UninstallToolchainRequest, UninstallToolchainResponse, UpdateToolchainRequest,
@@ -69,12 +69,22 @@ struct Provenance {
     signature: String,
     signature_url: String,
     signature_public_key: String,
+    transparency_log_entry: String,
+    transparency_log_entry_url: String,
+    transparency_log_public_key: String,
 }
 
 #[derive(Clone, Default)]
 struct SignatureRecord {
     signature: String,
     signature_url: String,
+    public_key: String,
+}
+
+#[derive(Clone, Default)]
+struct TransparencyLogRecord {
+    entry: String,
+    entry_url: String,
     public_key: String,
 }
 
@@ -114,6 +124,9 @@ struct CatalogArtifact {
     signature: String,
     signature_url: String,
     signature_public_key: String,
+    transparency_log_entry: String,
+    transparency_log_entry_url: String,
+    transparency_log_public_key: String,
 }
 
 impl Default for Catalog {
@@ -367,7 +380,13 @@ fn host_key() -> Option<String> {
 fn host_aliases(host: &str) -> Vec<String> {
     let mut aliases = Vec::new();
     match host {
-        "linux-aarch64" => aliases.push("aarch64-linux-musl".into()),
+        "linux-aarch64" => {
+            aliases.push("aarch64-linux-musl".into());
+            aliases.push("aarch64-linux-android".into());
+            aliases.push("aarch64_be-linux-musl".into());
+        }
+        "linux-aarch64-android" => aliases.push("aarch64-linux-android".into()),
+        "linux-aarch64-be" => aliases.push("aarch64_be-linux-musl".into()),
         "linux-x86_64" => aliases.push("x86_64-linux-gnu".into()),
         "darwin-aarch64" => aliases.push("macos-aarch64".into()),
         "darwin-x86_64" => aliases.push("macos-x86_64".into()),
@@ -659,6 +678,7 @@ async fn start_job(
     job_type: &str,
     params: Vec<KeyValue>,
     correlation_id: &str,
+    run_id: Option<RunId>,
 ) -> Result<String, Status> {
     let resp = client
         .start_job(StartJobRequest {
@@ -668,6 +688,7 @@ async fn start_job(
             target_id: None,
             toolchain_set_id: None,
             correlation_id: correlation_id.to_string(),
+            run_id,
         })
         .await
         .map_err(|e| Status::unavailable(format!("job start failed: {e}")))?
@@ -944,6 +965,16 @@ fn verify_ed25519_signature(
     signature_value: &str,
     public_key_value: &str,
 ) -> Result<(), String> {
+    let message = sha256_file_bytes(artifact_path)
+        .map_err(|e| format!("failed to hash artifact: {e}"))?;
+    verify_ed25519_signature_bytes(&message, signature_value, public_key_value)
+}
+
+fn verify_ed25519_signature_bytes(
+    message: &[u8],
+    signature_value: &str,
+    public_key_value: &str,
+) -> Result<(), String> {
     let signature_bytes = decode_signature_field(signature_value)?;
     let public_key_bytes = decode_signature_field(public_key_value)?;
 
@@ -956,14 +987,21 @@ fn verify_ed25519_signature(
         .try_into()
         .map_err(|_| "public key must be 32 bytes".to_string())?;
 
-    let message = sha256_file_bytes(artifact_path)
-        .map_err(|e| format!("failed to hash artifact: {e}"))?;
     let key = VerifyingKey::from_bytes(&public_key)
         .map_err(|e| format!("invalid public key: {e}"))?;
     let signature = Signature::from_bytes(&signature);
 
-    key.verify_strict(&message, &signature)
+    key.verify_strict(message, &signature)
         .map_err(|e| format!("signature verification failed: {e}"))
+}
+
+fn normalize_digest_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("sha256:") {
+        rest.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn cancel_requested(cancel_rx: Option<&watch::Receiver<bool>>) -> bool {
@@ -1001,6 +1039,24 @@ fn write_provenance(dir: &Path, prov: &Provenance) -> io::Result<()> {
     if !prov.signature_public_key.is_empty() {
         contents.push_str(&format!("signature_public_key={}\n", prov.signature_public_key));
     }
+    if !prov.transparency_log_entry.is_empty() {
+        contents.push_str(&format!(
+            "transparency_log_entry={}\n",
+            prov.transparency_log_entry
+        ));
+    }
+    if !prov.transparency_log_entry_url.is_empty() {
+        contents.push_str(&format!(
+            "transparency_log_entry_url={}\n",
+            prov.transparency_log_entry_url
+        ));
+    }
+    if !prov.transparency_log_public_key.is_empty() {
+        contents.push_str(&format!(
+            "transparency_log_public_key={}\n",
+            prov.transparency_log_public_key
+        ));
+    }
     fs::write(dir.join("provenance.txt"), contents)
 }
 
@@ -1032,6 +1088,9 @@ fn parse_provenance(contents: &str) -> Provenance {
             "signature" => prov.signature = value.to_string(),
             "signature_url" => prov.signature_url = value.to_string(),
             "signature_public_key" => prov.signature_public_key = value.to_string(),
+            "transparency_log_entry" => prov.transparency_log_entry = value.to_string(),
+            "transparency_log_entry_url" => prov.transparency_log_entry_url = value.to_string(),
+            "transparency_log_public_key" => prov.transparency_log_public_key = value.to_string(),
             _ => {}
         }
     }
@@ -1096,6 +1155,147 @@ fn signature_record_from_provenance(prov: &Provenance) -> Option<SignatureRecord
         signature_url,
         public_key,
     })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TransparencyLogEntryJson {
+    sha256: String,
+    signature: String,
+    log_id: String,
+    log_index: Option<u64>,
+    timestamp_unix_millis: Option<i64>,
+}
+
+#[derive(Clone, Default)]
+struct TransparencyLogEntry {
+    sha256: String,
+    signature: String,
+    log_id: String,
+    log_index: Option<u64>,
+    timestamp_unix_millis: Option<i64>,
+}
+
+fn transparency_record_from_catalog(artifact: &CatalogArtifact) -> Option<TransparencyLogRecord> {
+    let entry = artifact.transparency_log_entry.trim().to_string();
+    let entry_url = artifact.transparency_log_entry_url.trim().to_string();
+    let public_key = artifact.transparency_log_public_key.trim().to_string();
+    if entry.is_empty() && entry_url.is_empty() {
+        return None;
+    }
+    Some(TransparencyLogRecord {
+        entry,
+        entry_url,
+        public_key,
+    })
+}
+
+fn transparency_record_from_provenance(prov: &Provenance) -> Option<TransparencyLogRecord> {
+    let entry = prov.transparency_log_entry.trim().to_string();
+    let entry_url = prov.transparency_log_entry_url.trim().to_string();
+    let public_key = prov.transparency_log_public_key.trim().to_string();
+    if entry.is_empty() && entry_url.is_empty() {
+        return None;
+    }
+    Some(TransparencyLogRecord {
+        entry,
+        entry_url,
+        public_key,
+    })
+}
+
+async fn fetch_transparency_entry_value(entry_url: &str) -> Result<String, String> {
+    if entry_url.trim().is_empty() {
+        return Err("transparency log entry url is empty".into());
+    }
+    if is_remote_url(entry_url) {
+        let client = Client::builder()
+            .user_agent("aadk-toolchain")
+            .build()
+            .map_err(|e| format!("failed to build http client: {e}"))?;
+        let resp = client
+            .get(entry_url)
+            .send()
+            .await
+            .map_err(|e| format!("transparency log entry download failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "transparency log entry download failed with status {}",
+                resp.status()
+            ));
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("transparency log entry read failed: {e}"))?;
+        return Ok(body);
+    }
+    let path = local_artifact_path(entry_url)
+        .ok_or_else(|| "transparency log entry url is not a local file".to_string())?;
+    fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read transparency log entry file {}: {e}", path.display()))
+}
+
+async fn resolve_transparency_entry(record: &TransparencyLogRecord) -> Result<String, String> {
+    if !record.entry.trim().is_empty() {
+        return Ok(record.entry.trim().to_string());
+    }
+    fetch_transparency_entry_value(&record.entry_url).await
+}
+
+fn parse_transparency_entry(raw: &str) -> Result<TransparencyLogEntry, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("transparency log entry is empty".into());
+    }
+    if let Ok(parsed) = serde_json::from_str::<TransparencyLogEntryJson>(trimmed) {
+        if parsed.sha256.trim().is_empty() {
+            return Err("transparency log entry missing sha256".into());
+        }
+        return Ok(TransparencyLogEntry {
+            sha256: normalize_digest_value(&parsed.sha256),
+            signature: parsed.signature.trim().to_string(),
+            log_id: parsed.log_id.trim().to_string(),
+            log_index: parsed.log_index,
+            timestamp_unix_millis: parsed.timestamp_unix_millis,
+        });
+    }
+    Ok(TransparencyLogEntry {
+        sha256: normalize_digest_value(trimmed),
+        signature: String::new(),
+        log_id: String::new(),
+        log_index: None,
+        timestamp_unix_millis: None,
+    })
+}
+
+async fn verify_transparency_log(
+    record: &TransparencyLogRecord,
+    expected_sha256: &str,
+) -> Result<(TransparencyLogEntry, String), String> {
+    let raw = resolve_transparency_entry(record).await?;
+    let normalized = raw.trim().to_string();
+    let entry = parse_transparency_entry(&normalized)?;
+    let expected = normalize_digest_value(expected_sha256);
+    if !expected.is_empty() && entry.sha256 != expected {
+        return Err(format!(
+            "transparency log sha256 mismatch (expected {expected}, got {})",
+            entry.sha256
+        ));
+    }
+    let has_signature = !entry.signature.trim().is_empty() || !record.public_key.trim().is_empty();
+    if has_signature {
+        if entry.signature.trim().is_empty() {
+            return Err("transparency log signature missing".into());
+        }
+        if record.public_key.trim().is_empty() {
+            return Err("transparency log public key missing".into());
+        }
+        let digest_bytes = decode_hex(&entry.sha256)
+            .map_err(|e| format!("transparency log digest invalid: {e}"))?;
+        verify_ed25519_signature_bytes(&digest_bytes, &entry.signature, &record.public_key)?;
+    }
+    Ok((entry, normalized))
 }
 
 async fn fetch_signature_value(signature_url: &str) -> Result<String, String> {
@@ -1944,14 +2144,19 @@ impl Svc {
             return Ok(());
         }
 
-        let signature_record = catalog_artifact_for_provenance(
+        let catalog_artifact = catalog_artifact_for_provenance(
             &self.catalog,
             &provider_id,
             &version,
             &artifact.url,
             &artifact.sha256,
-        )
-        .and_then(|artifact| signature_record_from_catalog(&artifact));
+        );
+        let signature_record = catalog_artifact
+            .as_ref()
+            .and_then(|artifact| signature_record_from_catalog(artifact));
+        let transparency_record = catalog_artifact
+            .as_ref()
+            .and_then(|artifact| transparency_record_from_catalog(artifact));
 
         if !verify_hash && !artifact.sha256.is_empty() {
             warn!("Skipping hash verification for provider {}", provider.name);
@@ -2020,6 +2225,9 @@ impl Svc {
         let mut signature_value = String::new();
         let mut signature_url = String::new();
         let mut signature_public_key = String::new();
+        let mut transparency_entry = String::new();
+        let mut transparency_entry_url = String::new();
+        let mut transparency_public_key = String::new();
         if let Some(record) = signature_record.as_ref() {
             signature_url = record.signature_url.clone();
             signature_public_key = record.public_key.clone();
@@ -2040,6 +2248,25 @@ impl Svc {
                 }
             } else if !record.signature.trim().is_empty() {
                 signature_value = normalize_signature_value(&record.signature);
+            }
+        }
+        if let Some(record) = transparency_record.as_ref() {
+            transparency_entry_url = record.entry_url.clone();
+            transparency_public_key = record.public_key.clone();
+            match verify_transparency_log(record, &artifact.sha256).await {
+                Ok((_entry, raw)) => {
+                    transparency_entry = raw;
+                }
+                Err(err) => {
+                    let err_detail = job_error_detail(
+                        ErrorCode::ToolchainInstallFailed,
+                        "transparency log validation failed",
+                        err,
+                        &job_id,
+                    );
+                    let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                    return Ok(());
+                }
             }
         }
 
@@ -2165,6 +2392,9 @@ impl Svc {
             signature: signature_value,
             signature_url,
             signature_public_key,
+            transparency_log_entry: transparency_entry,
+            transparency_log_entry_url: transparency_entry_url,
+            transparency_log_public_key: transparency_public_key,
         };
         if let Err(err) = write_provenance(&temp_dir, &prov) {
             let _ = fs::remove_dir_all(&temp_dir);
@@ -2559,14 +2789,19 @@ impl Svc {
             return Ok(());
         }
 
-        let signature_record = catalog_artifact_for_provenance(
+        let catalog_artifact = catalog_artifact_for_provenance(
             &self.catalog,
             &provider_id,
             &target_version,
             &artifact.url,
             &artifact.sha256,
-        )
-        .and_then(|artifact| signature_record_from_catalog(&artifact));
+        );
+        let signature_record = catalog_artifact
+            .as_ref()
+            .and_then(|artifact| signature_record_from_catalog(artifact));
+        let transparency_record = catalog_artifact
+            .as_ref()
+            .and_then(|artifact| transparency_record_from_catalog(artifact));
         if !verify_hash && signature_record.is_some() {
             warn!("Skipping signature verification for provider {}", provider.name);
         }
@@ -2618,6 +2853,9 @@ impl Svc {
         let mut signature_value = String::new();
         let mut signature_url = String::new();
         let mut signature_public_key = String::new();
+        let mut transparency_entry = String::new();
+        let mut transparency_entry_url = String::new();
+        let mut transparency_public_key = String::new();
         if let Some(record) = signature_record.as_ref() {
             signature_url = record.signature_url.clone();
             signature_public_key = record.public_key.clone();
@@ -2638,6 +2876,25 @@ impl Svc {
                 }
             } else if !record.signature.trim().is_empty() {
                 signature_value = normalize_signature_value(&record.signature);
+            }
+        }
+        if let Some(record) = transparency_record.as_ref() {
+            transparency_entry_url = record.entry_url.clone();
+            transparency_public_key = record.public_key.clone();
+            match verify_transparency_log(record, &artifact.sha256).await {
+                Ok((_entry, raw)) => {
+                    transparency_entry = raw;
+                }
+                Err(err) => {
+                    let err_detail = job_error_detail(
+                        ErrorCode::ToolchainUpdateFailed,
+                        "transparency log validation failed",
+                        err,
+                        &job_id,
+                    );
+                    let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                    return Ok(());
+                }
             }
         }
 
@@ -2761,6 +3018,9 @@ impl Svc {
             signature: signature_value,
             signature_url,
             signature_public_key,
+            transparency_log_entry: transparency_entry,
+            transparency_log_entry_url: transparency_entry_url,
+            transparency_log_public_key: transparency_public_key,
         };
         if let Err(err) = write_provenance(&temp_dir, &prov) {
             let _ = fs::remove_dir_all(&temp_dir);
@@ -3153,6 +3413,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "verify_hash".into(), value: req.verify_hash.to_string() },
                 ],
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -3219,6 +3480,7 @@ impl ToolchainService for Svc {
                 "toolchain.verify",
                 vec![KeyValue { key: "toolchain_id".into(), value: id.clone() }],
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -3425,6 +3687,20 @@ impl ToolchainService for Svc {
                 None
             }
         });
+        let transparency_record = transparency_record_from_provenance(&provenance).or_else(|| {
+            if is_remote_url(&source_url) {
+                catalog_artifact_for_provenance(
+                    &self.catalog,
+                    &provenance.provider_id,
+                    &provenance.version,
+                    &source_url,
+                    &sha256,
+                )
+                .and_then(|artifact| transparency_record_from_catalog(&artifact))
+            } else {
+                None
+            }
+        });
 
         if cancel_requested(Some(&cancel_rx)) {
             let _ = publish_log(&mut job_client, &job_id, "Verification cancelled\n").await;
@@ -3492,6 +3768,26 @@ impl ToolchainService for Svc {
                 &job_id,
             ));
 
+        let transparency_result = match (&verify_result, transparency_record.as_ref()) {
+            (Ok(_), Some(record)) => verify_transparency_log(record, &artifact.sha256)
+                .await
+                .map(|(entry, _raw)| Some(entry)),
+            _ => Ok(None),
+        };
+        let transparency_error = transparency_result
+            .as_ref()
+            .err()
+            .map(|err| job_error_detail(
+                ErrorCode::ToolchainVerifyFailed,
+                "transparency log validation failed",
+                err.clone(),
+                &job_id,
+            ));
+        let transparency_entry = transparency_result
+            .clone()
+            .ok()
+            .and_then(|entry| entry);
+
         let mut st = self.state.lock().await;
         let entry = st
             .installed
@@ -3528,6 +3824,14 @@ impl ToolchainService for Svc {
                     .unwrap_or(ToolchainKind::Unspecified);
 
                 if let Some(err_detail) = signature_error.clone() {
+                    entry.verified = false;
+                    publish_failure = Some(err_detail.clone());
+                    VerifyToolchainResponse {
+                        verified: false,
+                        error: Some(err_detail),
+                        job_id: Some(Id { value: job_id.clone() }),
+                    }
+                } else if let Some(err_detail) = transparency_error.clone() {
                     entry.verified = false;
                     publish_failure = Some(err_detail.clone());
                     VerifyToolchainResponse {
@@ -3627,18 +3931,30 @@ impl ToolchainService for Svc {
             let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
         }
         if let Some((artifact_path, install_path)) = publish_success {
+            let mut metrics = vec![
+                metric("toolchain_id", &id),
+                metric("artifact_path", &artifact_path),
+                metric("install_path", &install_path),
+                metric("provider_id", &provenance.provider_id),
+                metric("version", &provenance.version),
+            ];
+            if let Some(entry) = transparency_entry.as_ref() {
+                if !entry.log_id.trim().is_empty() {
+                    metrics.push(metric("transparency_log_id", &entry.log_id));
+                }
+                if let Some(index) = entry.log_index {
+                    metrics.push(metric("transparency_log_index", index));
+                }
+                if let Some(ts) = entry.timestamp_unix_millis {
+                    metrics.push(metric("transparency_log_timestamp", ts));
+                }
+            }
             let _ = publish_progress(
                 &mut job_client,
                 &job_id,
                 100,
                 "verified",
-                vec![
-                    metric("toolchain_id", &id),
-                    metric("artifact_path", &artifact_path),
-                    metric("install_path", &install_path),
-                    metric("provider_id", &provenance.provider_id),
-                    metric("version", &provenance.version),
-                ],
+                metrics,
             )
             .await;
             let _ = publish_completed(
@@ -3685,6 +4001,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "remove_cached".into(), value: req.remove_cached_artifact.to_string() },
                 ],
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -3741,6 +4058,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "force".into(), value: req.force.to_string() },
                 ],
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
@@ -3791,6 +4109,7 @@ impl ToolchainService for Svc {
                     KeyValue { key: "remove_all".into(), value: req.remove_all.to_string() },
                 ],
                 correlation_id,
+                req.run_id.clone(),
             )
             .await?
         } else {
