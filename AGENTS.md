@@ -53,7 +53,7 @@ Default addresses (override with env vars):
 - ToolchainService catalog pins linux-aarch64 SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d for the
   custom providers, with aarch64-linux-musl, aarch64-linux-android, and aarch64_be-linux-musl
   artifacts where available.
-- ObserveService persists run history and uses JobService history plus state/env snapshots for bundle contents.
+- ObserveService persists run history and a run output inventory; run records include a summary pointer for output counts and last bundle.
 - RunId is a first-class identifier for multi-service workflows; correlation_id remains a secondary grouping key.
 - JobService StreamRunEvents aggregates run events across jobs using bounded buffering and best-effort timestamp ordering for late discovery.
 - WorkflowService orchestrates workflow.pipeline runs and upserts run records to ObserveService.
@@ -93,7 +93,7 @@ Default addresses (override with env vars):
 - None (StreamRunEvents already supports workflow/run dashboards).
 
 ### ObserveService (aadk-observe)
-- Track bundle exports in run summaries to surface outputs in dashboards.
+- None (run output inventory is stored and exposed via ListRunOutputs with summary pointers).
 
 ### BuildService (aadk-build)
 - None.
@@ -106,5 +106,5 @@ Default addresses (override with env vars):
 
 ### Clients (aadk-ui, aadk-cli)
 - Add picker integrations for workflow inputs (templates, toolchain sets, targets) to reduce manual ids.
-- Expand run dashboards with run filters and local bundle inventory (open/export shortcuts).
+- Add run filters (project/target/toolchain/result) and output shortcuts (open/export) to Evidence dashboards.
 - Persist last workflow inputs (run id/project/target/toolchain) alongside existing UI config fields.

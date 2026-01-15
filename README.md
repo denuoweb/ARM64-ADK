@@ -13,6 +13,7 @@ streams job state/progress/logs to clients.
 - GTK4 UI and CLI call gRPC services; they do not implement business logic.
 - JobService stores job records, replays history, and streams live events (including run-level aggregation).
 - Toolchain/Build/Targets/Observe services create jobs and publish events to JobService.
+- ObserveService stores run history plus run output inventory (bundles/artifacts) with a summary pointer for dashboards.
 - ProjectService is the source of truth for project metadata and template scaffolding.
 - WorkflowService orchestrates multi-step pipelines and upserts run records for observability.
 
@@ -169,21 +170,25 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Resolves project paths via ProjectService IDs (or accepts direct paths) and persists build/artifact records with module/variant/task selections.
 - Runs Gradle with wrapper checks and GRADLE_USER_HOME defaults; validates module/variant via Gradle model introspection and streams logs.
 - Scans build outputs for APK/AAB/AAR/mapping/test results, parses output metadata, tags metadata (module/variant/build_type/flavors/abi/density/task/artifact_type), and supports artifact filters with sha256.
+- When run_id is provided, build artifacts are recorded as ObserveService run outputs for dashboards.
 
 ### TargetService (aadk-targets)
 - Enumerates targets via provider pipeline (ADB + Cuttlefish), normalizes IDs, enriches health metadata, and persists inventory + default target.
 - Install APK, launch/stop app, stream logcat, and manage Cuttlefish; publishes job events.
 
 ### ObserveService (aadk-observe)
-- Persists run history and paginated listing with run_id/correlation_id and project/target/toolchain ids.
+- Persists run history and output inventory (bundles/artifacts) with run_id/correlation_id and project/target/toolchain ids.
 - Exports support/evidence bundles as JobService jobs with progress/log streaming and retention.
 - Support bundles include job log history plus config/state snapshots.
+- Bundle exports are recorded as run outputs for dashboards and output listings.
 - UpsertRun supports best-effort run tracking from multi-service pipelines.
+- ListRunOutputs exposes bundle/artifact inventory with run output summary pointers (counts, last updated, last bundle id).
 
 ### WorkflowService (aadk-workflow)
 - Runs workflow.pipeline to orchestrate project creation/opening, toolchain verify, build, install, launch, and bundle export steps.
 - Emits job progress/logs for each step and waits for step jobs to complete before proceeding.
 - Uses run_id to correlate jobs and upserts run records to ObserveService.
+- Build steps upsert artifact outputs to ObserveService so run dashboards list outputs.
 
 ### GTK UI (aadk-ui)
 - Home: run jobs with type/params/ids, watch streams, live status panel.
@@ -193,7 +198,7 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Projects: list templates, create/open, list recents, set config, use active defaults.
 - Targets: list targets, install APK, launch, logcat, Cuttlefish controls.
 - Console: run Gradle builds with module/variant/task selection, list artifacts with filters grouped by module, stream logs.
-- Evidence: list runs, group jobs by run, stream run events, export support/evidence bundles, and export job logs.
+- Evidence: list runs, list outputs with filters, group jobs by run, stream run events, export support/evidence bundles, and export job logs.
 - Workflow/Toolchains/Projects/Targets/Console/Evidence pages include job_id reuse and correlation_id inputs for multi-job workflows.
 
 ### CLI (aadk-cli)
@@ -201,14 +206,14 @@ cargo run -p aadk-cli -- project use-active-defaults <project_id>
 - Toolchain list-providers/list-sets/update/uninstall/cleanup-cache.
 - Targets list/start/stop/status/install Cuttlefish.
 - Projects list-templates/list-recent/create/open/use-active-defaults.
-- Observe list-runs/export-support/export-evidence.
+- Observe list-runs/list-outputs/export-support/export-evidence.
 - Build run/list-artifacts with module/variant/tasks + artifact filters.
 - Workflow run-pipeline to orchestrate multi-step flows.
 - Long-running commands accept --job-id/--correlation-id/--run-id for workflow grouping.
 
 ## Extending from here (recommended order)
 1. Add pickers for workflow inputs (templates/toolchain sets/targets) and persist last workflow fields in UI config.
-2. Expand the Evidence dashboard with run filters, bundle inventory, and open/export shortcuts.
+2. Expand the Evidence dashboard with run filters and output shortcuts (open/export).
 3. Add a CLI helper to tail StreamRunEvents after workflow runs.
 
 
