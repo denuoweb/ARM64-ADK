@@ -19,6 +19,7 @@ Update this file whenever proto contracts change or when commits touching this d
 - workflow.proto: WorkflowService (pipeline orchestration)
 
 ## Recent changes
+- Added ObserveService RunOutput inventory (RunOutputSummary/RunOutput) plus ListRunOutputs and UpsertRunOutputs; RunRecord now carries output_summary for counts/last update.
 - Added optional job_id fields to long-running requests (build/toolchain/target/observe) so services
   can accept pre-created jobs from JobService.
 - Added JobService list APIs (ListJobs, ListJobHistory) with pagination and filters plus JobEventKind.

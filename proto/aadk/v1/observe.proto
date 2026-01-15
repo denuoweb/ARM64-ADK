@@ -14,7 +14,57 @@ message RunRecord {
   repeated Id job_ids = 8;
   repeated KeyValue summary = 9;
   string correlation_id = 10;
+  RunOutputSummary output_summary = 11;
 }
+
+enum RunOutputKind {
+  RUN_OUTPUT_KIND_UNSPECIFIED = 0;
+  RUN_OUTPUT_KIND_BUNDLE = 1;
+  RUN_OUTPUT_KIND_ARTIFACT = 2;
+}
+
+message RunOutputSummary {
+  uint32 bundle_count = 1;
+  uint32 artifact_count = 2;
+  Timestamp updated_at = 3;
+  string last_bundle_id = 4;
+}
+
+message RunOutput {
+  string output_id = 1;
+  RunId run_id = 2;
+  RunOutputKind kind = 3;
+  string output_type = 4;
+  string path = 5;
+  string label = 6;
+  Id job_id = 7;
+  Timestamp created_at = 8;
+  repeated KeyValue metadata = 9;
+}
+
+message RunOutputFilter {
+  RunOutputKind kind = 1;
+  string output_type = 2;
+  string path_contains = 3;
+  string label_contains = 4;
+}
+
+message ListRunOutputsRequest {
+  RunId run_id = 1;
+  Pagination page = 2;
+  RunOutputFilter filter = 3;
+}
+message ListRunOutputsResponse {
+  repeated RunOutput outputs = 1;
+  PageInfo page_info = 2;
+  RunOutputSummary summary = 3;
+}
+
+message UpsertRunOutputsRequest {
+  RunId run_id = 1;
+  repeated RunOutput outputs = 2;
+}
+message UpsertRunOutputsResponse { RunOutputSummary summary = 1; }
 
 message RunFilter {
   RunId run_id = 1;
@@ -62,7 +112,9 @@ message UpsertRunResponse { RunRecord run = 1; }
 
 service ObserveService {
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc ListRunOutputs(ListRunOutputsRequest) returns (ListRunOutputsResponse);
   rpc ExportSupportBundle(ExportSupportBundleRequest) returns (ExportSupportBundleResponse);
   rpc ExportEvidenceBundle(ExportEvidenceBundleRequest) returns (ExportEvidenceBundleResponse);
   rpc UpsertRun(UpsertRunRequest) returns (UpsertRunResponse);
+  rpc UpsertRunOutputs(UpsertRunOutputsRequest) returns (UpsertRunOutputsResponse);
 }
