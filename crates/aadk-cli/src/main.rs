@@ -1,31 +1,26 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io,
+    fs, io,
     io::Write,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use aadk_proto::aadk::v1::{
-    build_service_client::BuildServiceClient,
-    job_event::Payload as JobPayload,
-    job_service_client::JobServiceClient,
-    observe_service_client::ObserveServiceClient,
-    project_service_client::ProjectServiceClient,
+    build_service_client::BuildServiceClient, job_event::Payload as JobPayload,
+    job_service_client::JobServiceClient, observe_service_client::ObserveServiceClient,
+    project_service_client::ProjectServiceClient, target_service_client::TargetServiceClient,
     toolchain_service_client::ToolchainServiceClient,
-    target_service_client::TargetServiceClient,
-    workflow_service_client::WorkflowServiceClient,
-    Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildVariant, CancelJobRequest,
-    CleanupToolchainCacheRequest, CreateProjectRequest, CreateToolchainSetRequest,
-    ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetActiveToolchainSetRequest,
-    GetCuttlefishStatusRequest, GetDefaultTargetRequest, GetJobRequest, Id,
-    InstallCuttlefishRequest, Job, JobEvent, JobEventKind, JobFilter, JobHistoryFilter, JobState,
-    KeyValue, ListArtifactsRequest, ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest,
-    ListRecentProjectsRequest, ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest,
-    ListTemplatesRequest, ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter,
-    RunId, RunOutputFilter, RunOutputKind,
-    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
+    workflow_service_client::WorkflowServiceClient, Artifact, ArtifactFilter, ArtifactType,
+    BuildRequest, BuildVariant, CancelJobRequest, CleanupToolchainCacheRequest,
+    CreateProjectRequest, CreateToolchainSetRequest, ExportEvidenceBundleRequest,
+    ExportSupportBundleRequest, GetActiveToolchainSetRequest, GetCuttlefishStatusRequest,
+    GetDefaultTargetRequest, GetJobRequest, Id, InstallCuttlefishRequest, Job, JobEvent,
+    JobEventKind, JobFilter, JobHistoryFilter, JobState, KeyValue, ListArtifactsRequest,
+    ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest, ListRecentProjectsRequest,
+    ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter, RunId, RunOutputFilter,
+    RunOutputKind, SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
     StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
     StreamRunEventsRequest, UninstallToolchainRequest, UpdateToolchainRequest,
     WorkflowPipelineOptions, WorkflowPipelineRequest,
@@ -43,6 +38,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Job-related commands (JobService)
     Job {
@@ -559,8 +555,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&tmp, payload)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -796,18 +791,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 let params = parse_kv_params(&param);
                 let mut client = JobServiceClient::new(connect(&addr).await?);
-                let resp = client.start_job(StartJobRequest {
-                    job_type: job_type.clone(),
-                    params,
-                    project_id: project_id.as_ref().map(|value| Id { value: value.clone() }),
-                    target_id: target_id.as_ref().map(|value| Id { value: value.clone() }),
-                    toolchain_set_id: toolchain_set_id
-                        .as_ref()
-                        .map(|value| Id { value: value.clone() }),
-                    correlation_id: correlation_id.unwrap_or_default(),
-                    run_id: run_id.map(|value| RunId { value }),
-                }).await?.into_inner();
-                let job_id = resp.job.and_then(|r| r.job_id).map(|i| i.value).unwrap_or_default();
+                let resp = client
+                    .start_job(StartJobRequest {
+                        job_type: job_type.clone(),
+                        params,
+                        project_id: project_id.as_ref().map(|value| Id {
+                            value: value.clone(),
+                        }),
+                        target_id: target_id.as_ref().map(|value| Id {
+                            value: value.clone(),
+                        }),
+                        toolchain_set_id: toolchain_set_id.as_ref().map(|value| Id {
+                            value: value.clone(),
+                        }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
+                    })
+                    .await?
+                    .into_inner();
+                let job_id = resp
+                    .job
+                    .and_then(|r| r.job_id)
+                    .map(|i| i.value)
+                    .unwrap_or_default();
                 println!("job_id={job_id}");
                 if !job_id.is_empty() {
                     update_cli_config(|cfg| cfg.last_job_id = job_id.clone());
@@ -837,17 +843,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let filter = JobFilter {
                     job_types: split_tokens(&job_type),
                     states,
-                    created_after: created_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
-                    created_before: created_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
-                    finished_after: finished_after.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
-                    finished_before: finished_before.map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    created_after: created_after
+                        .map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    created_before: created_before
+                        .map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    finished_after: finished_after
+                        .map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
+                    finished_before: finished_before
+                        .map(|ms| aadk_proto::aadk::v1::Timestamp { unix_millis: ms }),
                     correlation_id: correlation_id.unwrap_or_default(),
                     run_id: run_id.map(|value| RunId { value }),
                 };
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .list_jobs(ListJobsRequest {
-                        page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                        page: Some(Pagination {
+                            page_size: page_size.max(1),
+                            page_token,
+                        }),
                         filter: Some(filter),
                     })
                     .await?
@@ -866,7 +879,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            JobCmd::Watch { addr, job_id, include_history } => {
+            JobCmd::Watch {
+                addr,
+                job_id,
+                include_history,
+            } => {
                 update_cli_config(|cfg| {
                     cfg.job_addr = addr.clone();
                     cfg.last_job_id = job_id.clone();
@@ -919,8 +936,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .list_job_history(ListJobHistoryRequest {
-                        job_id: Some(Id { value: job_id.clone() }),
-                        page: Some(Pagination { page_size: page_size.max(1), page_token }),
+                        job_id: Some(Id {
+                            value: job_id.clone(),
+                        }),
+                        page: Some(Pagination {
+                            page_size: page_size.max(1),
+                            page_token,
+                        }),
                         filter: Some(filter),
                     })
                     .await?
@@ -939,19 +961,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            JobCmd::Export { addr, job_id, output } => {
+            JobCmd::Export {
+                addr,
+                job_id,
+                output,
+            } => {
                 update_cli_config(|cfg| {
                     cfg.job_addr = addr.clone();
                     cfg.last_job_id = job_id.clone();
                 });
                 let path = output
                     .as_ref()
-                    .map(|value| PathBuf::from(value))
+                    .map(PathBuf::from)
                     .unwrap_or_else(|| default_export_path("cli-job-export", &job_id));
                 let mut client = JobServiceClient::new(connect(&addr).await?);
                 let job = match client
                     .get_job(GetJobRequest {
-                        job_id: Some(Id { value: job_id.clone() }),
+                        job_id: Some(Id {
+                            value: job_id.clone(),
+                        }),
                     })
                     .await
                 {
@@ -978,9 +1006,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cfg.last_job_id = job_id.clone();
                 });
                 let mut client = JobServiceClient::new(connect(&addr).await?);
-                let resp = client.cancel_job(CancelJobRequest {
-                    job_id: Some(Id { value: job_id }),
-                }).await?.into_inner();
+                let resp = client
+                    .cancel_job(CancelJobRequest {
+                        job_id: Some(Id { value: job_id }),
+                    })
+                    .await?
+                    .into_inner();
                 println!("accepted={}", resp.accepted);
             }
         },
@@ -989,18 +1020,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ToolchainCmd::ListProviders { addr } => {
                 update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
-                let resp = client.list_providers(ListProvidersRequest {}).await?.into_inner();
+                let resp = client
+                    .list_providers(ListProvidersRequest {})
+                    .await?
+                    .into_inner();
                 for p in resp.providers {
                     let id = p.provider_id.map(|i| i.value).unwrap_or_default();
                     println!("{}\t{}\tkind={}", id, p.name, p.kind);
                 }
             }
-            ToolchainCmd::ListSets { addr, page_size, page_token } => {
+            ToolchainCmd::ListSets {
+                addr,
+                page_size,
+                page_token,
+            } => {
                 update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
-                let resp = client.list_toolchain_sets(ListToolchainSetsRequest {
-                    page: Some(Pagination { page_size, page_token }),
-                }).await?.into_inner();
+                let resp = client
+                    .list_toolchain_sets(ListToolchainSetsRequest {
+                        page: Some(Pagination {
+                            page_size,
+                            page_token,
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 for set in resp.sets {
                     let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
                     let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
@@ -1020,44 +1064,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 display_name,
             } => {
                 update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
-                let sdk_id = sdk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
-                let ndk_id = ndk_toolchain_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+                let sdk_id = sdk_toolchain_id
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
+                let ndk_id = ndk_toolchain_id
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
                 if sdk_id.is_none() && ndk_id.is_none() {
                     eprintln!("Provide --sdk-toolchain-id and/or --ndk-toolchain-id");
                     return Ok(());
                 }
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
-                let resp = client.create_toolchain_set(CreateToolchainSetRequest {
-                    sdk_toolchain_id: sdk_id.map(|value| Id { value: value.to_string() }),
-                    ndk_toolchain_id: ndk_id.map(|value| Id { value: value.to_string() }),
-                    display_name: display_name.unwrap_or_default(),
-                }).await?.into_inner();
+                let resp = client
+                    .create_toolchain_set(CreateToolchainSetRequest {
+                        sdk_toolchain_id: sdk_id.map(|value| Id {
+                            value: value.to_string(),
+                        }),
+                        ndk_toolchain_id: ndk_id.map(|value| Id {
+                            value: value.to_string(),
+                        }),
+                        display_name: display_name.unwrap_or_default(),
+                    })
+                    .await?
+                    .into_inner();
                 if let Some(set) = resp.set {
                     let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
                     let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
                     let ndk = set.ndk_toolchain_id.map(|i| i.value).unwrap_or_default();
-                    println!("set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}", set.display_name);
+                    println!(
+                        "set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}",
+                        set.display_name
+                    );
                 } else {
                     println!("no toolchain set returned");
                 }
             }
-            ToolchainCmd::SetActive { addr, toolchain_set_id } => {
+            ToolchainCmd::SetActive {
+                addr,
+                toolchain_set_id,
+            } => {
                 update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
-                let resp = client.set_active_toolchain_set(SetActiveToolchainSetRequest {
-                    toolchain_set_id: Some(Id { value: toolchain_set_id.clone() }),
-                }).await?.into_inner();
+                let resp = client
+                    .set_active_toolchain_set(SetActiveToolchainSetRequest {
+                        toolchain_set_id: Some(Id {
+                            value: toolchain_set_id.clone(),
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 println!("ok={}", resp.ok);
             }
             ToolchainCmd::GetActive { addr } => {
                 update_cli_config(|cfg| cfg.toolchain_addr = addr.clone());
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
-                let resp = client.get_active_toolchain_set(GetActiveToolchainSetRequest {}).await?.into_inner();
+                let resp = client
+                    .get_active_toolchain_set(GetActiveToolchainSetRequest {})
+                    .await?
+                    .into_inner();
                 if let Some(set) = resp.set {
                     let set_id = set.toolchain_set_id.map(|i| i.value).unwrap_or_default();
                     let sdk = set.sdk_toolchain_id.map(|i| i.value).unwrap_or_default();
                     let ndk = set.ndk_toolchain_id.map(|i| i.value).unwrap_or_default();
-                    println!("set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}", set.display_name);
+                    println!(
+                        "set_id={set_id}\tdisplay_name={}\tsdk={sdk}\tndk={ndk}",
+                        set.display_name
+                    );
                 } else {
                     println!("no active toolchain set");
                 }
@@ -1085,14 +1159,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .update_toolchain(UpdateToolchainRequest {
-                        toolchain_id: Some(Id { value: toolchain_id.clone() }),
+                        toolchain_id: Some(Id {
+                            value: toolchain_id.clone(),
+                        }),
                         version,
                         verify_hash,
                         remove_cached_artifact: remove_cached,
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1126,13 +1204,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = ToolchainServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .uninstall_toolchain(UninstallToolchainRequest {
-                        toolchain_id: Some(Id { value: toolchain_id.clone() }),
+                        toolchain_id: Some(Id {
+                            value: toolchain_id.clone(),
+                        }),
                         remove_cached_artifact: remove_cached,
                         force,
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1166,7 +1248,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1184,7 +1268,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TargetsCmd::List { addr } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.list_targets(ListTargetsRequest { include_offline: true }).await?.into_inner();
+                let resp = client
+                    .list_targets(ListTargetsRequest {
+                        include_offline: true,
+                    })
+                    .await?
+                    .into_inner();
                 for t in resp.targets {
                     let id = t.target_id.map(|i| i.value).unwrap_or_default();
                     println!("{}\t{}\t{}\t{}", id, t.display_name, t.state, t.provider);
@@ -1193,18 +1282,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TargetsCmd::SetDefault { addr, target_id } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.set_default_target(SetDefaultTargetRequest {
-                    target_id: Some(Id { value: target_id.clone() }),
-                }).await?.into_inner();
+                let resp = client
+                    .set_default_target(SetDefaultTargetRequest {
+                        target_id: Some(Id {
+                            value: target_id.clone(),
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 println!("ok={}", resp.ok);
             }
             TargetsCmd::GetDefault { addr } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.get_default_target(GetDefaultTargetRequest {}).await?.into_inner();
+                let resp = client
+                    .get_default_target(GetDefaultTargetRequest {})
+                    .await?
+                    .into_inner();
                 if let Some(target) = resp.target {
                     let id = target.target_id.map(|i| i.value).unwrap_or_default();
-                    println!("{}\t{}\t{}\t{}", id, target.display_name, target.state, target.provider);
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        id, target.display_name, target.state, target.provider
+                    );
                 } else {
                     println!("no default target configured");
                 }
@@ -1224,7 +1324,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1246,7 +1348,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1258,7 +1362,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TargetsCmd::CuttlefishStatus { addr } => {
                 update_cli_config(|cfg| cfg.targets_addr = addr.clone());
                 let mut client = TargetServiceClient::new(connect(&addr).await?);
-                let resp = client.get_cuttlefish_status(GetCuttlefishStatusRequest {}).await?.into_inner();
+                let resp = client
+                    .get_cuttlefish_status(GetCuttlefishStatusRequest {})
+                    .await?
+                    .into_inner();
                 println!("state={}\tadb={}", resp.state, resp.adb_serial);
                 for kv in resp.details {
                     println!("{}\t{}", kv.key, kv.value);
@@ -1282,7 +1389,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         correlation_id: correlation_id.unwrap_or_default(),
                         run_id: run_id.map(|value| RunId { value }),
                     })
@@ -1297,7 +1406,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProjectCmd::ListTemplates { addr } => {
                 update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
-                let resp = client.list_templates(ListTemplatesRequest {}).await?.into_inner();
+                let resp = client
+                    .list_templates(ListTemplatesRequest {})
+                    .await?
+                    .into_inner();
                 for t in resp.templates {
                     let id = t.template_id.map(|i| i.value).unwrap_or_default();
                     let defaults = if t.defaults.is_empty() {
@@ -1314,15 +1426,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}\t{}\n{}\n{}\n", id, t.name, t.description, defaults);
                 }
             }
-            ProjectCmd::ListRecent { addr, page_size, page_token } => {
+            ProjectCmd::ListRecent {
+                addr,
+                page_size,
+                page_token,
+            } => {
                 update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
-                let resp = client.list_recent_projects(ListRecentProjectsRequest {
-                    page: Some(Pagination {
-                        page_size,
-                        page_token,
-                    }),
-                }).await?.into_inner();
+                let resp = client
+                    .list_recent_projects(ListRecentProjectsRequest {
+                        page: Some(Pagination {
+                            page_size,
+                            page_token,
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 for project in resp.projects {
                     let id = project.project_id.map(|i| i.value).unwrap_or_default();
                     println!("{}\t{}\t{}", id, project.name, project.path);
@@ -1348,19 +1467,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cfg.job_addr = job_addr.clone();
                 });
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
-                let resp = client.create_project(CreateProjectRequest {
-                    name,
-                    path,
-                    template_id: Some(Id { value: template_id }),
-                    params: vec![],
-                    toolchain_set_id: None,
-                    job_id: job_id
-                        .as_ref()
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| Id { value: value.clone() }),
-                    correlation_id: correlation_id.unwrap_or_default(),
-                    run_id: run_id.map(|value| RunId { value }),
-                }).await?.into_inner();
+                let resp = client
+                    .create_project(CreateProjectRequest {
+                        name,
+                        path,
+                        template_id: Some(Id { value: template_id }),
+                        params: vec![],
+                        toolchain_set_id: None,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
+                    })
+                    .await?
+                    .into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 let project_id = resp.project_id.map(|i| i.value).unwrap_or_default();
@@ -1373,7 +1497,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProjectCmd::Open { addr, path } => {
                 update_cli_config(|cfg| cfg.project_addr = addr.clone());
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
-                let resp = client.open_project(OpenProjectRequest { path }).await?.into_inner();
+                let resp = client
+                    .open_project(OpenProjectRequest { path })
+                    .await?
+                    .into_inner();
                 if let Some(project) = resp.project {
                     let id = project.project_id.map(|i| i.value).unwrap_or_default();
                     println!("{}\t{}\t{}", id, project.name, project.path);
@@ -1407,11 +1534,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
-                let resp = client.set_project_config(SetProjectConfigRequest {
-                    project_id: Some(Id { value: project_id.clone() }),
-                    toolchain_set_id: toolchain_set_id.map(|value| Id { value: value.to_string() }),
-                    default_target_id: default_target_id.map(|value| Id { value: value.to_string() }),
-                }).await?.into_inner();
+                let resp = client
+                    .set_project_config(SetProjectConfigRequest {
+                        project_id: Some(Id {
+                            value: project_id.clone(),
+                        }),
+                        toolchain_set_id: toolchain_set_id.map(|value| Id {
+                            value: value.to_string(),
+                        }),
+                        default_target_id: default_target_id.map(|value| Id {
+                            value: value.to_string(),
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 println!("ok={}", resp.ok);
             }
             ProjectCmd::UseActiveDefaults {
@@ -1434,7 +1570,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match connect(&toolchain_addr).await {
                     Ok(channel) => {
                         let mut client = ToolchainServiceClient::new(channel);
-                        match client.get_active_toolchain_set(GetActiveToolchainSetRequest {}).await {
+                        match client
+                            .get_active_toolchain_set(GetActiveToolchainSetRequest {})
+                            .await
+                        {
                             Ok(resp) => {
                                 toolchain_set_id = resp
                                     .into_inner()
@@ -1484,7 +1623,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut client = ProjectServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .set_project_config(SetProjectConfigRequest {
-                        project_id: Some(Id { value: project_id.clone() }),
+                        project_id: Some(Id {
+                            value: project_id.clone(),
+                        }),
                         toolchain_set_id: toolchain_set_id.clone().map(|value| Id { value }),
                         default_target_id: default_target_id.clone().map(|value| Id { value }),
                     })
@@ -1517,20 +1658,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 update_cli_config(|cfg| cfg.observe_addr = addr.clone());
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
-                let resp = client.list_runs(ListRunsRequest {
-                    page: Some(Pagination {
-                        page_size,
-                        page_token,
-                    }),
-                    filter: Some(RunFilter {
-                        run_id: run_id.map(|value| RunId { value }),
-                        correlation_id: correlation_id.unwrap_or_default(),
-                        project_id: project_id.map(|value| Id { value }),
-                        target_id: target_id.map(|value| Id { value }),
-                        toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
-                        result: result.unwrap_or_default(),
-                    }),
-                }).await?.into_inner();
+                let resp = client
+                    .list_runs(ListRunsRequest {
+                        page: Some(Pagination {
+                            page_size,
+                            page_token,
+                        }),
+                        filter: Some(RunFilter {
+                            run_id: run_id.map(|value| RunId { value }),
+                            correlation_id: correlation_id.unwrap_or_default(),
+                            project_id: project_id.map(|value| Id { value }),
+                            target_id: target_id.map(|value| Id { value }),
+                            toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
+                            result: result.unwrap_or_default(),
+                        }),
+                    })
+                    .await?
+                    .into_inner();
                 for run in resp.runs {
                     let run_id = run.run_id.map(|i| i.value).unwrap_or_default();
                     let started = run.started_at.map(|t| t.unix_millis).unwrap_or(0);
@@ -1578,7 +1722,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let kind_value = kind
                     .as_deref()
                     .and_then(parse_run_output_kind)
-                    .unwrap_or(RunOutputKind::RunOutputKindUnspecified);
+                    .unwrap_or(RunOutputKind::Unspecified);
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
                 let resp = client
                     .list_run_outputs(ListRunOutputsRequest {
@@ -1612,10 +1756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 for output in resp.outputs {
                     let job_id = output.job_id.map(|id| id.value).unwrap_or_default();
-                    let created_at = output
-                        .created_at
-                        .map(|ts| ts.unix_millis)
-                        .unwrap_or(0);
+                    let created_at = output.created_at.map(|ts| ts.unix_millis).unwrap_or(0);
                     println!(
                         "{}\tkind={}\ttype={}\tpath={}\tlabel={}\tjob_id={}\tcreated_at={}",
                         output.output_id,
@@ -1662,22 +1803,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cfg.job_addr = job_addr.clone();
                 });
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
-                let resp = client.export_support_bundle(ExportSupportBundleRequest {
-                    include_logs,
-                    include_config,
-                    include_toolchain_provenance,
-                    include_recent_runs,
-                    recent_runs_limit,
-                    job_id: job_id
-                        .as_ref()
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| Id { value: value.clone() }),
-                    project_id: project_id.map(|value| Id { value }),
-                    target_id: target_id.map(|value| Id { value }),
-                    toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
-                    correlation_id: correlation_id.unwrap_or_default(),
-                    run_id: run_id.map(|value| RunId { value }),
-                }).await?.into_inner();
+                let resp = client
+                    .export_support_bundle(ExportSupportBundleRequest {
+                        include_logs,
+                        include_config,
+                        include_toolchain_provenance,
+                        include_recent_runs,
+                        recent_runs_limit,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
+                        project_id: project_id.map(|value| Id { value }),
+                        target_id: target_id.map(|value| Id { value }),
+                        toolchain_set_id: toolchain_set_id.map(|value| Id { value }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
+                    })
+                    .await?
+                    .into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
                 if !job_id.is_empty() {
@@ -1696,14 +1842,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cfg.job_addr = job_addr.clone();
                 });
                 let mut client = ObserveServiceClient::new(connect(&addr).await?);
-                let resp = client.export_evidence_bundle(ExportEvidenceBundleRequest {
-                    run_id: run_id.map(|value| RunId { value }),
-                    job_id: job_id
-                        .as_ref()
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| Id { value: value.clone() }),
-                    correlation_id: correlation_id.unwrap_or_default(),
-                }).await?.into_inner();
+                let resp = client
+                    .export_evidence_bundle(ExportEvidenceBundleRequest {
+                        run_id: run_id.map(|value| RunId { value }),
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
+                        correlation_id: correlation_id.unwrap_or_default(),
+                    })
+                    .await?
+                    .into_inner();
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}\noutput_path={}", resp.output_path);
                 if !job_id.is_empty() {
@@ -1757,21 +1908,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Vec<_>>();
 
                 let mut client = BuildServiceClient::new(connect(&addr).await?);
-                let resp = client.build(BuildRequest {
-                    project_id: Some(Id { value: project_ref.trim().to_string() }),
-                    variant: variant as i32,
-                    clean_first,
-                    gradle_args,
-                    job_id: job_id
-                        .as_ref()
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| Id { value: value.clone() }),
-                    module: module.unwrap_or_default().trim().to_string(),
-                    variant_name: variant_name.unwrap_or_default().trim().to_string(),
-                    tasks,
-                    correlation_id: correlation_id.unwrap_or_default(),
-                    run_id: run_id.map(|value| RunId { value }),
-                }).await?.into_inner();
+                let resp = client
+                    .build(BuildRequest {
+                        project_id: Some(Id {
+                            value: project_ref.trim().to_string(),
+                        }),
+                        variant: variant as i32,
+                        clean_first,
+                        gradle_args,
+                        job_id: job_id
+                            .as_ref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
+                        module: module.unwrap_or_default().trim().to_string(),
+                        variant_name: variant_name.unwrap_or_default().trim().to_string(),
+                        tasks,
+                        correlation_id: correlation_id.unwrap_or_default(),
+                        run_id: run_id.map(|value| RunId { value }),
+                    })
+                    .await?
+                    .into_inner();
 
                 let job_id = resp.job_id.map(|i| i.value).unwrap_or_default();
                 println!("job_id={job_id}");
@@ -1819,11 +1977,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let mut client = BuildServiceClient::new(connect(&addr).await?);
-                let resp = client.list_artifacts(ListArtifactsRequest {
-                    project_id: Some(Id { value: project_ref.trim().to_string() }),
-                    variant: variant as i32,
-                    filter: Some(filter),
-                }).await?.into_inner();
+                let resp = client
+                    .list_artifacts(ListArtifactsRequest {
+                        project_id: Some(Id {
+                            value: project_ref.trim().to_string(),
+                        }),
+                        variant: variant as i32,
+                        filter: Some(filter),
+                    })
+                    .await?
+                    .into_inner();
 
                 if resp.artifacts.is_empty() {
                     println!("no artifacts found");
@@ -1920,29 +2083,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         job_id: job_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         project_id: project_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         project_path: project_path.unwrap_or_default().trim().to_string(),
                         project_name: project_name.unwrap_or_default().trim().to_string(),
                         template_id: template_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         toolchain_id: toolchain_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         toolchain_set_id: toolchain_set_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         target_id: target_id
                             .as_ref()
                             .filter(|value| !value.trim().is_empty())
-                            .map(|value| Id { value: value.clone() }),
+                            .map(|value| Id {
+                                value: value.clone(),
+                            }),
                         build_variant: build_variant as i32,
                         module: module.unwrap_or_default().trim().to_string(),
                         variant_name: variant_name.unwrap_or_default().trim().to_string(),
@@ -1955,8 +2130,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?
                     .into_inner();
 
-                let run_id = resp.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
-                let job_id = resp.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default();
+                let run_id = resp
+                    .run_id
+                    .as_ref()
+                    .map(|id| id.value.clone())
+                    .unwrap_or_default();
+                let job_id = resp
+                    .job_id
+                    .as_ref()
+                    .map(|id| id.value.clone())
+                    .unwrap_or_default();
                 let project_id = resp
                     .project_id
                     .as_ref()
@@ -2260,9 +2443,7 @@ fn parse_job_event_kinds(values: &[String]) -> (Vec<i32>, Vec<String>) {
     (kinds, unknown)
 }
 
-fn parse_workflow_steps(
-    values: &[String],
-) -> (Option<WorkflowPipelineOptions>, Vec<String>) {
+fn parse_workflow_steps(values: &[String]) -> (Option<WorkflowPipelineOptions>, Vec<String>) {
     if values.is_empty() {
         return (None, Vec::new());
     }
@@ -2299,11 +2480,27 @@ fn parse_workflow_steps(
 }
 
 fn render_job_summary(job: &Job) {
-    let job_id = job.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
-    let run_id = job.run_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+    let job_id = job
+        .job_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("-");
+    let run_id = job
+        .run_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("-");
     let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
-    let created = job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
-    let finished = job.finished_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+    let created = job
+        .created_at
+        .as_ref()
+        .map(|ts| ts.unix_millis)
+        .unwrap_or_default();
+    let finished = job
+        .finished_at
+        .as_ref()
+        .map(|ts| ts.unix_millis)
+        .unwrap_or_default();
     println!(
         "{}\t{}\tstate={state:?}\trun_id={run_id}\tcreated={created}\tfinished={finished}",
         job_id, job.job_type
@@ -2322,25 +2519,53 @@ impl JobSummary {
     fn from_proto(job: &Job) -> Self {
         let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
         Self {
-            job_id: job.job_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            job_id: job
+                .job_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
             job_type: job.job_type.clone(),
             state: format!("{state:?}"),
-            created_at_unix_millis: job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default(),
+            created_at_unix_millis: job
+                .created_at
+                .as_ref()
+                .map(|ts| ts.unix_millis)
+                .unwrap_or_default(),
             started_at_unix_millis: job.started_at.as_ref().map(|ts| ts.unix_millis),
             finished_at_unix_millis: job.finished_at.as_ref().map(|ts| ts.unix_millis),
             display_name: job.display_name.clone(),
             correlation_id: job.correlation_id.clone(),
-            run_id: job.run_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
-            project_id: job.project_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
-            target_id: job.target_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
-            toolchain_set_id: job.toolchain_set_id.as_ref().map(|id| id.value.clone()).unwrap_or_default(),
+            run_id: job
+                .run_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
+            project_id: job
+                .project_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
+            target_id: job
+                .target_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
+            toolchain_set_id: job
+                .toolchain_set_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
         }
     }
 }
 
 impl LogExportEvent {
     fn from_proto(event: &JobEvent) -> Self {
-        let at_unix_millis = event.at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+        let at_unix_millis = event
+            .at
+            .as_ref()
+            .map(|ts| ts.unix_millis)
+            .unwrap_or_default();
         match event.payload.as_ref() {
             Some(JobPayload::StateChanged(state)) => {
                 let state = JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
@@ -2441,18 +2666,18 @@ fn parse_build_variant(value: &str) -> Option<BuildVariant> {
 
 fn parse_run_output_kind(value: &str) -> Option<RunOutputKind> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "" | "unspecified" => Some(RunOutputKind::RunOutputKindUnspecified),
-        "bundle" | "bundles" => Some(RunOutputKind::RunOutputKindBundle),
-        "artifact" | "artifacts" => Some(RunOutputKind::RunOutputKindArtifact),
+        "" | "unspecified" => Some(RunOutputKind::Unspecified),
+        "bundle" | "bundles" => Some(RunOutputKind::Bundle),
+        "artifact" | "artifacts" => Some(RunOutputKind::Artifact),
         _ => None,
     }
 }
 
 fn run_output_kind_label(kind: i32) -> &'static str {
-    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::RunOutputKindUnspecified) {
-        RunOutputKind::RunOutputKindBundle => "bundle",
-        RunOutputKind::RunOutputKindArtifact => "artifact",
-        RunOutputKind::RunOutputKindUnspecified => "unspecified",
+    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::Unspecified) {
+        RunOutputKind::Bundle => "bundle",
+        RunOutputKind::Artifact => "artifact",
+        RunOutputKind::Unspecified => "unspecified",
     }
 }
 
