@@ -243,12 +243,19 @@ async fn publish_failed(
     publish_job_event(
         client,
         job_id,
-        JobPayload::Failed(JobFailed { error: Some(detail) }),
+        JobPayload::Failed(JobFailed {
+            error: Some(detail),
+        }),
     )
     .await
 }
 
-fn job_error_detail(code: ErrorCode, message: &str, technical: &str, correlation_id: &str) -> ErrorDetail {
+fn job_error_detail(
+    code: ErrorCode,
+    message: &str,
+    technical: &str,
+    correlation_id: &str,
+) -> ErrorDetail {
     ErrorDetail {
         code: code as i32,
         message: message.into(),
@@ -269,6 +276,7 @@ async fn fail_pipeline(
     let _ = publish_failed(client, job_id, detail).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fail_pipeline_and_record(
     config: &WorkflowConfig,
     client: &mut JobServiceClient<Channel>,
@@ -363,8 +371,8 @@ async fn wait_for_job(
             Some(JobPayload::Completed(_)) => return Ok(JobState::Success),
             Some(JobPayload::Failed(_)) => return Ok(JobState::Failed),
             Some(JobPayload::StateChanged(state)) => {
-                let new_state = JobState::try_from(state.new_state)
-                    .unwrap_or(JobState::Unspecified);
+                let new_state =
+                    JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
                 if matches!(
                     new_state,
                     JobState::Success | JobState::Failed | JobState::Cancelled
@@ -391,6 +399,7 @@ async fn wait_for_job(
     Ok(state)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upsert_run_best_effort(
     observe_addr: &str,
     run_id: &str,
@@ -432,10 +441,7 @@ async fn upsert_run_best_effort(
                     value: toolchain_set_id.to_string(),
                 })
             },
-            job_ids: job_ids
-                .iter()
-                .map(|id| Id { value: id.clone() })
-                .collect(),
+            job_ids: job_ids.iter().map(|id| Id { value: id.clone() }).collect(),
             result: result.to_string(),
             summary,
             started_at: started_at.map(|ms| Timestamp { unix_millis: ms }),
@@ -493,7 +499,7 @@ async fn upsert_run_outputs_best_effort(
             run_id: Some(RunId {
                 value: run_id.to_string(),
             }),
-            kind: RunOutputKind::RunOutputKindArtifact as i32,
+            kind: RunOutputKind::Artifact as i32,
             output_type,
             path: path.to_string(),
             label,
@@ -540,7 +546,7 @@ async fn run_pipeline_task(
     };
 
     let started_at = now_millis();
-    let options = req.options.clone();
+    let options = req.options;
     let inferred = options.is_none();
     let options = options.unwrap_or_default();
 
@@ -687,7 +693,7 @@ async fn run_pipeline_task(
 
     if wants_create {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let mut metrics = vec![
             metric("pipeline_step", "project.create"),
             metric("step_index", step_index),
@@ -731,7 +737,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut project_client = match connect_project(&config.project_addr).await {
                 Ok(client) => client,
@@ -751,7 +762,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -772,7 +784,9 @@ async fn run_pipeline_task(
                     },
                     job_id: None,
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await;
             let resp = match resp {
@@ -793,11 +807,17 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
-            if let Some(job_id) = resp.job_id.as_ref().map(|id| id.value.clone()).filter(|value| !value.is_empty()) {
+            if let Some(job_id) = resp
+                .job_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .filter(|value| !value.is_empty())
+            {
                 job_ids.push(job_id.clone());
                 if let Err(err) = wait_for_job(&mut job_client, &job_id).await {
                     fail_pipeline_and_record(
@@ -815,11 +835,17 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             }
-            if let Some(pid) = resp.project_id.as_ref().map(|id| id.value.clone()).filter(|value| !value.is_empty()) {
+            if let Some(pid) = resp
+                .project_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .filter(|value| !value.is_empty())
+            {
                 project_id = pid;
                 outputs.push(metric("project_id", &project_id));
             }
@@ -828,7 +854,7 @@ async fn run_pipeline_task(
 
     if wants_open {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "project.open"),
             metric("step_index", step_index),
@@ -867,7 +893,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut project_client = match connect_project(&config.project_addr).await {
                 Ok(client) => client,
@@ -887,7 +918,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -899,7 +931,12 @@ async fn run_pipeline_task(
             {
                 Ok(resp) => {
                     if let Some(project) = resp.into_inner().project {
-                        if let Some(pid) = project.project_id.as_ref().map(|id| id.value.clone()).filter(|value| !value.is_empty()) {
+                        if let Some(pid) = project
+                            .project_id
+                            .as_ref()
+                            .map(|id| id.value.clone())
+                            .filter(|value| !value.is_empty())
+                        {
                             project_id = pid;
                             outputs.push(metric("project_id", &project_id));
                         }
@@ -921,7 +958,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             }
@@ -930,7 +968,7 @@ async fn run_pipeline_task(
 
     if wants_verify {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "toolchain.verify"),
             metric("step_index", step_index),
@@ -969,7 +1007,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut toolchain_client = match connect_toolchain(&config.toolchain_addr).await {
                 Ok(client) => client,
@@ -989,7 +1032,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1000,7 +1044,9 @@ async fn run_pipeline_task(
                     }),
                     job_id: None,
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await;
             let resp = match resp {
@@ -1021,11 +1067,17 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
-            if let Some(job_id) = resp.job_id.as_ref().map(|id| id.value.clone()).filter(|value| !value.is_empty()) {
+            if let Some(job_id) = resp
+                .job_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .filter(|value| !value.is_empty())
+            {
                 job_ids.push(job_id.clone());
                 let state = match wait_for_job(&mut job_client, &job_id).await {
                     Ok(state) => state,
@@ -1045,7 +1097,8 @@ async fn run_pipeline_task(
                             &err.to_string(),
                         )
                         .await;
-                        let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                        let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed)
+                            .await;
                         return;
                     }
                 };
@@ -1065,7 +1118,8 @@ async fn run_pipeline_task(
                         "verification failed",
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             }
@@ -1074,7 +1128,7 @@ async fn run_pipeline_task(
 
     if wants_build {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let project_ref = if !project_id.is_empty() {
             project_id.clone()
         } else {
@@ -1118,7 +1172,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut build_client = match connect_build(&config.build_addr).await {
                 Ok(client) => client,
@@ -1138,7 +1197,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1156,7 +1216,9 @@ async fn run_pipeline_task(
                     variant_name: req.variant_name.clone(),
                     tasks: req.tasks.clone(),
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await;
             let resp = match resp {
@@ -1177,7 +1239,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1225,7 +1288,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1251,7 +1315,9 @@ async fn run_pipeline_task(
 
             let artifacts = build_client
                 .list_artifacts(ListArtifactsRequest {
-                    project_id: Some(Id { value: project_ref.clone() }),
+                    project_id: Some(Id {
+                        value: project_ref.clone(),
+                    }),
                     variant: variant as i32,
                     filter: Some(ArtifactFilter {
                         modules: if req.module.trim().is_empty() {
@@ -1286,7 +1352,7 @@ async fn run_pipeline_task(
 
     if wants_install {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "targets.install"),
             metric("step_index", step_index),
@@ -1326,7 +1392,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut targets_client = match connect_targets(&config.targets_addr).await {
                 Ok(client) => client,
@@ -1346,7 +1417,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1365,7 +1437,9 @@ async fn run_pipeline_task(
                     apk_path: apk_path.clone(),
                     job_id: None,
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await;
             let resp = match resp {
@@ -1386,7 +1460,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1434,7 +1509,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1462,7 +1538,7 @@ async fn run_pipeline_task(
 
     if wants_launch {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "targets.launch"),
             metric("step_index", step_index),
@@ -1502,7 +1578,12 @@ async fn run_pipeline_task(
                 let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                 return;
             }
-            let _ = publish_log(&mut job_client, &pipeline_job_id, &format!("WARN: {msg}, skipping\n")).await;
+            let _ = publish_log(
+                &mut job_client,
+                &pipeline_job_id,
+                &format!("WARN: {msg}, skipping\n"),
+            )
+            .await;
         } else {
             let mut targets_client = match connect_targets(&config.targets_addr).await {
                 Ok(client) => client,
@@ -1522,7 +1603,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1535,7 +1617,9 @@ async fn run_pipeline_task(
                     activity: activity.clone(),
                     job_id: None,
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await;
             let resp = match resp {
@@ -1556,7 +1640,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1604,7 +1689,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1632,7 +1718,7 @@ async fn run_pipeline_task(
 
     if wants_support {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "observe.support_bundle"),
             metric("step_index", step_index),
@@ -1701,7 +1787,9 @@ async fn run_pipeline_task(
                     })
                 },
                 correlation_id: correlation_id.clone(),
-                run_id: Some(RunId { value: run_id.clone() }),
+                run_id: Some(RunId {
+                    value: run_id.clone(),
+                }),
             })
             .await;
         let resp = match resp {
@@ -1751,7 +1839,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1779,7 +1868,7 @@ async fn run_pipeline_task(
 
     if wants_evidence {
         step_index += 1;
-        let percent = (step_index * 100 / total_steps) as u32;
+        let percent = step_index * 100 / total_steps;
         let metrics = vec![
             metric("pipeline_step", "observe.evidence_bundle"),
             metric("step_index", step_index),
@@ -1874,7 +1963,8 @@ async fn run_pipeline_task(
                         &err.to_string(),
                     )
                     .await;
-                    let _ = publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
+                    let _ =
+                        publish_state(&mut job_client, &pipeline_job_id, JobState::Failed).await;
                     return;
                 }
             };
@@ -1958,7 +2048,7 @@ impl WorkflowService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let job_id = if job_id.is_empty() {
             let mut params = vec![
                 metric("run_id", &run_id),
@@ -1970,7 +2060,8 @@ impl WorkflowService for Svc {
             if let Some(target_id) = req.target_id.as_ref().map(|id| id.value.clone()) {
                 params.push(metric("target_id", target_id));
             }
-            if let Some(toolchain_set_id) = req.toolchain_set_id.as_ref().map(|id| id.value.clone()) {
+            if let Some(toolchain_set_id) = req.toolchain_set_id.as_ref().map(|id| id.value.clone())
+            {
                 params.push(metric("toolchain_set_id", toolchain_set_id));
             }
             let resp = job_client
@@ -1981,7 +2072,9 @@ impl WorkflowService for Svc {
                     target_id: req.target_id.clone(),
                     toolchain_set_id: req.toolchain_set_id.clone(),
                     correlation_id: correlation_id.clone(),
-                    run_id: Some(RunId { value: run_id.clone() }),
+                    run_id: Some(RunId {
+                        value: run_id.clone(),
+                    }),
                 })
                 .await?
                 .into_inner();
@@ -2003,7 +2096,14 @@ impl WorkflowService for Svc {
         let correlation_id_for_task = correlation_id.clone();
         let project_id_for_response = req.project_id.clone();
         tokio::spawn(async move {
-            run_pipeline_task(config, job_id_for_task, run_id_for_task, correlation_id_for_task, req).await;
+            run_pipeline_task(
+                config,
+                job_id_for_task,
+                run_id_for_task,
+                correlation_id_for_task,
+                req,
+            )
+            .await;
         });
 
         Ok(Response::new(WorkflowPipelineResponse {
