@@ -1,8 +1,7 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    fs,
-    io,
+    fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,14 +11,14 @@ use std::{
 use aadk_proto::aadk::v1::{
     job_service_server::{JobService, JobServiceServer},
     CancelJobRequest, CancelJobResponse, ErrorCode, ErrorDetail, GetJobRequest, GetJobResponse, Id,
-    Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter, RunId,
+    Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter,
     JobLogAppended, JobProgress, JobProgressUpdated, JobRef, JobState, JobStateChanged, KeyValue,
     ListJobHistoryRequest, ListJobHistoryResponse, ListJobsRequest, ListJobsResponse, LogChunk,
-    PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation,
+    PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation, RunId,
     StartJobRequest, StartJobResponse, StreamJobEventsRequest, StreamRunEventsRequest, Timestamp,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex, watch};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
@@ -80,11 +79,22 @@ struct PersistedEvent {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum PersistedEventPayload {
-    StateChanged { new_state: i32 },
-    Progress { progress: Option<PersistedJobProgress> },
-    Log { chunk: Option<PersistedLogChunk> },
-    Completed { summary: String, outputs: Vec<KeyValueRecord> },
-    Failed { error: Option<ErrorDetailRecord> },
+    StateChanged {
+        new_state: i32,
+    },
+    Progress {
+        progress: Option<PersistedJobProgress>,
+    },
+    Log {
+        chunk: Option<PersistedLogChunk>,
+    },
+    Completed {
+        summary: String,
+        outputs: Vec<KeyValueRecord>,
+    },
+    Failed {
+        error: Option<ErrorDetailRecord>,
+    },
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -269,7 +279,11 @@ impl PersistedEventPayload {
             aadk_proto::aadk::v1::job_event::Payload::Completed(done) => {
                 PersistedEventPayload::Completed {
                     summary: done.summary.clone(),
-                    outputs: done.outputs.iter().map(KeyValueRecord::from_proto).collect(),
+                    outputs: done
+                        .outputs
+                        .iter()
+                        .map(KeyValueRecord::from_proto)
+                        .collect(),
                 }
             }
             aadk_proto::aadk::v1::job_event::Payload::Failed(failed) => {
@@ -318,7 +332,11 @@ impl PersistedEventPayload {
 impl PersistedEvent {
     fn from_proto(event: &JobEvent) -> Option<Self> {
         let payload = event.payload.as_ref()?;
-        let at_unix_millis = event.at.as_ref().map(|ts| ts.unix_millis).unwrap_or_default();
+        let at_unix_millis = event
+            .at
+            .as_ref()
+            .map(|ts| ts.unix_millis)
+            .unwrap_or_default();
         Some(Self {
             at_unix_millis,
             payload: PersistedEventPayload::from_proto(payload),
@@ -412,7 +430,9 @@ impl PersistedJob {
         };
 
         let job = Job {
-            job_id: Some(Id { value: job_id.clone() }),
+            job_id: Some(Id {
+                value: job_id.clone(),
+            }),
             job_type,
             state,
             created_at: Some(Timestamp {
@@ -481,6 +501,7 @@ fn now_ts() -> Timestamp {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_page(page: Option<Pagination>) -> Result<(usize, usize), Status> {
     let page = page.unwrap_or_default();
     let mut page_size = if page.page_size == 0 {
@@ -506,20 +527,15 @@ fn millis_from_ts(ts: &Option<Timestamp>) -> Option<i64> {
 }
 
 fn job_sort_key(job: &Job) -> i64 {
-    millis_from_ts(&job.finished_at).unwrap_or_else(|| {
-        millis_from_ts(&job.created_at).unwrap_or_default()
-    })
+    millis_from_ts(&job.finished_at)
+        .unwrap_or_else(|| millis_from_ts(&job.created_at).unwrap_or_default())
 }
 
 fn job_matches_filter(job: &Job, filter: &JobFilter) -> bool {
-    if !filter.job_types.is_empty()
-        && !filter.job_types.iter().any(|t| t == &job.job_type)
-    {
+    if !filter.job_types.is_empty() && !filter.job_types.iter().any(|t| t == &job.job_type) {
         return false;
     }
-    if !filter.correlation_id.trim().is_empty()
-        && job.correlation_id != filter.correlation_id
-    {
+    if !filter.correlation_id.trim().is_empty() && job.correlation_id != filter.correlation_id {
         return false;
     }
     if let Some(run_id) = filter
@@ -648,11 +664,16 @@ fn job_matches_run(job: &Job, run_id: &str, correlation_id: &str) -> bool {
     let run_id = run_id.trim();
     let correlation_id = correlation_id.trim();
     if !run_id.is_empty() {
-        let job_run = job.run_id.as_ref().map(|id| id.value.as_str()).unwrap_or("");
+        let job_run = job
+            .run_id
+            .as_ref()
+            .map(|id| id.value.as_str())
+            .unwrap_or("");
         if job_run == run_id {
             return true;
         }
-        if job_run.is_empty() && !correlation_id.is_empty() && job.correlation_id == correlation_id {
+        if job_run.is_empty() && !correlation_id.is_empty() && job.correlation_id == correlation_id
+        {
             return true;
         }
         return false;
@@ -670,12 +691,18 @@ fn run_stream_config(req: &StreamRunEventsRequest) -> RunStreamConfig {
         req.buffer_max_events as usize
     };
     let max_delay_ms = if req.max_delay_ms == 0 {
-        read_env_u64("AADK_RUN_STREAM_MAX_DELAY_MS", DEFAULT_RUN_STREAM_MAX_DELAY_MS)
+        read_env_u64(
+            "AADK_RUN_STREAM_MAX_DELAY_MS",
+            DEFAULT_RUN_STREAM_MAX_DELAY_MS,
+        )
     } else {
         req.max_delay_ms
     };
     let discovery_ms = if req.discovery_interval_ms == 0 {
-        read_env_u64("AADK_RUN_STREAM_DISCOVERY_MS", DEFAULT_RUN_STREAM_DISCOVERY_MS)
+        read_env_u64(
+            "AADK_RUN_STREAM_DISCOVERY_MS",
+            DEFAULT_RUN_STREAM_DISCOVERY_MS,
+        )
     } else {
         req.discovery_interval_ms
     };
@@ -705,8 +732,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&tmp, payload)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -727,8 +753,10 @@ fn read_env_usize(key: &str, default: usize) -> usize {
 }
 
 fn retention_policy_from_env() -> RetentionPolicy {
-    let retention_days =
-        read_env_u64("AADK_JOB_HISTORY_RETENTION_DAYS", DEFAULT_JOB_HISTORY_RETENTION_DAYS);
+    let retention_days = read_env_u64(
+        "AADK_JOB_HISTORY_RETENTION_DAYS",
+        DEFAULT_JOB_HISTORY_RETENTION_DAYS,
+    );
     let max_jobs = read_env_usize("AADK_JOB_HISTORY_MAX", DEFAULT_JOB_HISTORY_MAX);
     let max_age = if retention_days == 0 {
         None
@@ -743,7 +771,9 @@ fn retention_policy_from_env() -> RetentionPolicy {
 fn mk_event(job_id: &str, payload: aadk_proto::aadk::v1::job_event::Payload) -> JobEvent {
     JobEvent {
         at: Some(now_ts()),
-        job_id: Some(Id { value: job_id.to_string() }),
+        job_id: Some(Id {
+            value: job_id.to_string(),
+        }),
         payload: Some(payload),
     }
 }
@@ -791,10 +821,8 @@ async fn spawn_job_stream(
                         aadk_proto::aadk::v1::job_event::Payload::Log(JobLogAppended {
                             chunk: Some(LogChunk {
                                 stream: "server".into(),
-                                data: format!(
-                                    "WARNING: client lagged; skipped {skipped} events\n"
-                                )
-                                .into_bytes(),
+                                data: format!("WARNING: client lagged; skipped {skipped} events\n")
+                                    .into_bytes(),
                                 truncated: false,
                             }),
                         }),
@@ -960,7 +988,7 @@ fn apply_retention(jobs: &mut Vec<PersistedJob>, policy: &RetentionPolicy) {
     if policy.max_jobs != 0 {
         let max_completed = policy.max_jobs.saturating_sub(active.len());
         if completed.len() > max_completed {
-            completed.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()));
+            completed.sort_by_key(|entry| Reverse(entry.sort_key()));
             completed.truncate(max_completed);
         }
     }
@@ -968,7 +996,7 @@ fn apply_retention(jobs: &mut Vec<PersistedJob>, policy: &RetentionPolicy) {
     let mut kept = Vec::new();
     kept.extend(active);
     kept.extend(completed);
-    kept.sort_by(|a, b| b.sort_key().cmp(&a.sort_key()));
+    kept.sort_by_key(|entry| Reverse(entry.sort_key()));
     *jobs = kept;
 }
 
@@ -984,7 +1012,11 @@ async fn load_store(policy: &RetentionPolicy) -> JobStore {
     }
 
     if count > 0 {
-        info!("Loaded {} job(s) from {}", count, state_file_path().display());
+        info!(
+            "Loaded {} job(s) from {}",
+            count,
+            state_file_path().display()
+        );
     }
 
     store
@@ -1087,12 +1119,14 @@ impl JobSvc {
                 _ => {}
             }
         }
-        self.publish(job_id, aadk_proto::aadk::v1::job_event::Payload::StateChanged(JobStateChanged {
-            new_state: state as i32,
-        }))
+        self.publish(
+            job_id,
+            aadk_proto::aadk::v1::job_event::Payload::StateChanged(JobStateChanged {
+                new_state: state as i32,
+            }),
+        )
         .await;
     }
-
 }
 
 async fn stream_run_events_task(
@@ -1186,7 +1220,7 @@ impl JobService for JobSvc {
 
         let job_id = Uuid::new_v4().to_string();
         let (btx, _brx) = broadcast::channel::<JobEvent>(BROADCAST_CAPACITY);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
         let correlation_id_raw = req.correlation_id.trim();
         let correlation_id = if correlation_id_raw.is_empty() {
             job_id.clone()
@@ -1211,7 +1245,9 @@ impl JobService for JobSvc {
         };
 
         let job = Job {
-            job_id: Some(Id { value: job_id.clone() }),
+            job_id: Some(Id {
+                value: job_id.clone(),
+            }),
             job_type: job_type.to_string(),
             state: JobState::Queued as i32,
             created_at: Some(now_ts()),
@@ -1236,20 +1272,29 @@ impl JobService for JobSvc {
         self.schedule_persist();
 
         Ok(Response::new(StartJobResponse {
-            job: Some(JobRef { job_id: Some(Id { value: job_id }) }),
+            job: Some(JobRef {
+                job_id: Some(Id { value: job_id }),
+            }),
         }))
     }
 
-    async fn get_job(&self, request: Request<GetJobRequest>) -> Result<Response<GetJobResponse>, Status> {
+    async fn get_job(
+        &self,
+        request: Request<GetJobRequest>,
+    ) -> Result<Response<GetJobResponse>, Status> {
         let req = request.into_inner();
         let job_id = req.job_id.map(|i| i.value).unwrap_or_default();
 
-        let rec = self.store.get(&job_id).await.ok_or_else(|| {
-            Status::not_found(format!("Job not found: {job_id}"))
-        })?;
+        let rec = self
+            .store
+            .get(&job_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Job not found: {job_id}")))?;
 
         let inner = rec.lock().await;
-        Ok(Response::new(GetJobResponse { job: Some(inner.job.clone()) }))
+        Ok(Response::new(GetJobResponse {
+            job: Some(inner.job.clone()),
+        }))
     }
 
     async fn cancel_job(
@@ -1336,7 +1381,10 @@ impl JobService for JobSvc {
                             aadk_proto::aadk::v1::job_event::Payload::Log(JobLogAppended {
                                 chunk: Some(LogChunk {
                                     stream: "server".into(),
-                                    data: format!("WARNING: client lagged; skipped {skipped} events\n").into_bytes(),
+                                    data: format!(
+                                        "WARNING: client lagged; skipped {skipped} events\n"
+                                    )
+                                    .into_bytes(),
                                     truncated: false,
                                 }),
                             }),
@@ -1378,15 +1426,8 @@ impl JobService for JobSvc {
         let include_history = req.include_history;
 
         tokio::spawn(async move {
-            stream_run_events_task(
-                store,
-                run_id,
-                correlation_id,
-                include_history,
-                config,
-                tx,
-            )
-            .await;
+            stream_run_events_task(store, run_id, correlation_id, include_history, config, tx)
+                .await;
         });
 
         Ok(Response::new(ReceiverStream::new(out_rx)))
@@ -1397,7 +1438,9 @@ impl JobService for JobSvc {
         request: Request<PublishJobEventRequest>,
     ) -> Result<Response<PublishJobEventResponse>, Status> {
         let req = request.into_inner();
-        let event = req.event.ok_or_else(|| Status::invalid_argument("event is required"))?;
+        let event = req
+            .event
+            .ok_or_else(|| Status::invalid_argument("event is required"))?;
         let job_id = event
             .job_id
             .ok_or_else(|| Status::invalid_argument("event.job_id is required"))?
@@ -1413,7 +1456,8 @@ impl JobService for JobSvc {
 
         match &payload {
             aadk_proto::aadk::v1::job_event::Payload::StateChanged(state) => {
-                let new_state = JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
+                let new_state =
+                    JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified);
                 self.update_state_only(&job_id, new_state).await;
             }
             aadk_proto::aadk::v1::job_event::Payload::Completed(_) => {
@@ -1440,7 +1484,7 @@ impl JobService for JobSvc {
 
         let mut jobs = self.store.list_jobs().await;
         jobs.retain(|job| job_matches_filter(job, &filter));
-        jobs.sort_by(|a, b| job_sort_key(b).cmp(&job_sort_key(a)));
+        jobs.sort_by_key(|entry| Reverse(job_sort_key(entry)));
 
         let total = jobs.len();
         if start >= total && total != 0 {
@@ -1448,7 +1492,11 @@ impl JobService for JobSvc {
         }
         let end = (start + page_size).min(total);
         let items = jobs[start..end].to_vec();
-        let next_token = if end < total { end.to_string() } else { String::new() };
+        let next_token = if end < total {
+            end.to_string()
+        } else {
+            String::new()
+        };
 
         Ok(Response::new(ListJobsResponse {
             jobs: items,
@@ -1467,9 +1515,11 @@ impl JobService for JobSvc {
         if job_id.trim().is_empty() {
             return Err(Status::invalid_argument("job_id is required"));
         }
-        let rec = self.store.get(&job_id).await.ok_or_else(|| {
-            Status::not_found(format!("Job not found: {job_id}"))
-        })?;
+        let rec = self
+            .store
+            .get(&job_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Job not found: {job_id}")))?;
         let (start, page_size) = parse_page(req.page)?;
         let filter = req.filter.unwrap_or_default();
 
@@ -1485,7 +1535,11 @@ impl JobService for JobSvc {
         }
         let end = (start + page_size).min(total);
         let items = events[start..end].to_vec();
-        let next_token = if end < total { end.to_string() } else { String::new() };
+        let next_token = if end < total {
+            end.to_string()
+        } else {
+            String::new()
+        };
 
         Ok(Response::new(ListJobHistoryResponse {
             events: items,
@@ -1499,7 +1553,9 @@ impl JobService for JobSvc {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+        )
         .init();
 
     let addr_str = std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
