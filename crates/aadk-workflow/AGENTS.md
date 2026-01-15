@@ -21,6 +21,7 @@ Update this file whenever WorkflowService behavior changes or when commits touch
   step-specific fields (project/toolchain/target identifiers, artifact path).
 - The service waits on each step job by streaming JobService events and validates success.
 - Run records are upserted in ObserveService on start, failure (best-effort), and success.
+- After build steps, workflow upserts artifact outputs to ObserveService so run dashboards can list outputs.
 
 ## Data flow and dependencies
 - Uses JobService for pipeline job creation and event publishing.
@@ -33,4 +34,4 @@ Update this file whenever WorkflowService behavior changes or when commits touch
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR configure upstream services.
 
 ## Prioritized TODO checklist by service
-- Emit richer pipeline summary outputs (artifact/bundle paths) for run dashboards.
+- None (run outputs are recorded via ObserveService inventory).

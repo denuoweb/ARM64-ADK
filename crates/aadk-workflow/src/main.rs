@@ -13,8 +13,9 @@ use aadk_proto::aadk::v1::{
     ErrorCode, ErrorDetail, ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetJobRequest,
     Id, InstallApkRequest, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
     JobProgressUpdated, JobState, JobStateChanged, KeyValue, LaunchRequest, ListArtifactsRequest,
-    OpenProjectRequest, PublishJobEventRequest, RunId, StartJobRequest, StreamJobEventsRequest,
-    Timestamp, UpsertRunRequest, WorkflowPipelineRequest, WorkflowPipelineResponse,
+    OpenProjectRequest, PublishJobEventRequest, RunId, RunOutput, RunOutputKind, StartJobRequest,
+    StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunRequest,
+    WorkflowPipelineRequest, WorkflowPipelineResponse,
 };
 use futures_util::StreamExt;
 use tonic::{transport::Channel, Request, Response, Status};
@@ -331,6 +332,17 @@ fn select_artifact_path(artifacts: &[Artifact]) -> Option<String> {
     apk.or(fallback)
 }
 
+fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::Apk => "apk",
+        ArtifactType::Aab => "aab",
+        ArtifactType::Aar => "aar",
+        ArtifactType::Mapping => "mapping",
+        ArtifactType::TestResult => "test_result",
+        ArtifactType::Unspecified => "unspecified",
+    }
+}
+
 async fn wait_for_job(
     client: &mut JobServiceClient<Channel>,
     job_id: &str,
@@ -431,6 +443,85 @@ async fn upsert_run_best_effort(
         })
         .await?;
     Ok(())
+}
+
+async fn upsert_run_outputs_best_effort(
+    observe_addr: &str,
+    run_id: &str,
+    job_id: &str,
+    artifacts: &[Artifact],
+) {
+    if run_id.trim().is_empty() || artifacts.is_empty() {
+        return;
+    }
+
+    let mut client = match connect_observe(observe_addr).await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("run outputs: observe unavailable: {err}");
+            return;
+        }
+    };
+
+    let mut outputs = Vec::new();
+    for artifact in artifacts {
+        let path = artifact.path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let artifact_type =
+            ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+        let output_type = artifact_type_label(artifact_type).to_string();
+        let label = if artifact.name.trim().is_empty() {
+            path.to_string()
+        } else {
+            artifact.name.trim().to_string()
+        };
+        let mut metadata = artifact.metadata.clone();
+        metadata.push(KeyValue {
+            key: "artifact_type".into(),
+            value: output_type.clone(),
+        });
+        if !artifact.name.trim().is_empty() {
+            metadata.push(KeyValue {
+                key: "artifact_name".into(),
+                value: artifact.name.clone(),
+            });
+        }
+        outputs.push(RunOutput {
+            output_id: format!("artifact:{job_id}:{path}"),
+            run_id: Some(RunId {
+                value: run_id.to_string(),
+            }),
+            kind: RunOutputKind::RunOutputKindArtifact as i32,
+            output_type,
+            path: path.to_string(),
+            label,
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
+            created_at: Some(Timestamp {
+                unix_millis: now_millis(),
+            }),
+            metadata,
+        });
+    }
+
+    if outputs.is_empty() {
+        return;
+    }
+
+    if let Err(err) = client
+        .upsert_run_outputs(UpsertRunOutputsRequest {
+            run_id: Some(RunId {
+                value: run_id.to_string(),
+            }),
+            outputs,
+        })
+        .await
+    {
+        warn!("run outputs: upsert failed for {run_id}: {err}");
+    }
 }
 
 async fn run_pipeline_task(
@@ -1177,6 +1268,13 @@ async fn run_pipeline_task(
                 .await
                 .map(|resp| resp.into_inner().artifacts)
                 .unwrap_or_default();
+            upsert_run_outputs_best_effort(
+                &config.observe_addr,
+                &run_id,
+                &build_job_id,
+                &artifacts,
+            )
+            .await;
             if let Some(path) = select_artifact_path(&artifacts) {
                 if apk_path.is_empty() {
                     apk_path = path.clone();
