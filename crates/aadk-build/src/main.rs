@@ -1,14 +1,13 @@
+use std::io::Read;
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
-    fs,
-    io,
+    fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Instant,
 };
-use std::io::Read;
 
 use aadk_proto::aadk::v1::{
     build_service_server::{BuildService, BuildServiceServer},
@@ -17,11 +16,11 @@ use aadk_proto::aadk::v1::{
     observe_service_client::ObserveServiceClient,
     project_service_client::ProjectServiceClient,
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildResponse, BuildVariant, ErrorCode,
-    ErrorDetail, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
-    JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListArtifactsRequest,
-    ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId, RunOutput, RunOutputKind,
-    StartJobRequest, StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, GetJobRequest,
-    GetProjectRequest,
+    ErrorDetail, GetJobRequest, GetProjectRequest, Id, JobCompleted, JobEvent, JobFailed,
+    JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
+    ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId,
+    RunOutput, RunOutputKind, StartJobRequest, StreamJobEventsRequest, Timestamp,
+    UpsertRunOutputsRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -236,23 +235,22 @@ async fn connect_observe() -> Result<ObserveServiceClient<Channel>, Status> {
     Ok(ObserveServiceClient::new(channel))
 }
 
-async fn job_is_cancelled(
-    client: &mut JobServiceClient<Channel>,
-    job_id: &str,
-) -> bool {
+async fn job_is_cancelled(client: &mut JobServiceClient<Channel>, job_id: &str) -> bool {
     let resp = client
         .get_job(GetJobRequest {
-            job_id: Some(Id { value: job_id.to_string() }),
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
         })
         .await;
     let job = match resp {
         Ok(resp) => resp.into_inner().job,
         Err(_) => return false,
     };
-    match job.and_then(|job| JobState::try_from(job.state).ok()) {
-        Some(JobState::Cancelled) => true,
-        _ => false,
-    }
+    matches!(
+        job.and_then(|job| JobState::try_from(job.state).ok()),
+        Some(JobState::Cancelled)
+    )
 }
 
 async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
@@ -266,7 +264,9 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
     };
     let mut stream = match client
         .stream_job_events(StreamJobEventsRequest {
-            job_id: Some(Id { value: job_id.clone() }),
+            job_id: Some(Id {
+                value: job_id.clone(),
+            }),
             include_history: true,
         })
         .await
@@ -283,8 +283,7 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
             match stream.message().await {
                 Ok(Some(evt)) => {
                     if let Some(JobPayload::StateChanged(state)) = evt.payload {
-                        if JobState::try_from(state.new_state)
-                            .unwrap_or(JobState::Unspecified)
+                        if JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified)
                             == JobState::Cancelled
                         {
                             let _ = tx.send(true);
@@ -344,7 +343,9 @@ async fn publish_job_event(
         .publish_job_event(PublishJobEventRequest {
             event: Some(JobEvent {
                 at: Some(now_ts()),
-                job_id: Some(Id { value: job_id.to_string() }),
+                job_id: Some(Id {
+                    value: job_id.to_string(),
+                }),
                 payload: Some(payload),
             }),
         })
@@ -516,11 +517,7 @@ async fn publish_failed(
     .await
 }
 
-async fn upsert_run_outputs_best_effort(
-    run_id: &str,
-    job_id: &str,
-    artifacts: &[Artifact],
-) {
+async fn upsert_run_outputs_best_effort(run_id: &str, job_id: &str, artifacts: &[Artifact]) {
     if run_id.trim().is_empty() || artifacts.is_empty() {
         return;
     }
@@ -563,7 +560,7 @@ async fn upsert_run_outputs_best_effort(
             run_id: Some(RunId {
                 value: run_id.to_string(),
             }),
-            kind: RunOutputKind::RunOutputKindArtifact as i32,
+            kind: RunOutputKind::Artifact as i32,
             output_type,
             path: path.to_string(),
             label,
@@ -594,7 +591,12 @@ async fn upsert_run_outputs_best_effort(
     }
 }
 
-fn job_error_detail(code: ErrorCode, message: &str, technical: String, correlation_id: &str) -> ErrorDetail {
+fn job_error_detail(
+    code: ErrorCode,
+    message: &str,
+    technical: String,
+    correlation_id: &str,
+) -> ErrorDetail {
     ErrorDetail {
         code: code as i32,
         message: message.into(),
@@ -631,8 +633,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&tmp, payload)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -667,6 +668,7 @@ fn save_state_best_effort(state: &BuildState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record(
     job_id: &str,
     project_id: &str,
@@ -748,13 +750,17 @@ async fn get_project_path(project_id: &str) -> Result<PathBuf, Status> {
     let mut client = connect_project().await?;
     let resp = client
         .get_project(GetProjectRequest {
-            project_id: Some(Id { value: project_id.to_string() }),
+            project_id: Some(Id {
+                value: project_id.to_string(),
+            }),
         })
         .await
         .map_err(|e| match e.code() {
             tonic::Code::NotFound => Status::not_found(format!("project not found: {project_id}")),
             tonic::Code::InvalidArgument => Status::invalid_argument(e.message().to_string()),
-            tonic::Code::Unavailable => Status::unavailable(format!("project service unavailable: {e}")),
+            tonic::Code::Unavailable => {
+                Status::unavailable(format!("project service unavailable: {e}"))
+            }
             _ => Status::internal(format!("get project failed: {e}")),
         })?
         .into_inner();
@@ -763,7 +769,9 @@ async fn get_project_path(project_id: &str) -> Result<PathBuf, Status> {
         .project
         .ok_or_else(|| Status::internal("project lookup returned empty response"))?;
     if project.path.trim().is_empty() {
-        return Err(Status::internal("project path missing in ProjectService response"));
+        return Err(Status::internal(
+            "project path missing in ProjectService response",
+        ));
     }
     Ok(PathBuf::from(project.path))
 }
@@ -812,6 +820,7 @@ fn variant_label(variant: BuildVariant) -> &'static str {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn normalize_module_label(value: &str) -> Result<Option<String>, Status> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -862,13 +871,19 @@ fn module_has_build_file(path: &Path) -> bool {
     path.join("build.gradle").is_file() || path.join("build.gradle.kts").is_file()
 }
 
+#[allow(clippy::result_large_err)]
 fn normalize_variant_name(value: &str) -> Result<Option<String>, Status> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if trimmed.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\' || c == ':') {
-        return Err(Status::invalid_argument("variant_name contains invalid characters"));
+    if trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == '\\' || c == ':')
+    {
+        return Err(Status::invalid_argument(
+            "variant_name contains invalid characters",
+        ));
     }
     Ok(Some(trimmed.to_string()))
 }
@@ -906,6 +921,7 @@ struct ArtifactQuery {
     path_contains: Option<String>,
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_variant_selection(req: &BuildRequest) -> Result<VariantSelection, Status> {
     if let Some(name) = normalize_variant_name(&req.variant_name)? {
         return Ok(VariantSelection {
@@ -971,6 +987,7 @@ fn tasks_for_selection(
     tasks
 }
 
+#[allow(clippy::result_large_err)]
 fn build_plan_for_request(req: &BuildRequest) -> Result<BuildPlan, Status> {
     let module = normalize_module_label(&req.module)?;
     let variant = resolve_variant_selection(req)?;
@@ -1110,6 +1127,7 @@ gradle.projectsEvaluated {
 "#
 }
 
+#[allow(clippy::result_large_err)]
 fn extract_gradle_model_payload(output: &str) -> Result<String, Status> {
     let start = output
         .find(GRADLE_MODEL_START)
@@ -1136,8 +1154,7 @@ fn normalize_sdk_string(value: Option<&str>) -> Option<String> {
 }
 
 fn normalize_gradle_path(path: &str) -> String {
-    let trimmed = path.trim();
-    trimmed.trim_start_matches(':').replace(':', ":")
+    path.trim().trim_start_matches(':').to_string()
 }
 
 fn find_project_for_module<'a>(
@@ -1174,9 +1191,12 @@ fn variant_supported(requested: &str, available: &[String]) -> bool {
     if available.is_empty() {
         return true;
     }
-    available.iter().any(|variant| variant_matches_query(variant, requested))
+    available
+        .iter()
+        .any(|variant| variant_matches_query(variant, requested))
 }
 
+#[allow(clippy::result_large_err)]
 fn build_model_info_for_plan(
     plan: &BuildPlan,
     req: &BuildRequest,
@@ -1186,8 +1206,9 @@ fn build_model_info_for_plan(
     let requested_variant = plan.variant.label.clone();
 
     if let Some(module) = plan.module.as_deref() {
-        let project = find_project_for_module(model, module)
-            .ok_or_else(|| Status::invalid_argument(format!("module not found in Gradle model: {module}")))?;
+        let project = find_project_for_module(model, module).ok_or_else(|| {
+            Status::invalid_argument(format!("module not found in Gradle model: {module}"))
+        })?;
         if project.android.is_none() && !tasks_override {
             return Err(Status::failed_precondition(format!(
                 "module is not an Android project: {module}"
@@ -1309,8 +1330,12 @@ struct GradleSpawn {
     description: String,
 }
 
+#[allow(clippy::result_large_err)]
 fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Status> {
-    let wrapper_props = project_dir.join("gradle").join("wrapper").join("gradle-wrapper.properties");
+    let wrapper_props = project_dir
+        .join("gradle")
+        .join("wrapper")
+        .join("gradle-wrapper.properties");
     let wrapper = if cfg!(windows) {
         project_dir.join("gradlew.bat")
     } else {
@@ -1322,9 +1347,7 @@ fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Stat
                 "gradle wrapper missing gradle/wrapper/gradle-wrapper.properties",
             ));
         }
-        let cmd = if cfg!(windows) {
-            Command::new(&wrapper)
-        } else if is_executable(&wrapper) {
+        let cmd = if cfg!(windows) || is_executable(&wrapper) {
             Command::new(&wrapper)
         } else {
             let mut cmd = Command::new("sh");
@@ -1360,10 +1383,8 @@ fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Stat
 }
 
 async fn load_gradle_model(project_dir: &Path) -> Result<GradleModel, Status> {
-    let script_path = std::env::temp_dir().join(format!(
-        "aadk-gradle-model-{}.gradle",
-        now_millis()
-    ));
+    let script_path =
+        std::env::temp_dir().join(format!("aadk-gradle-model-{}.gradle", now_millis()));
     fs::write(&script_path, gradle_model_script())
         .map_err(|e| Status::internal(format!("failed to write gradle model script: {e}")))?;
 
@@ -1648,11 +1669,12 @@ fn artifact_matches_variant(artifact: &Artifact, variant: &str) -> bool {
 
 fn artifact_matches(artifact: &Artifact, query: &ArtifactQuery) -> bool {
     if !query.types.is_empty() {
-        let artifact_type = ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+        let artifact_type =
+            ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
         if artifact_type == ArtifactType::Unspecified {
             return false;
         }
-        if !query.types.iter().any(|t| *t == artifact_type) {
+        if !query.types.contains(&artifact_type) {
             return false;
         }
     }
@@ -1764,7 +1786,9 @@ fn parse_output_metadata_value(value: &serde_json::Value) -> Option<OutputMetada
                 abi,
                 density,
             };
-            index.entries.insert(output_metadata_key(output_file), entry);
+            index
+                .entries
+                .insert(output_metadata_key(output_file), entry);
         }
         return Some(index);
     }
@@ -1794,7 +1818,9 @@ fn parse_output_metadata_value(value: &serde_json::Value) -> Option<OutputMetada
             };
             entry.abi = abi;
             entry.density = density;
-            index.entries.insert(output_metadata_key(output_file), entry);
+            index
+                .entries
+                .insert(output_metadata_key(output_file), entry);
         }
         return Some(index);
     }
@@ -2074,6 +2100,7 @@ fn collect_artifacts(
         .collect()
 }
 
+#[allow(clippy::result_large_err)]
 fn artifact_query_from_filter(filter: &ArtifactFilter) -> Result<ArtifactQuery, Status> {
     let mut query = ArtifactQuery::default();
 
@@ -2107,6 +2134,7 @@ fn artifact_query_from_filter(filter: &ArtifactFilter) -> Result<ArtifactQuery, 
     Ok(query)
 }
 
+#[allow(clippy::result_large_err)]
 fn artifact_query_from_request(req: &ListArtifactsRequest) -> Result<ArtifactQuery, Status> {
     let mut query = match req.filter.as_ref() {
         Some(filter) => artifact_query_from_filter(filter)?,
@@ -2182,7 +2210,12 @@ async fn run_build_job(
     };
 
     if *cancel_rx.borrow() {
-        let _ = publish_log(&mut job_client, &job_id, "Build cancelled before Gradle start\n").await;
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Build cancelled before Gradle start\n",
+        )
+        .await;
         return;
     }
 
@@ -2230,7 +2263,14 @@ async fn run_build_job(
         &job_id,
         10,
         "preflight",
-        build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info)),
+        build_progress_metrics(
+            &project_id,
+            &project_path,
+            &plan,
+            &req,
+            &args,
+            Some(&model_info),
+        ),
     )
     .await;
 
@@ -2315,7 +2355,14 @@ async fn run_build_job(
         &job_id,
         25,
         "gradle running",
-        build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info)),
+        build_progress_metrics(
+            &project_id,
+            &project_path,
+            &plan,
+            &req,
+            &args,
+            Some(&model_info),
+        ),
     )
     .await;
 
@@ -2383,7 +2430,12 @@ async fn run_build_job(
     let duration_ms = start.elapsed().as_millis();
 
     if *cancel_rx.borrow() {
-        let _ = publish_log(&mut job_client, &job_id, "Build cancelled before completion\n").await;
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Build cancelled before completion\n",
+        )
+        .await;
         return;
     }
 
@@ -2492,21 +2544,21 @@ async fn run_build_job(
             }
         }
 
-        let mut metrics =
-            build_progress_metrics(&project_id, &project_path, &plan, &req, &args, Some(&model_info));
+        let mut metrics = build_progress_metrics(
+            &project_id,
+            &project_path,
+            &plan,
+            &req,
+            &args,
+            Some(&model_info),
+        );
         metrics.push(metric("artifact_count", artifacts.len()));
         let type_summary = artifact_type_summary(&artifacts);
         if !type_summary.is_empty() {
             metrics.push(metric("artifact_types", type_summary));
         }
         let _ = publish_progress(&mut job_client, &job_id, 95, "finalizing", metrics).await;
-        let _ = publish_completed(
-            &mut job_client,
-            &job_id,
-            "Gradle build finished",
-            outputs,
-        )
-        .await;
+        let _ = publish_completed(&mut job_client, &job_id, "Gradle build finished", outputs).await;
     } else {
         let code = status.code().unwrap_or(-1);
         let mut detail = format!("exit_code={code}\n");
@@ -2523,7 +2575,10 @@ async fn run_build_job(
 
 #[tonic::async_trait]
 impl BuildService for Svc {
-    async fn build(&self, request: Request<BuildRequest>) -> Result<Response<BuildResponse>, Status> {
+    async fn build(
+        &self,
+        request: Request<BuildRequest>,
+    ) -> Result<Response<BuildResponse>, Status> {
         let mut req = request.into_inner();
         let project_id = req
             .project_id
@@ -2543,7 +2598,7 @@ impl BuildService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             let mut params = vec![
@@ -2628,10 +2683,13 @@ impl BuildService for Svc {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+        )
         .init();
 
-    let addr_str = std::env::var("AADK_BUILD_ADDR").unwrap_or_else(|_| "127.0.0.1:50054".to_string());
+    let addr_str =
+        std::env::var("AADK_BUILD_ADDR").unwrap_or_else(|_| "127.0.0.1:50054".to_string());
     let addr: SocketAddr = addr_str.parse()?;
 
     let svc = Svc::default();

@@ -51,6 +51,7 @@ Update this file whenever BuildService behavior changes or when commits touching
 ## Implementation notes
 - Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.
 - Gradle model init script now runs after `projectsEvaluated` to avoid root project access errors.
+- Gradle wrapper invocation uses a shared predicate for direct execution vs `sh`, and Gradle path normalization only trims leading colons.
 
 ## Prioritized TODO checklist by service
 - None (workflow UI consumes existing build RPCs).
