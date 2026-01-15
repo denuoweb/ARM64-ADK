@@ -15,7 +15,13 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
 
 ## Current implementation details
-- Implementation lives in crates/aadk-toolchain/src/main.rs with a tonic server.
+- Implementation is split across crates/aadk-toolchain/src/service.rs (gRPC + orchestration),
+  crates/aadk-toolchain/src/catalog.rs (catalog/fixtures), crates/aadk-toolchain/src/artifacts.rs
+  (download/extract), crates/aadk-toolchain/src/verify.rs (signature/transparency checks),
+  crates/aadk-toolchain/src/state.rs (persisted state/toolchain sets), crates/aadk-toolchain/src/jobs.rs
+  (JobService helpers), crates/aadk-toolchain/src/hashing.rs (sha256 helpers),
+  crates/aadk-toolchain/src/provenance.rs (provenance I/O), and crates/aadk-toolchain/src/cancel.rs;
+  crates/aadk-toolchain/src/main.rs only wires the tonic server.
 - Providers and versions come from a JSON catalog (crates/aadk-toolchain/catalog.json or
   AADK_TOOLCHAIN_CATALOG override).
 - Catalog pins SDK versions 36.0.0 and 35.0.2 plus NDK versions r29, r28c, r27d, and r26d for the
