@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
-    io,
+    fs, io,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -13,17 +12,17 @@ use aadk_proto::aadk::v1::{
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
     observe_service_server::{ObserveService, ObserveServiceServer},
-    ExportEvidenceBundleRequest, ExportEvidenceBundleResponse, ExportSupportBundleRequest,
-    ExportSupportBundleResponse, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended,
-    JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListRunOutputsRequest,
-    ListRunOutputsResponse, ListRunsRequest, ListRunsResponse, LogChunk, PageInfo, Pagination,
-    PublishJobEventRequest, RunFilter, RunId, RunOutput, RunOutputFilter, RunOutputKind,
-    RunOutputSummary, RunRecord, StartJobRequest, Timestamp, ErrorCode, ErrorDetail,
-    StreamJobEventsRequest, GetJobRequest, UpsertRunOutputsRequest, UpsertRunOutputsResponse,
+    ErrorCode, ErrorDetail, ExportEvidenceBundleRequest, ExportEvidenceBundleResponse,
+    ExportSupportBundleRequest, ExportSupportBundleResponse, GetJobRequest, Id, JobCompleted,
+    JobEvent, JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState,
+    JobStateChanged, KeyValue, ListRunOutputsRequest, ListRunOutputsResponse, ListRunsRequest,
+    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunFilter, RunId,
+    RunOutput, RunOutputFilter, RunOutputKind, RunOutputSummary, RunRecord, StartJobRequest,
+    StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunOutputsResponse,
     UpsertRunRequest, UpsertRunResponse,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -94,16 +93,12 @@ struct RunOutputSummaryEntry {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum RunOutputKindEntry {
+    #[default]
     Unspecified,
     Bundle,
     Artifact,
-}
-
-impl Default for RunOutputKindEntry {
-    fn default() -> Self {
-        Self::Unspecified
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,18 +139,18 @@ fn merge_summary(entry: &mut RunRecordEntry, updates: Vec<KeyValue>) {
 }
 
 fn run_output_kind_entry(kind: i32) -> RunOutputKindEntry {
-    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::RunOutputKindUnspecified) {
-        RunOutputKind::RunOutputKindBundle => RunOutputKindEntry::Bundle,
-        RunOutputKind::RunOutputKindArtifact => RunOutputKindEntry::Artifact,
-        RunOutputKind::RunOutputKindUnspecified => RunOutputKindEntry::Unspecified,
+    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::Unspecified) {
+        RunOutputKind::Bundle => RunOutputKindEntry::Bundle,
+        RunOutputKind::Artifact => RunOutputKindEntry::Artifact,
+        RunOutputKind::Unspecified => RunOutputKindEntry::Unspecified,
     }
 }
 
 fn run_output_kind_proto(kind: RunOutputKindEntry) -> i32 {
     match kind {
-        RunOutputKindEntry::Bundle => RunOutputKind::RunOutputKindBundle as i32,
-        RunOutputKindEntry::Artifact => RunOutputKind::RunOutputKindArtifact as i32,
-        RunOutputKindEntry::Unspecified => RunOutputKind::RunOutputKindUnspecified as i32,
+        RunOutputKindEntry::Bundle => RunOutputKind::Bundle as i32,
+        RunOutputKindEntry::Artifact => RunOutputKind::Artifact as i32,
+        RunOutputKindEntry::Unspecified => RunOutputKind::Unspecified as i32,
     }
 }
 
@@ -181,7 +176,9 @@ struct JobHistoryEvent {
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum JobHistoryPayload {
-    Log { chunk: Option<JobLogChunk> },
+    Log {
+        chunk: Option<JobLogChunk>,
+    },
     #[serde(other)]
     Other,
 }
@@ -273,8 +270,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&tmp, data)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -305,15 +301,22 @@ fn cleanup_bundles() -> io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
-    let retention_days =
-        read_env_u64("AADK_OBSERVE_BUNDLE_RETENTION_DAYS", DEFAULT_BUNDLE_RETENTION_DAYS);
+    let retention_days = read_env_u64(
+        "AADK_OBSERVE_BUNDLE_RETENTION_DAYS",
+        DEFAULT_BUNDLE_RETENTION_DAYS,
+    );
     let max_bundles = read_env_usize("AADK_OBSERVE_BUNDLE_MAX", DEFAULT_BUNDLE_MAX);
-    let tmp_hours = read_env_u64("AADK_OBSERVE_TMP_RETENTION_HOURS", DEFAULT_TMP_RETENTION_HOURS);
+    let tmp_hours = read_env_u64(
+        "AADK_OBSERVE_TMP_RETENTION_HOURS",
+        DEFAULT_TMP_RETENTION_HOURS,
+    );
     let now = SystemTime::now();
     let max_age = if retention_days == 0 {
         None
     } else {
-        Some(Duration::from_secs(retention_days.saturating_mul(24 * 60 * 60)))
+        Some(Duration::from_secs(
+            retention_days.saturating_mul(24 * 60 * 60),
+        ))
     };
     let tmp_age = if tmp_hours == 0 {
         None
@@ -346,9 +349,7 @@ fn cleanup_bundles() -> io::Result<()> {
             }
             continue;
         }
-        if metadata.is_file()
-            && path.extension().map(|ext| ext == "zip").unwrap_or(false)
-        {
+        if metadata.is_file() && path.extension().map(|ext| ext == "zip").unwrap_or(false) {
             let modified = metadata.modified().unwrap_or(now);
             bundles.push((path, modified));
         }
@@ -445,15 +446,10 @@ fn run_matches_filter(run: &RunRecordEntry, filter: &RunFilter) -> bool {
             return false;
         }
     }
-    if !filter.correlation_id.trim().is_empty() {
-        if run
-            .correlation_id
-            .as_deref()
-            .unwrap_or("")
-            != filter.correlation_id
-        {
-            return false;
-        }
+    if !filter.correlation_id.trim().is_empty()
+        && run.correlation_id.as_deref().unwrap_or("") != filter.correlation_id
+    {
+        return false;
     }
     if let Some(project_id) = filter
         .project_id
@@ -508,13 +504,12 @@ fn compute_output_summary(run_id: &str, outputs: &[RunOutputEntry]) -> RunOutput
         {
             summary.last_updated_at = Some(output.created_at);
         }
-        if output.kind == RunOutputKindEntry::Bundle {
-            if last_bundle
+        if output.kind == RunOutputKindEntry::Bundle
+            && last_bundle
                 .map(|entry| output.created_at > entry.created_at)
                 .unwrap_or(true)
-            {
-                last_bundle = Some(output);
-            }
+        {
+            last_bundle = Some(output);
         }
     }
 
@@ -539,26 +534,23 @@ fn refresh_run_output_summary(state: &mut State, run_id: &str) -> RunOutputSumma
 
 fn upsert_output_entry(state: &mut State, output: RunOutputEntry) -> RunOutputSummaryEntry {
     let run_id = output.run_id.clone();
-    state.outputs.retain(|entry| entry.output_id != output.output_id);
+    state
+        .outputs
+        .retain(|entry| entry.output_id != output.output_id);
     state.outputs.insert(0, output);
     refresh_run_output_summary(state, &run_id)
 }
 
 fn output_matches_filter(entry: &RunOutputEntry, filter: &RunOutputFilter) -> bool {
-    let kind_filter = RunOutputKind::try_from(filter.kind)
-        .unwrap_or(RunOutputKind::RunOutputKindUnspecified);
-    if kind_filter != RunOutputKind::RunOutputKindUnspecified {
-        if entry.kind != run_output_kind_entry(filter.kind) {
-            return false;
-        }
-    }
-    if !filter.output_type.trim().is_empty()
-        && entry.output_type != filter.output_type.trim()
+    let kind_filter = RunOutputKind::try_from(filter.kind).unwrap_or(RunOutputKind::Unspecified);
+    if kind_filter != RunOutputKind::Unspecified && entry.kind != run_output_kind_entry(filter.kind)
     {
         return false;
     }
-    if !filter.path_contains.trim().is_empty()
-        && !entry.path.contains(filter.path_contains.trim())
+    if !filter.output_type.trim().is_empty() && entry.output_type != filter.output_type.trim() {
+        return false;
+    }
+    if !filter.path_contains.trim().is_empty() && !entry.path.contains(filter.path_contains.trim())
     {
         return false;
     }
@@ -594,18 +586,15 @@ impl RunRecordEntry {
             run_id: Some(RunId {
                 value: self.run_id.clone(),
             }),
-            project_id: self
-                .project_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
-            target_id: self
-                .target_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
-            toolchain_set_id: self
-                .toolchain_set_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
+            project_id: self.project_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
+            target_id: self.target_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
+            toolchain_set_id: self.toolchain_set_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
             started_at: Some(Timestamp {
                 unix_millis: self.started_at,
             }),
@@ -614,7 +603,9 @@ impl RunRecordEntry {
             job_ids: self
                 .job_ids
                 .iter()
-                .map(|value| Id { value: value.clone() })
+                .map(|value| Id {
+                    value: value.clone(),
+                })
                 .collect(),
             summary: self
                 .summary
@@ -635,9 +626,7 @@ impl RunOutputSummaryEntry {
         RunOutputSummary {
             bundle_count: self.bundle_count,
             artifact_count: self.artifact_count,
-            updated_at: self
-                .last_updated_at
-                .map(|ts| Timestamp { unix_millis: ts }),
+            updated_at: self.last_updated_at.map(|ts| Timestamp { unix_millis: ts }),
             last_bundle_id: self.last_bundle_id.clone().unwrap_or_default(),
         }
     }
@@ -654,10 +643,9 @@ impl RunOutputEntry {
             output_type: self.output_type.clone(),
             path: self.path.clone(),
             label: self.label.clone(),
-            job_id: self
-                .job_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
+            job_id: self.job_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
             created_at: if self.created_at == 0 {
                 None
             } else {
@@ -701,23 +689,22 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     Ok(JobServiceClient::new(channel))
 }
 
-async fn job_is_cancelled(
-    client: &mut JobServiceClient<Channel>,
-    job_id: &str,
-) -> bool {
+async fn job_is_cancelled(client: &mut JobServiceClient<Channel>, job_id: &str) -> bool {
     let resp = client
         .get_job(GetJobRequest {
-            job_id: Some(Id { value: job_id.to_string() }),
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
         })
         .await;
     let job = match resp {
         Ok(resp) => resp.into_inner().job,
         Err(_) => return false,
     };
-    match job.and_then(|job| JobState::try_from(job.state).ok()) {
-        Some(JobState::Cancelled) => true,
-        _ => false,
-    }
+    matches!(
+        job.and_then(|job| JobState::try_from(job.state).ok()),
+        Some(JobState::Cancelled)
+    )
 }
 
 async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
@@ -731,7 +718,9 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
     };
     let mut stream = match client
         .stream_job_events(StreamJobEventsRequest {
-            job_id: Some(Id { value: job_id.clone() }),
+            job_id: Some(Id {
+                value: job_id.clone(),
+            }),
             include_history: true,
         })
         .await
@@ -748,8 +737,7 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
             match stream.message().await {
                 Ok(Some(evt)) => {
                     if let Some(JobPayload::StateChanged(state)) = evt.payload {
-                        if JobState::try_from(state.new_state)
-                            .unwrap_or(JobState::Unspecified)
+                        if JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified)
                             == JobState::Cancelled
                         {
                             let _ = tx.send(true);
@@ -770,6 +758,7 @@ fn cancel_requested(cancel_rx: &watch::Receiver<bool>) -> bool {
     *cancel_rx.borrow()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_job(
     client: &mut JobServiceClient<Channel>,
     job_type: &str,
@@ -1134,6 +1123,7 @@ fn make_manifest(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn support_bundle_plan(
     output_path: PathBuf,
     run_id: &str,
@@ -1141,10 +1131,7 @@ fn support_bundle_plan(
     runs_snapshot: Vec<RunRecordEntry>,
 ) -> Result<BundlePlan, Status> {
     let mut items = Vec::new();
-    let correlation_id = req
-        .correlation_id
-        .trim()
-        .to_string();
+    let correlation_id = req.correlation_id.trim().to_string();
     let correlation_id = if correlation_id.is_empty() {
         None
     } else {
@@ -1177,7 +1164,11 @@ fn support_bundle_plan(
         } else {
             req.recent_runs_limit as usize
         };
-        let slice = runs_snapshot.iter().cloned().take(limit).collect::<Vec<_>>();
+        let slice = runs_snapshot
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
         let runs_json = serde_json::to_vec_pretty(&slice)
             .map_err(|e| Status::internal(format!("runs serialization failed: {e}")))?;
         items.push(BundleItem::Generated {
@@ -1201,10 +1192,8 @@ fn support_bundle_plan(
     Ok(BundlePlan { output_path, items })
 }
 
-fn evidence_bundle_plan(
-    output_path: PathBuf,
-    run: RunRecordEntry,
-) -> Result<BundlePlan, Status> {
+#[allow(clippy::result_large_err)]
+fn evidence_bundle_plan(output_path: PathBuf, run: RunRecordEntry) -> Result<BundlePlan, Status> {
     let includes = BundleIncludes {
         include_logs: false,
         include_config: false,
@@ -1271,14 +1260,20 @@ fn support_bundle_metrics(
         metric("output_path", output_path.display()),
         metric("include_logs", req.include_logs),
         metric("include_config", req.include_config),
-        metric("include_toolchain_provenance", req.include_toolchain_provenance),
+        metric(
+            "include_toolchain_provenance",
+            req.include_toolchain_provenance,
+        ),
         metric("include_recent_runs", req.include_recent_runs),
         metric("recent_runs_limit", req.recent_runs_limit),
     ]
 }
 
 fn evidence_bundle_metrics(run_id: &str, output_path: &Path) -> Vec<KeyValue> {
-    vec![metric("run_id", run_id), metric("output_path", output_path.display())]
+    vec![
+        metric("run_id", run_id),
+        metric("output_path", output_path.display()),
+    ]
 }
 
 async fn run_support_bundle_job(
@@ -1291,7 +1286,12 @@ async fn run_support_bundle_job(
 ) -> Result<(), Status> {
     let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
-        let _ = publish_log(&mut job_client, &job_id, "Support bundle cancelled before start\n").await;
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Support bundle cancelled before start\n",
+        )
+        .await;
         let _ = update_run_state(state, &run_id, |entry| {
             entry.result = "cancelled".into();
             entry.finished_at = Some(now_millis());
@@ -1364,7 +1364,14 @@ async fn run_support_bundle_job(
 
     let mut write_metrics = base_metrics.clone();
     write_metrics.push(metric("item_count", plan.items.len()));
-    publish_progress(&mut job_client, &job_id, 60, "writing bundle", write_metrics).await?;
+    publish_progress(
+        &mut job_client,
+        &job_id,
+        60,
+        "writing bundle",
+        write_metrics,
+    )
+    .await?;
 
     match write_zip_bundle(plan) {
         Ok(_) => {}
@@ -1463,7 +1470,12 @@ async fn run_evidence_bundle_job(
 ) -> Result<(), Status> {
     let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
-        let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled before start\n").await;
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Evidence bundle cancelled before start\n",
+        )
+        .await;
         return Ok(());
     }
 
@@ -1476,7 +1488,14 @@ async fn run_evidence_bundle_job(
     .await?;
 
     let base_metrics = evidence_bundle_metrics(&run_id, &output_path);
-    publish_progress(&mut job_client, &job_id, 25, "loading run", base_metrics.clone()).await?;
+    publish_progress(
+        &mut job_client,
+        &job_id,
+        25,
+        "loading run",
+        base_metrics.clone(),
+    )
+    .await?;
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Evidence bundle cancelled\n").await;
@@ -1485,10 +1504,7 @@ async fn run_evidence_bundle_job(
 
     let run_snapshot = {
         let st = state.lock().await;
-        st.runs
-            .iter()
-            .find(|item| item.run_id == run_id)
-            .cloned()
+        st.runs.iter().find(|item| item.run_id == run_id).cloned()
     };
     let Some(run_snapshot) = run_snapshot else {
         let detail = error_detail(
@@ -1522,7 +1538,14 @@ async fn run_evidence_bundle_job(
 
     let mut write_metrics = base_metrics.clone();
     write_metrics.push(metric("item_count", plan.items.len()));
-    publish_progress(&mut job_client, &job_id, 70, "writing bundle", write_metrics).await?;
+    publish_progress(
+        &mut job_client,
+        &job_id,
+        70,
+        "writing bundle",
+        write_metrics,
+    )
+    .await?;
 
     match write_zip_bundle(plan) {
         Ok(_) => {}
@@ -1601,7 +1624,7 @@ impl ObserveService for Svc {
 
         let st = self.state.lock().await;
         let filter = req.filter.unwrap_or_default();
-        let mut runs = st
+        let runs = st
             .runs
             .iter()
             .filter(|run| run_matches_filter(run, &filter))
@@ -1615,7 +1638,6 @@ impl ObserveService for Svc {
         let end = (start + page_size).min(total);
         let items = runs[start..end]
             .iter()
-            .cloned()
             .map(|run| run.to_proto())
             .collect::<Vec<_>>();
         let next_token = if end < total {
@@ -1677,7 +1699,6 @@ impl ObserveService for Svc {
         let end = (start + page_size).min(total);
         let items = outputs[start..end]
             .iter()
-            .cloned()
             .map(|entry| entry.to_proto())
             .collect::<Vec<_>>();
         let next_token = if end < total {
@@ -1724,7 +1745,7 @@ impl ObserveService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let correlation_id = req.correlation_id.trim();
         let job_id = if job_id.is_empty() {
             start_job(
@@ -1756,7 +1777,9 @@ impl ObserveService for Svc {
                 project_id.clone(),
                 target_id.clone(),
                 toolchain_set_id.clone(),
-                Some(RunId { value: run_id.clone() }),
+                Some(RunId {
+                    value: run_id.clone(),
+                }),
             )
             .await?
         } else {
@@ -1850,7 +1873,7 @@ impl ObserveService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let job_id = if job_id.is_empty() {
             start_job(
                 &mut job_client,
@@ -1863,7 +1886,9 @@ impl ObserveService for Svc {
                 run_meta.0.clone(),
                 run_meta.1.clone(),
                 run_meta.2.clone(),
-                Some(RunId { value: run_id.clone() }),
+                Some(RunId {
+                    value: run_id.clone(),
+                }),
             )
             .await?
         } else {
