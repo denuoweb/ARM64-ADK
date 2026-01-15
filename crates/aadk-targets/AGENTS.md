@@ -14,7 +14,11 @@ Update this file whenever TargetService behavior changes or when commits touchin
   StreamLogcat, InstallCuttlefish, ResolveCuttlefishBuild, StartCuttlefish, StopCuttlefish, GetCuttlefishStatus
 
 ## Current implementation details
-- Implementation lives in crates/aadk-targets/src/main.rs with a tonic server.
+- Implementation is split across crates/aadk-targets/src/service.rs (gRPC + job orchestration),
+  crates/aadk-targets/src/adb.rs (adb discovery/props), crates/aadk-targets/src/cuttlefish.rs
+  (Cuttlefish config/build resolution/jobs), crates/aadk-targets/src/state.rs (persisted state),
+  crates/aadk-targets/src/ids.rs (normalization), and crates/aadk-targets/src/jobs.rs (JobService helpers);
+  crates/aadk-targets/src/main.rs only wires the tonic server.
 - list_targets uses a provider pipeline (ADB listing plus Cuttlefish augmentation), normalizes
   target IDs/addresses, enriches metadata/health, and merges persisted inventory for offline targets.
 - default target and target inventory are persisted under ~/.local/share/aadk/state/targets.json
