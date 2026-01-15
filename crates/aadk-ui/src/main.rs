@@ -24,12 +24,13 @@ use aadk_proto::aadk::v1::{
     InstallCuttlefishRequest, InstallToolchainRequest, InstalledToolchain, Job, JobEvent,
     JobEventKind, JobFilter, JobHistoryFilter, JobState, KeyValue, LaunchRequest,
     ListJobHistoryRequest, ListJobsRequest, ListArtifactsRequest, ListAvailableRequest,
-    ListInstalledRequest, ListProvidersRequest, ListRecentProjectsRequest, ListRunsRequest,
-    ListTargetsRequest, ListTemplatesRequest, ListToolchainSetsRequest, OpenProjectRequest,
-    Pagination, ResolveCuttlefishBuildRequest, SetActiveToolchainSetRequest, SetDefaultTargetRequest,
+    ListInstalledRequest, ListProvidersRequest, ListRecentProjectsRequest, ListRunOutputsRequest,
+    ListRunsRequest, ListTargetsRequest, ListTemplatesRequest, ListToolchainSetsRequest,
+    OpenProjectRequest, Pagination, ResolveCuttlefishBuildRequest, RunFilter, RunId,
+    RunOutputFilter, RunOutputKind, SetActiveToolchainSetRequest, SetDefaultTargetRequest,
     SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
     StreamJobEventsRequest, StreamLogcatRequest, StreamRunEventsRequest, Timestamp, ToolchainKind,
-    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest, RunFilter, RunId,
+    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest,
     WorkflowPipelineOptions, WorkflowPipelineRequest,
 };
 use futures_util::StreamExt;
@@ -371,6 +372,17 @@ enum UiCommand {
         run_id: String,
         correlation_id: String,
         result: String,
+        page_size: u32,
+        page_token: String,
+        page: &'static str,
+    },
+    ObserveListOutputs {
+        cfg: AppConfig,
+        run_id: String,
+        kind: i32,
+        output_type: String,
+        path_contains: String,
+        label_contains: String,
         page_size: u32,
         page_token: String,
         page: &'static str,
@@ -3670,7 +3682,7 @@ fn page_console(
 fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiCommand>) -> Page {
     let page = make_page(
         "Evidence - ObserveService runs and bundles",
-        "Overview: List runs, group jobs by run, stream run-level events, and export support/evidence bundles or job logs.",
+        "Overview: List runs and outputs, group jobs by run, stream run-level events, and export support/evidence bundles or job logs.",
         "Connections: Jobs started in Job Control, Workflow, Build, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
     );
     let primary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -3688,12 +3700,15 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     let secondary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list_jobs = gtk::Button::with_label("List jobs for run");
     let stream_run = gtk::Button::with_label("Stream run events");
+    let list_outputs = gtk::Button::with_label("List outputs");
     let export_job_logs = gtk::Button::with_label("Export job logs");
     set_tooltip(&list_jobs, "What: List jobs for a run id or correlation id. Why: group pipeline jobs together. How: enter run id/correlation id and click.");
     set_tooltip(&stream_run, "What: Stream run-level events. Why: watch pipeline progress across jobs. How: enter run id or correlation id and click.");
+    set_tooltip(&list_outputs, "What: List outputs (bundles/artifacts) for a run. Why: discover bundle paths and build artifacts tied to the run. How: set filters and click.");
     set_tooltip(&export_job_logs, "What: Export job logs to JSON. Why: share job details alongside run bundles. How: enter a job id and optional path, then click.");
     secondary_row.append(&list_jobs);
     secondary_row.append(&stream_run);
+    secondary_row.append(&list_outputs);
     secondary_row.append(&export_job_logs);
     page.container.insert_child_after(&secondary_row, Some(&primary_row));
 
@@ -3735,6 +3750,23 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .placeholder_text("Run id for evidence bundle")
         .hexpand(true)
         .build();
+    let output_kind_combo = gtk::ComboBoxText::new();
+    output_kind_combo.append_text("Any");
+    output_kind_combo.append_text("Bundles");
+    output_kind_combo.append_text("Artifacts");
+    output_kind_combo.set_active(Some(0));
+    let output_type_entry = gtk::Entry::builder()
+        .placeholder_text("output type (support_bundle, apk, ...)")
+        .hexpand(true)
+        .build();
+    let output_path_entry = gtk::Entry::builder()
+        .placeholder_text("output path contains")
+        .hexpand(true)
+        .build();
+    let output_label_entry = gtk::Entry::builder()
+        .placeholder_text("output label contains")
+        .hexpand(true)
+        .build();
     let recent_limit_entry = gtk::Entry::builder()
         .text("10")
         .hexpand(true)
@@ -3751,6 +3783,10 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     let include_recent = gtk::CheckButton::with_label("Include recent runs");
     include_recent.set_active(true);
     set_tooltip(&run_id_entry, "What: Run id for dashboards and evidence exports. Why: run-level actions need a run id. How: copy from List runs or Job History run_id.");
+    set_tooltip(&output_kind_combo, "What: Output kind filter. Why: narrow to bundles or artifacts. How: pick Any/Bundles/Artifacts.");
+    set_tooltip(&output_type_entry, "What: Output type filter. Why: match bundle types or artifact kinds. How: enter support_bundle, evidence_bundle, apk, aab, etc.");
+    set_tooltip(&output_path_entry, "What: Output path substring. Why: narrow to specific files. How: enter part of a path.");
+    set_tooltip(&output_label_entry, "What: Output label substring. Why: narrow to specific outputs. How: enter part of a label.");
     set_tooltip(&recent_limit_entry, "What: Limit for recent runs included in support bundle. Why: control bundle size. How: enter an integer, for example 10.");
     set_tooltip(&include_history, "What: Include previous run events in the stream. Why: replay history when attaching to existing runs. How: enable to replay before live events.");
     set_tooltip(&include_logs, "What: Include job logs. Why: logs are essential for troubleshooting. How: check to include.");
@@ -3766,6 +3802,22 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
         .label("Recent runs limit")
         .xalign(0.0)
         .build();
+    let label_output_kind = gtk::Label::builder()
+        .label("Output kind")
+        .xalign(0.0)
+        .build();
+    let label_output_type = gtk::Label::builder()
+        .label("Output type")
+        .xalign(0.0)
+        .build();
+    let label_output_path = gtk::Label::builder()
+        .label("Path contains")
+        .xalign(0.0)
+        .build();
+    let label_output_label = gtk::Label::builder()
+        .label("Label contains")
+        .xalign(0.0)
+        .build();
 
     form.attach(&label_run_id, 0, 0, 1, 1);
     form.attach(&run_id_entry, 1, 0, 1, 1);
@@ -3779,6 +3831,14 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
     checkbox_row.append(&include_toolchain);
     checkbox_row.append(&include_recent);
     form.attach(&checkbox_row, 1, 3, 1, 1);
+    form.attach(&label_output_kind, 0, 4, 1, 1);
+    form.attach(&output_kind_combo, 1, 4, 1, 1);
+    form.attach(&label_output_type, 0, 5, 1, 1);
+    form.attach(&output_type_entry, 1, 5, 1, 1);
+    form.attach(&label_output_path, 0, 6, 1, 1);
+    form.attach(&output_path_entry, 1, 6, 1, 1);
+    form.attach(&label_output_label, 0, 7, 1, 1);
+    form.attach(&output_label_entry, 1, 7, 1, 1);
 
     page.container.insert_child_after(&form, Some(&job_grid));
 
@@ -3848,6 +3908,35 @@ fn page_evidence(cfg: Arc<std::sync::Mutex<AppConfig>>, cmd_tx: mpsc::Sender<UiC
                 run_id: run_id_entry_stream.text().to_string(),
                 correlation_id: correlation_id_entry_stream.text().to_string(),
                 include_history: include_history_stream.is_active(),
+                page: "evidence",
+            })
+            .ok();
+    });
+
+    let cfg_outputs = cfg.clone();
+    let cmd_tx_outputs = cmd_tx.clone();
+    let run_id_entry_outputs = run_id_entry.clone();
+    let output_kind_combo_outputs = output_kind_combo.clone();
+    let output_type_entry_outputs = output_type_entry.clone();
+    let output_path_entry_outputs = output_path_entry.clone();
+    let output_label_entry_outputs = output_label_entry.clone();
+    list_outputs.connect_clicked(move |_| {
+        let cfg = cfg_outputs.lock().unwrap().clone();
+        let kind = match output_kind_combo_outputs.selected() {
+            1 => RunOutputKind::RunOutputKindBundle as i32,
+            2 => RunOutputKind::RunOutputKindArtifact as i32,
+            _ => RunOutputKind::RunOutputKindUnspecified as i32,
+        };
+        cmd_tx_outputs
+            .send(UiCommand::ObserveListOutputs {
+                cfg,
+                run_id: run_id_entry_outputs.text().to_string(),
+                kind,
+                output_type: output_type_entry_outputs.text().to_string(),
+                path_contains: output_path_entry_outputs.text().to_string(),
+                label_contains: output_label_entry_outputs.text().to_string(),
+                page_size: 50,
+                page_token: String::new(),
                 page: "evidence",
             })
             .ok();
@@ -4480,6 +4569,14 @@ fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
         ArtifactType::Mapping => "mapping",
         ArtifactType::TestResult => "test_result",
         ArtifactType::Unspecified => "unspecified",
+    }
+}
+
+fn run_output_kind_label(kind: i32) -> &'static str {
+    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::RunOutputKindUnspecified) {
+        RunOutputKind::RunOutputKindBundle => "bundle",
+        RunOutputKind::RunOutputKindArtifact => "artifact",
+        RunOutputKind::RunOutputKindUnspecified => "unspecified",
     }
 }
 
@@ -6134,8 +6231,121 @@ async fn handle_command(cmd: UiCommand, worker_state: &mut AppState, ui: mpsc::S
                             .join(", ");
                         ui.send(AppEvent::Log { page, line: format!("  job_ids: {job_ids}\n") }).ok();
                     }
+                    if let Some(summary) = run.output_summary.as_ref() {
+                        let updated = summary
+                            .updated_at
+                            .as_ref()
+                            .map(|ts| ts.unix_millis)
+                            .unwrap_or(0);
+                        ui.send(AppEvent::Log {
+                            page,
+                            line: format!(
+                                "  outputs: bundles={} artifacts={} updated={} last_bundle_id={}\n",
+                                summary.bundle_count,
+                                summary.artifact_count,
+                                updated,
+                                summary.last_bundle_id
+                            ),
+                        })
+                        .ok();
+                    }
                     if !run.summary.is_empty() {
                         ui.send(AppEvent::Log { page, line: format!("  summary: {}\n", kv_pairs(&run.summary)) }).ok();
+                    }
+                }
+            }
+
+            if let Some(page_info) = resp.page_info {
+                if !page_info.next_page_token.trim().is_empty() {
+                    ui.send(AppEvent::Log { page, line: format!("next_page_token={}\n", page_info.next_page_token) }).ok();
+                }
+            }
+        }
+
+        UiCommand::ObserveListOutputs {
+            cfg,
+            run_id,
+            kind,
+            output_type,
+            path_contains,
+            label_contains,
+            page_size,
+            page_token,
+            page,
+        } => {
+            let run_id = run_id.trim().to_string();
+            if run_id.is_empty() {
+                ui.send(AppEvent::Log { page, line: "Run id is required for output listing.\n".into() }).ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log { page, line: format!("Listing outputs via {}\n", cfg.observe_addr) }).ok();
+            let mut client = ObserveServiceClient::new(connect(&cfg.observe_addr).await?);
+            let resp = client
+                .list_run_outputs(ListRunOutputsRequest {
+                    run_id: Some(RunId { value: run_id }),
+                    page: Some(Pagination {
+                        page_size: page_size.max(1),
+                        page_token,
+                    }),
+                    filter: Some(RunOutputFilter {
+                        kind,
+                        output_type: output_type.trim().to_string(),
+                        path_contains: path_contains.trim().to_string(),
+                        label_contains: label_contains.trim().to_string(),
+                    }),
+                })
+                .await?
+                .into_inner();
+
+            if let Some(summary) = resp.summary.as_ref() {
+                let updated = summary
+                    .updated_at
+                    .as_ref()
+                    .map(|ts| ts.unix_millis)
+                    .unwrap_or(0);
+                ui.send(AppEvent::Log {
+                    page,
+                    line: format!(
+                        "Output summary: bundles={} artifacts={} updated={} last_bundle_id={}\n",
+                        summary.bundle_count,
+                        summary.artifact_count,
+                        updated,
+                        summary.last_bundle_id
+                    ),
+                })
+                .ok();
+            }
+
+            if resp.outputs.is_empty() {
+                ui.send(AppEvent::Log { page, line: "No outputs recorded.\n".into() }).ok();
+            } else {
+                for output in resp.outputs {
+                    let job_id = output.job_id.as_ref().map(|id| id.value.as_str()).unwrap_or("-");
+                    let created_at = output
+                        .created_at
+                        .as_ref()
+                        .map(|ts| ts.unix_millis)
+                        .unwrap_or(0);
+                    ui.send(AppEvent::Log {
+                        page,
+                        line: format!(
+                            "- {} kind={} type={} path={} label={} job_id={} created_at={}\n",
+                            output.output_id,
+                            run_output_kind_label(output.kind),
+                            output.output_type,
+                            output.path,
+                            output.label,
+                            job_id,
+                            created_at
+                        ),
+                    })
+                    .ok();
+                    if !output.metadata.is_empty() {
+                        ui.send(AppEvent::Log {
+                            page,
+                            line: format!("  metadata: {}\n", kv_pairs(&output.metadata)),
+                        })
+                        .ok();
                     }
                 }
             }

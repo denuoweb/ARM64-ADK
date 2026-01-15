@@ -26,6 +26,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
 - All interactive fields and selections include verbose tooltips describing what, why, and how to use them.
 - Evidence page includes run dashboards: list runs with job ids, list jobs by run, stream run events, and export job logs alongside bundles.
+- Evidence page can list run outputs with bundle/artifact filters and surfaces run output summary counts.
 - Sidebar order is Job Control, Workflow, Toolchains, Projects, Build, Targets, Job History, Evidence, Settings (Home -> Job Control, Console -> Build).
 - Settings now includes WorkflowService alongside the other service endpoints.
 - Toolchains page fetches available SDK/NDK versions and populates dropdowns; install/verify actions
@@ -46,7 +47,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Projects: list templates, create/open, list recent, set project config, use active defaults.
 - Targets: list targets, set/get default target, resolve Cuttlefish build ids, install/start/stop Cuttlefish, logcat, install APK, launch app.
 - Build: run builds via BuildService with module/variant_name/tasks overrides, list artifacts with filters (grouped by module), stream job events.
-- Evidence: list runs, export support bundles, export evidence bundles, stream job events.
+- Evidence: list runs and outputs, export support bundles, export evidence bundles, stream job events.
 
 ## Environment / config
 - All service addresses can be overridden via env vars listed above.
@@ -58,5 +59,5 @@ Update this file whenever UI behavior changes or when commits touching this crat
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
 - Add template/toolchain/target pickers to the Workflow page to avoid manual id entry.
-- Add run filters (project/target/toolchain/result) and local bundle inventory to the Evidence dashboard.
+- Add run filters (project/target/toolchain/result) and output shortcuts (open/export) to the Evidence dashboard.
 - Persist last workflow inputs (run id, project refs, target id) in UI config.
