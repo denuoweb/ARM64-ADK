@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    fs,
-    io,
+    fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -12,15 +11,16 @@ use aadk_proto::aadk::v1::{
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
     project_service_server::{ProjectService, ProjectServiceServer},
-    CreateProjectRequest, CreateProjectResponse, ErrorCode, ErrorDetail, Id, JobCompleted, JobEvent,
-    JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged,
-    KeyValue, ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
+    CreateProjectRequest, CreateProjectResponse, ErrorCode, ErrorDetail, GetJobRequest,
+    GetProjectRequest, GetProjectResponse, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended,
+    JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
+    ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
-    PublishJobEventRequest, RunId, SetProjectConfigRequest, SetProjectConfigResponse, StartJobRequest,
-    Template, Timestamp, StreamJobEventsRequest, GetJobRequest, GetProjectRequest, GetProjectResponse,
+    PublishJobEventRequest, RunId, SetProjectConfigRequest, SetProjectConfigResponse,
+    StartJobRequest, StreamJobEventsRequest, Template, Timestamp,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tonic::{transport::Channel, Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -146,7 +146,9 @@ fn now_millis() -> i64 {
 }
 
 fn now_ts() -> Timestamp {
-    Timestamp { unix_millis: now_millis() }
+    Timestamp {
+        unix_millis: now_millis(),
+    }
 }
 
 fn expand_user(path: &str) -> PathBuf {
@@ -179,7 +181,9 @@ fn templates_registry_path() -> PathBuf {
     if let Ok(path) = std::env::var(TEMPLATE_ENV) {
         PathBuf::from(path)
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates").join("registry.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("templates")
+            .join("registry.json")
     }
 }
 
@@ -188,8 +192,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&tmp, data)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -199,7 +202,9 @@ fn load_state() -> State {
     let path = state_file_path();
     match fs::read_to_string(&path) {
         Ok(data) => match serde_json::from_str::<StateFile>(&data) {
-            Ok(file) => State { recent: file.projects },
+            Ok(file) => State {
+                recent: file.projects,
+            },
             Err(err) => {
                 warn!("Failed to parse {}: {}", path.display(), err);
                 State::default()
@@ -222,7 +227,9 @@ fn save_state(state: &State) -> io::Result<()> {
 }
 
 fn upsert_recent(state: &mut State, meta: ProjectMetadata) {
-    state.recent.retain(|item| item.project_id != meta.project_id && item.path != meta.path);
+    state
+        .recent
+        .retain(|item| item.project_id != meta.project_id && item.path != meta.path);
     state.recent.insert(0, meta);
     if state.recent.len() > MAX_RECENTS {
         state.recent.truncate(MAX_RECENTS);
@@ -269,14 +276,12 @@ impl ProjectMetadata {
             last_opened_at: Some(Timestamp {
                 unix_millis: self.last_opened_at,
             }),
-            toolchain_set_id: self
-                .toolchain_set_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
-            default_target_id: self
-                .default_target_id
-                .as_ref()
-                .map(|value| Id { value: value.clone() }),
+            toolchain_set_id: self.toolchain_set_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
+            default_target_id: self.default_target_id.as_ref().map(|value| Id {
+                value: value.clone(),
+            }),
         }
     }
 }
@@ -307,6 +312,7 @@ impl TemplateEntry {
 }
 
 impl TemplateRegistry {
+    #[allow(clippy::result_large_err)]
     fn load() -> Result<Self, Status> {
         let registry_path = templates_registry_path();
         let base_dir = registry_path
@@ -338,15 +344,20 @@ impl TemplateRegistry {
                 "template registry has no valid templates",
             ));
         }
-        Ok(Self { base_dir, templates })
+        Ok(Self {
+            base_dir,
+            templates,
+        })
     }
 
+    #[allow(clippy::result_large_err)]
     fn list_with_defaults(&self) -> Result<Vec<Template>, Status> {
         let mut templates = Vec::new();
         for template in &self.templates {
             let path = self.resolve_path(template);
-            let resolved = resolve_template_defaults(template, &path, &[])
-                .map_err(|err| Status::failed_precondition(format!("{}: {}", err.message, err.details)))?;
+            let resolved = resolve_template_defaults(template, &path, &[]).map_err(|err| {
+                Status::failed_precondition(format!("{}: {}", err.message, err.details))
+            })?;
             templates.push(template.to_proto_with_defaults(&resolved.entries));
         }
         Ok(templates)
@@ -411,9 +422,7 @@ fn parse_value_after_keyword(input: &str) -> Option<String> {
     }
 
     let mut token = String::new();
-    let Some(first) = chars.next() else {
-        return None;
-    };
+    let first = chars.next()?;
     if first == '"' || first == '\'' {
         for ch in chars {
             if ch == first {
@@ -554,8 +563,10 @@ fn resolve_template_defaults(
     }
 
     let min_sdk = normalize_sdk_value(MIN_SDK_KEY, values.get(MIN_SDK_KEY).map(|v| v.as_str()))?;
-    let compile_sdk =
-        normalize_sdk_value(COMPILE_SDK_KEY, values.get(COMPILE_SDK_KEY).map(|v| v.as_str()))?;
+    let compile_sdk = normalize_sdk_value(
+        COMPILE_SDK_KEY,
+        values.get(COMPILE_SDK_KEY).map(|v| v.as_str()),
+    )?;
     values.insert(MIN_SDK_KEY.to_string(), min_sdk.clone());
     values.insert(COMPILE_SDK_KEY.to_string(), compile_sdk.clone());
 
@@ -616,23 +627,22 @@ async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     Ok(JobServiceClient::new(channel))
 }
 
-async fn job_is_cancelled(
-    client: &mut JobServiceClient<Channel>,
-    job_id: &str,
-) -> bool {
+async fn job_is_cancelled(client: &mut JobServiceClient<Channel>, job_id: &str) -> bool {
     let resp = client
         .get_job(GetJobRequest {
-            job_id: Some(Id { value: job_id.to_string() }),
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
         })
         .await;
     let job = match resp {
         Ok(resp) => resp.into_inner().job,
         Err(_) => return false,
     };
-    match job.and_then(|job| JobState::try_from(job.state).ok()) {
-        Some(JobState::Cancelled) => true,
-        _ => false,
-    }
+    matches!(
+        job.and_then(|job| JobState::try_from(job.state).ok()),
+        Some(JobState::Cancelled)
+    )
 }
 
 async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
@@ -646,7 +656,9 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
     };
     let mut stream = match client
         .stream_job_events(StreamJobEventsRequest {
-            job_id: Some(Id { value: job_id.clone() }),
+            job_id: Some(Id {
+                value: job_id.clone(),
+            }),
             include_history: true,
         })
         .await
@@ -663,8 +675,7 @@ async fn spawn_cancel_watcher(job_id: String) -> watch::Receiver<bool> {
             match stream.message().await {
                 Ok(Some(evt)) => {
                     if let Some(JobPayload::StateChanged(state)) = evt.payload {
-                        if JobState::try_from(state.new_state)
-                            .unwrap_or(JobState::Unspecified)
+                        if JobState::try_from(state.new_state).unwrap_or(JobState::Unspecified)
                             == JobState::Cancelled
                         {
                             let _ = tx.send(true);
@@ -824,7 +835,14 @@ async fn publish_failed(
     job_id: &str,
     detail: ErrorDetail,
 ) -> Result<(), Status> {
-    publish_job_event(client, job_id, JobPayload::Failed(JobFailed { error: Some(detail) })).await
+    publish_job_event(
+        client,
+        job_id,
+        JobPayload::Failed(JobFailed {
+            error: Some(detail),
+        }),
+    )
+    .await
 }
 
 fn error_code_for_io(err: &io::Error) -> ErrorCode {
@@ -847,7 +865,12 @@ fn error_detail_for_io(context: &str, err: &io::Error, job_id: &str) -> ErrorDet
     }
 }
 
-fn error_detail_for_message(code: ErrorCode, message: &str, detail: &str, job_id: &str) -> ErrorDetail {
+fn error_detail_for_message(
+    code: ErrorCode,
+    message: &str,
+    detail: &str,
+    job_id: &str,
+) -> ErrorDetail {
     ErrorDetail {
         code: code as i32,
         message: message.into(),
@@ -857,6 +880,7 @@ fn error_detail_for_message(code: ErrorCode, message: &str, detail: &str, job_id
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_target_path(path: &Path) -> Result<(), Status> {
     if path.exists() {
         if !path.is_dir() {
@@ -898,12 +922,20 @@ fn count_files(path: &Path, template: &TemplateEntry) -> io::Result<u64> {
         let name = name.to_string_lossy();
 
         if file_type.is_dir() {
-            if template.exclude_dirs.iter().any(|item| item == name.as_ref()) {
+            if template
+                .exclude_dirs
+                .iter()
+                .any(|item| item == name.as_ref())
+            {
                 continue;
             }
             total += count_files(&entry.path(), template)?;
         } else if file_type.is_file() {
-            if template.exclude_files.iter().any(|item| item == name.as_ref()) {
+            if template
+                .exclude_files
+                .iter()
+                .any(|item| item == name.as_ref())
+            {
                 continue;
             }
             total += 1;
@@ -934,14 +966,30 @@ where
         let name = name.to_string_lossy();
 
         if file_type.is_dir() {
-            if template.exclude_dirs.iter().any(|item| item == name.as_ref()) {
+            if template
+                .exclude_dirs
+                .iter()
+                .any(|item| item == name.as_ref())
+            {
                 continue;
             }
             let dest_dir = dest.join(name.as_ref());
             fs::create_dir_all(&dest_dir)?;
-            copy_dir_recursive(&entry.path(), &dest_dir, template, cancel_flag, copied, total, on_file)?;
+            copy_dir_recursive(
+                &entry.path(),
+                &dest_dir,
+                template,
+                cancel_flag,
+                copied,
+                total,
+                on_file,
+            )?;
         } else if file_type.is_file() {
-            if template.exclude_files.iter().any(|item| item == name.as_ref()) {
+            if template
+                .exclude_files
+                .iter()
+                .any(|item| item == name.as_ref())
+            {
                 continue;
             }
             fs::copy(entry.path(), dest.join(name.as_ref()))?;
@@ -963,9 +1011,17 @@ fn copy_template_with_progress(
     let _ = tx.send(CopyUpdate::Total(total));
     fs::create_dir_all(dest)?;
     let mut copied = 0;
-    copy_dir_recursive(src, dest, template, cancel_flag, &mut copied, total, &mut |copied, total| {
-        let _ = tx.send(CopyUpdate::File { copied, total });
-    })?;
+    copy_dir_recursive(
+        src,
+        dest,
+        template,
+        cancel_flag,
+        &mut copied,
+        total,
+        &mut |copied, total| {
+            let _ = tx.send(CopyUpdate::File { copied, total });
+        },
+    )?;
     Ok(total)
 }
 
@@ -1017,7 +1073,12 @@ async fn run_create_job(
 ) -> Result<(), Status> {
     let cancel_rx = spawn_cancel_watcher(job_id.clone()).await;
     if job_is_cancelled(&mut job_client, &job_id).await {
-        let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled before start\n").await;
+        let _ = publish_log(
+            &mut job_client,
+            &job_id,
+            "Project creation cancelled before start\n",
+        )
+        .await;
         return Ok(());
     }
 
@@ -1092,19 +1153,14 @@ async fn run_create_job(
                 let percent = ((copied * 100) / total) as u32;
                 if percent != last_percent {
                     last_percent = percent;
-                    let _ = publish_progress(
-                        &mut job_client,
-                        &job_id,
-                        percent,
-                        "Copying template",
-                        {
+                    let _ =
+                        publish_progress(&mut job_client, &job_id, percent, "Copying template", {
                             let mut metrics = base_metrics.clone();
                             metrics.push(metric("files_copied", copied));
                             metrics.push(metric("files_total", total));
                             metrics
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                 }
             }
         }
@@ -1235,7 +1291,13 @@ impl ProjectService for Svc {
 
         let template_id = req
             .template_id
-            .and_then(|id| if id.value.trim().is_empty() { None } else { Some(id.value) })
+            .and_then(|id| {
+                if id.value.trim().is_empty() {
+                    None
+                } else {
+                    Some(id.value)
+                }
+            })
             .ok_or_else(|| Status::invalid_argument("template_id is required"))?;
 
         let registry = TemplateRegistry::load()?;
@@ -1254,10 +1316,10 @@ impl ProjectService for Svc {
             )));
         }
 
-        let resolved_defaults =
-            resolve_template_defaults(&template, &template_path, &req.params).map_err(|err| {
-                Status::failed_precondition(format!("{}: {}", err.message, err.details))
-            })?;
+        let resolved_defaults = resolve_template_defaults(&template, &template_path, &req.params)
+            .map_err(|err| {
+            Status::failed_precondition(format!("{}: {}", err.message, err.details))
+        })?;
 
         let project_id = format!("proj-{}", Uuid::new_v4());
         let mut job_client = connect_job().await?;
@@ -1266,7 +1328,7 @@ impl ProjectService for Svc {
             .as_ref()
             .map(|id| id.value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(String::new);
+            .unwrap_or_default();
         let correlation_id = req.correlation_id.trim();
         let params = vec![
             KeyValue {
@@ -1455,7 +1517,6 @@ impl ProjectService for Svc {
         let end = (start + page_size).min(total);
         let items = st.recent[start..end]
             .iter()
-            .cloned()
             .map(|meta| meta.to_proto())
             .collect::<Vec<_>>();
         let next_token = if end < total {
