@@ -1,0 +1,342 @@
+use aadk_proto::aadk::v1::{
+    ArtifactFilter, BuildVariant, KeyValue, ToolchainKind, WorkflowPipelineOptions,
+};
+
+use crate::config::AppConfig;
+use crate::models::{ProjectTemplateOption, TargetOption, ToolchainSetOption};
+
+#[derive(Debug)]
+pub(crate) enum UiCommand {
+    HomeStartJob {
+        cfg: AppConfig,
+        job_type: String,
+        params_raw: String,
+        project_id: String,
+        target_id: String,
+        toolchain_set_id: String,
+        correlation_id: String,
+    },
+    HomeWatchJob {
+        cfg: AppConfig,
+        job_id: String,
+    },
+    HomeCancelCurrent {
+        cfg: AppConfig,
+    },
+    JobsList {
+        cfg: AppConfig,
+        job_types: String,
+        states: String,
+        created_after: String,
+        created_before: String,
+        finished_after: String,
+        finished_before: String,
+        correlation_id: String,
+        run_id: String,
+        page_size: u32,
+        page_token: String,
+        page: &'static str,
+    },
+    JobsHistory {
+        cfg: AppConfig,
+        job_id: String,
+        kinds: String,
+        after: String,
+        before: String,
+        page_size: u32,
+        page_token: String,
+    },
+    JobsExportLogs {
+        cfg: AppConfig,
+        job_id: String,
+        output_path: String,
+        page: &'static str,
+    },
+    ToolchainListProviders {
+        cfg: AppConfig,
+    },
+    ToolchainListAvailable {
+        cfg: AppConfig,
+        provider_id: String,
+    },
+    ToolchainInstall {
+        cfg: AppConfig,
+        provider_id: String,
+        version: String,
+        verify: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ToolchainListInstalled {
+        cfg: AppConfig,
+        kind: ToolchainKind,
+    },
+    ToolchainListSets {
+        cfg: AppConfig,
+    },
+    ToolchainVerifyInstalled {
+        cfg: AppConfig,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ToolchainUpdate {
+        cfg: AppConfig,
+        toolchain_id: String,
+        version: String,
+        verify: bool,
+        remove_cached: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ToolchainUninstall {
+        cfg: AppConfig,
+        toolchain_id: String,
+        remove_cached: bool,
+        force: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ToolchainCleanupCache {
+        cfg: AppConfig,
+        dry_run: bool,
+        remove_all: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ToolchainCreateSet {
+        cfg: AppConfig,
+        sdk_toolchain_id: Option<String>,
+        ndk_toolchain_id: Option<String>,
+        display_name: String,
+    },
+    ToolchainCreateActiveLatest {
+        cfg: AppConfig,
+        display_name: String,
+    },
+    ToolchainSetActive {
+        cfg: AppConfig,
+        toolchain_set_id: String,
+    },
+    ToolchainGetActive {
+        cfg: AppConfig,
+    },
+    ProjectListTemplates {
+        cfg: AppConfig,
+    },
+    ProjectListRecent {
+        cfg: AppConfig,
+    },
+    ProjectLoadDefaults {
+        cfg: AppConfig,
+    },
+    ProjectCreate {
+        cfg: AppConfig,
+        name: String,
+        path: String,
+        template_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    ProjectOpen {
+        cfg: AppConfig,
+        path: String,
+    },
+    ProjectSetConfig {
+        cfg: AppConfig,
+        project_id: String,
+        toolchain_set_id: Option<String>,
+        default_target_id: Option<String>,
+    },
+    ProjectUseActiveDefaults {
+        cfg: AppConfig,
+        project_id: String,
+    },
+    TargetsList {
+        cfg: AppConfig,
+    },
+    TargetsSetDefault {
+        cfg: AppConfig,
+        target_id: String,
+    },
+    TargetsGetDefault {
+        cfg: AppConfig,
+    },
+    TargetsInstallCuttlefish {
+        cfg: AppConfig,
+        force: bool,
+        branch: String,
+        target: String,
+        build_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsResolveCuttlefishBuild {
+        cfg: AppConfig,
+        branch: String,
+        target: String,
+        build_id: String,
+    },
+    TargetsStartCuttlefish {
+        cfg: AppConfig,
+        show_full_ui: bool,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsStopCuttlefish {
+        cfg: AppConfig,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsCuttlefishStatus {
+        cfg: AppConfig,
+    },
+    TargetsInstallApk {
+        cfg: AppConfig,
+        target_id: String,
+        apk_path: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsLaunchApp {
+        cfg: AppConfig,
+        target_id: String,
+        application_id: String,
+        activity: String,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    TargetsStreamLogcat {
+        cfg: AppConfig,
+        target_id: String,
+        filter: String,
+    },
+    ObserveListRuns {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        result: String,
+        page_size: u32,
+        page_token: String,
+        page: &'static str,
+    },
+    ObserveListOutputs {
+        cfg: AppConfig,
+        run_id: String,
+        kind: i32,
+        output_type: String,
+        path_contains: String,
+        label_contains: String,
+        page_size: u32,
+        page_token: String,
+        page: &'static str,
+    },
+    ObserveExportSupport {
+        cfg: AppConfig,
+        include_logs: bool,
+        include_config: bool,
+        include_toolchain_provenance: bool,
+        include_recent_runs: bool,
+        recent_runs_limit: u32,
+        job_id: Option<String>,
+        correlation_id: String,
+        page: &'static str,
+    },
+    ObserveExportEvidence {
+        cfg: AppConfig,
+        run_id: String,
+        job_id: Option<String>,
+        correlation_id: String,
+        page: &'static str,
+    },
+    StreamRunEvents {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        include_history: bool,
+        page: &'static str,
+    },
+    WorkflowRunPipeline {
+        cfg: AppConfig,
+        run_id: String,
+        correlation_id: String,
+        job_id: Option<String>,
+        project_id: String,
+        project_path: String,
+        project_name: String,
+        template_id: String,
+        toolchain_id: String,
+        toolchain_set_id: String,
+        target_id: String,
+        build_variant: BuildVariant,
+        module: String,
+        variant_name: String,
+        tasks: Vec<String>,
+        apk_path: String,
+        application_id: String,
+        activity: String,
+        options: Option<WorkflowPipelineOptions>,
+        stream_history: bool,
+    },
+    BuildRun {
+        cfg: AppConfig,
+        project_ref: String,
+        variant: BuildVariant,
+        variant_name: String,
+        module: String,
+        tasks: Vec<String>,
+        clean_first: bool,
+        gradle_args: Vec<KeyValue>,
+        job_id: Option<String>,
+        correlation_id: String,
+    },
+    BuildListArtifacts {
+        cfg: AppConfig,
+        project_ref: String,
+        variant: BuildVariant,
+        filter: ArtifactFilter,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AppEvent {
+    Log {
+        page: &'static str,
+        line: String,
+    },
+    SetCurrentJob {
+        job_id: Option<String>,
+    },
+    HomeResetStatus,
+    HomeState {
+        state: String,
+    },
+    HomeProgress {
+        progress: String,
+    },
+    HomeResult {
+        result: String,
+    },
+    SetLastBuildApk {
+        apk_path: String,
+    },
+    SetCuttlefishBuildId {
+        build_id: String,
+    },
+    ToolchainAvailable {
+        provider_id: String,
+        versions: Vec<String>,
+    },
+    ProjectTemplates {
+        templates: Vec<ProjectTemplateOption>,
+    },
+    ProjectToolchainSets {
+        sets: Vec<ToolchainSetOption>,
+    },
+    ProjectTargets {
+        targets: Vec<TargetOption>,
+    },
+    ProjectSelected {
+        project_id: String,
+        project_path: String,
+    },
+}

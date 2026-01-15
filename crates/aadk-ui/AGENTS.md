@@ -9,13 +9,14 @@ background tokio runtime thread to keep the GTK main thread responsive.
 Update this file whenever UI behavior changes or when commits touching this crate are made.
 
 ## Key implementation details
-- Implementation lives in crates/aadk-ui/src/main.rs.
+- Entry point and GTK wiring live in `crates/aadk-ui/src/main.rs`, with modules split into
+  `config.rs`, `commands.rs`, `models.rs`, `pages.rs`, `utils.rs`, and `worker.rs`.
 - AppConfig holds service addresses and pulls defaults from env:
   AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_BUILD_ADDR,
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR, AADK_WORKFLOW_ADDR.
 - AppConfig persists to `~/.local/share/aadk/state/ui-config.json` with last job selections.
-- UiCommand enum defines all async work; a background worker executes these commands and emits
-  AppEvent logs to update the UI.
+- UiCommand/AppEvent live in `commands.rs`; a background worker in `worker.rs` executes commands and
+  emits AppEvent logs to update the UI.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
 - Core flow actions log connection/RPC failures to the page output so bad inputs and service errors are visible.
 - The main window default size is clamped to 90% of the primary monitor so it stays on-screen.
@@ -55,6 +56,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Implementation notes
 - Job Control page event routing now keeps the HomePage handle so status labels and log output update together.
+- Project config updates treat empty/"none" toolchain or target selections as unset before sending.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
