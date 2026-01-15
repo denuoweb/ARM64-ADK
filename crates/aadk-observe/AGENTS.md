@@ -9,17 +9,20 @@ Update this file whenever observe behavior changes or when commits touching this
 
 ## gRPC contract
 - proto/aadk/v1/observe.proto
-- RPCs: ListRuns, ExportSupportBundle, ExportEvidenceBundle, UpsertRun
+- RPCs: ListRuns, ListRunOutputs, ExportSupportBundle, ExportEvidenceBundle, UpsertRun, UpsertRunOutputs
 
 ## Current implementation details
 - Implementation lives in crates/aadk-observe/src/main.rs with a tonic server.
-- Run history is persisted in ~/.local/share/aadk/state/observe.json and paged in list_runs.
+- Run history and output inventory are persisted in ~/.local/share/aadk/state/observe.json and paged in list_runs/list_run_outputs.
 - ListRuns accepts RunFilter (run_id, correlation_id, project/target/toolchain ids, result).
 - UpsertRun merges partial updates (job ids, summary entries, timestamps, result) for best-effort run tracking.
+- UpsertRunOutputs stores bundle/artifact outputs and updates the run output_summary pointer (counts, last updated, last bundle id).
+- ListRunOutputs supports kind/type/path/label filters and returns the output summary for the run.
 - export_support_bundle creates a JobService job, writes a zip bundle under
   ~/.local/share/aadk/bundles, and streams progress/log events.
 - export_evidence_bundle does the same for a single run id.
 - Bundle export progress metrics include run_id/output_path plus include flags and item counts.
+- Bundle exports are recorded as RunOutput entries so dashboards can list bundle inventory.
 - ExportSupportBundle/ExportEvidenceBundle accept optional job_id to attach to existing jobs plus
   correlation_id and run_id to group multi-service workflows.
 - Runs capture project/target/toolchain ids and correlation_id when provided for filtering.
@@ -30,7 +33,8 @@ Update this file whenever observe behavior changes or when commits touching this
 
 ## Data flow and dependencies
 - Uses JobService for bundle jobs and event streaming.
-- UI and CLI can list runs and export support/evidence bundles with job streaming.
+- Build/Workflow clients can upsert run outputs (artifacts) for run dashboards.
+- UI and CLI can list runs, list outputs, and export support/evidence bundles with job streaming.
 
 ## Environment / config
 - AADK_OBSERVE_ADDR sets the bind address (default 127.0.0.1:50056).
@@ -39,4 +43,4 @@ Update this file whenever observe behavior changes or when commits touching this
 - AADK_OBSERVE_TMP_RETENTION_HOURS controls tmp directory retention (default 24, 0 disables).
 
 ## Prioritized TODO checklist by service
-- Persist bundle export paths in run summaries (or add a list bundles RPC) to support dashboards.
+- None (run output inventory is stored and exposed via ListRunOutputs).

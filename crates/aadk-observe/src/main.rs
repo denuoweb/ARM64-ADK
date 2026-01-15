@@ -15,10 +15,12 @@ use aadk_proto::aadk::v1::{
     observe_service_server::{ObserveService, ObserveServiceServer},
     ExportEvidenceBundleRequest, ExportEvidenceBundleResponse, ExportSupportBundleRequest,
     ExportSupportBundleResponse, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended,
-    JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListRunsRequest,
-    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunFilter, RunId,
-    RunRecord, StartJobRequest, Timestamp, ErrorCode, ErrorDetail, StreamJobEventsRequest,
-    GetJobRequest, UpsertRunRequest, UpsertRunResponse,
+    JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListRunOutputsRequest,
+    ListRunOutputsResponse, ListRunsRequest, ListRunsResponse, LogChunk, PageInfo, Pagination,
+    PublishJobEventRequest, RunFilter, RunId, RunOutput, RunOutputFilter, RunOutputKind,
+    RunOutputSummary, RunRecord, StartJobRequest, Timestamp, ErrorCode, ErrorDetail,
+    StreamJobEventsRequest, GetJobRequest, UpsertRunOutputsRequest, UpsertRunOutputsResponse,
+    UpsertRunRequest, UpsertRunResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -38,12 +40,15 @@ const DEFAULT_TMP_RETENTION_HOURS: u64 = 24;
 #[derive(Default)]
 struct State {
     runs: Vec<RunRecordEntry>,
+    outputs: Vec<RunOutputEntry>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct StateFile {
     #[serde(default)]
     runs: Vec<RunRecordEntry>,
+    #[serde(default)]
+    outputs: Vec<RunOutputEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,12 +72,58 @@ struct RunRecordEntry {
     job_ids: Vec<String>,
     #[serde(default)]
     summary: Vec<SummaryEntry>,
+    #[serde(default)]
+    output_summary: RunOutputSummaryEntry,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SummaryEntry {
     key: String,
     value: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct RunOutputSummaryEntry {
+    bundle_count: u32,
+    artifact_count: u32,
+    #[serde(default)]
+    last_updated_at: Option<i64>,
+    #[serde(default)]
+    last_bundle_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RunOutputKindEntry {
+    Unspecified,
+    Bundle,
+    Artifact,
+}
+
+impl Default for RunOutputKindEntry {
+    fn default() -> Self {
+        Self::Unspecified
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RunOutputEntry {
+    output_id: String,
+    run_id: String,
+    #[serde(default)]
+    kind: RunOutputKindEntry,
+    #[serde(default)]
+    output_type: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default)]
+    metadata: Vec<SummaryEntry>,
 }
 
 fn merge_summary(entry: &mut RunRecordEntry, updates: Vec<KeyValue>) {
@@ -89,6 +140,22 @@ fn merge_summary(entry: &mut RunRecordEntry, updates: Vec<KeyValue>) {
                 value: item.value,
             });
         }
+    }
+}
+
+fn run_output_kind_entry(kind: i32) -> RunOutputKindEntry {
+    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::RunOutputKindUnspecified) {
+        RunOutputKind::RunOutputKindBundle => RunOutputKindEntry::Bundle,
+        RunOutputKind::RunOutputKindArtifact => RunOutputKindEntry::Artifact,
+        RunOutputKind::RunOutputKindUnspecified => RunOutputKindEntry::Unspecified,
+    }
+}
+
+fn run_output_kind_proto(kind: RunOutputKindEntry) -> i32 {
+    match kind {
+        RunOutputKindEntry::Bundle => RunOutputKind::RunOutputKindBundle as i32,
+        RunOutputKindEntry::Artifact => RunOutputKind::RunOutputKindArtifact as i32,
+        RunOutputKindEntry::Unspecified => RunOutputKind::RunOutputKindUnspecified as i32,
     }
 }
 
@@ -322,7 +389,16 @@ fn load_state() -> State {
     let path = state_file_path();
     match fs::read_to_string(&path) {
         Ok(data) => match serde_json::from_str::<StateFile>(&data) {
-            Ok(file) => State { runs: file.runs },
+            Ok(file) => {
+                let mut state = State {
+                    runs: file.runs,
+                    outputs: file.outputs,
+                };
+                for run in state.runs.iter_mut() {
+                    run.output_summary = compute_output_summary(&run.run_id, &state.outputs);
+                }
+                state
+            }
             Err(err) => {
                 warn!("Failed to parse {}: {}", path.display(), err);
                 State::default()
@@ -340,6 +416,7 @@ fn load_state() -> State {
 fn save_state(state: &State) -> io::Result<()> {
     let file = StateFile {
         runs: state.runs.clone(),
+        outputs: state.outputs.clone(),
     };
     write_json_atomic(&state_file_path(), &file)
 }
@@ -414,6 +491,85 @@ fn run_matches_filter(run: &RunRecordEntry, filter: &RunFilter) -> bool {
     true
 }
 
+fn compute_output_summary(run_id: &str, outputs: &[RunOutputEntry]) -> RunOutputSummaryEntry {
+    let mut summary = RunOutputSummaryEntry::default();
+    let mut last_bundle: Option<&RunOutputEntry> = None;
+
+    for output in outputs.iter().filter(|item| item.run_id == run_id) {
+        match output.kind {
+            RunOutputKindEntry::Bundle => summary.bundle_count += 1,
+            RunOutputKindEntry::Artifact => summary.artifact_count += 1,
+            RunOutputKindEntry::Unspecified => {}
+        }
+        if summary
+            .last_updated_at
+            .map(|ts| output.created_at > ts)
+            .unwrap_or(true)
+        {
+            summary.last_updated_at = Some(output.created_at);
+        }
+        if output.kind == RunOutputKindEntry::Bundle {
+            if last_bundle
+                .map(|entry| output.created_at > entry.created_at)
+                .unwrap_or(true)
+            {
+                last_bundle = Some(output);
+            }
+        }
+    }
+
+    summary.last_bundle_id = last_bundle.map(|entry| entry.output_id.clone());
+    summary
+}
+
+fn refresh_run_output_summary(state: &mut State, run_id: &str) -> RunOutputSummaryEntry {
+    let summary = compute_output_summary(run_id, &state.outputs);
+    if let Some(run) = state.runs.iter_mut().find(|item| item.run_id == run_id) {
+        run.output_summary = summary.clone();
+    } else {
+        let mut run = RunRecordEntry::new(run_id.to_string(), "running");
+        run.output_summary = summary.clone();
+        state.runs.insert(0, run);
+        if state.runs.len() > MAX_RUNS {
+            state.runs.truncate(MAX_RUNS);
+        }
+    }
+    summary
+}
+
+fn upsert_output_entry(state: &mut State, output: RunOutputEntry) -> RunOutputSummaryEntry {
+    let run_id = output.run_id.clone();
+    state.outputs.retain(|entry| entry.output_id != output.output_id);
+    state.outputs.insert(0, output);
+    refresh_run_output_summary(state, &run_id)
+}
+
+fn output_matches_filter(entry: &RunOutputEntry, filter: &RunOutputFilter) -> bool {
+    let kind_filter = RunOutputKind::try_from(filter.kind)
+        .unwrap_or(RunOutputKind::RunOutputKindUnspecified);
+    if kind_filter != RunOutputKind::RunOutputKindUnspecified {
+        if entry.kind != run_output_kind_entry(filter.kind) {
+            return false;
+        }
+    }
+    if !filter.output_type.trim().is_empty()
+        && entry.output_type != filter.output_type.trim()
+    {
+        return false;
+    }
+    if !filter.path_contains.trim().is_empty()
+        && !entry.path.contains(filter.path_contains.trim())
+    {
+        return false;
+    }
+    if !filter.label_contains.trim().is_empty()
+        && !entry.label.contains(filter.label_contains.trim())
+    {
+        return false;
+    }
+    true
+}
+
 impl RunRecordEntry {
     fn new(run_id: String, result: &str) -> Self {
         let now = now_millis();
@@ -429,6 +585,7 @@ impl RunRecordEntry {
             result: result.into(),
             job_ids: Vec::new(),
             summary: Vec::new(),
+            output_summary: RunOutputSummaryEntry::default(),
         }
     }
 
@@ -468,6 +625,54 @@ impl RunRecordEntry {
                 })
                 .collect(),
             correlation_id: self.correlation_id.clone().unwrap_or_default(),
+            output_summary: Some(self.output_summary.to_proto()),
+        }
+    }
+}
+
+impl RunOutputSummaryEntry {
+    fn to_proto(&self) -> RunOutputSummary {
+        RunOutputSummary {
+            bundle_count: self.bundle_count,
+            artifact_count: self.artifact_count,
+            updated_at: self
+                .last_updated_at
+                .map(|ts| Timestamp { unix_millis: ts }),
+            last_bundle_id: self.last_bundle_id.clone().unwrap_or_default(),
+        }
+    }
+}
+
+impl RunOutputEntry {
+    fn to_proto(&self) -> RunOutput {
+        RunOutput {
+            output_id: self.output_id.clone(),
+            run_id: Some(RunId {
+                value: self.run_id.clone(),
+            }),
+            kind: run_output_kind_proto(self.kind),
+            output_type: self.output_type.clone(),
+            path: self.path.clone(),
+            label: self.label.clone(),
+            job_id: self
+                .job_id
+                .as_ref()
+                .map(|value| Id { value: value.clone() }),
+            created_at: if self.created_at == 0 {
+                None
+            } else {
+                Some(Timestamp {
+                    unix_millis: self.created_at,
+                })
+            },
+            metadata: self
+                .metadata
+                .iter()
+                .map(|item| KeyValue {
+                    key: item.key.clone(),
+                    value: item.value.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -1046,6 +1251,16 @@ async fn update_run_state(
     save_state(&st)
 }
 
+async fn record_output(
+    state: Arc<Mutex<State>>,
+    output: RunOutputEntry,
+) -> io::Result<RunOutputSummaryEntry> {
+    let mut st = state.lock().await;
+    let summary = upsert_output_entry(&mut st, output);
+    save_state(&st)?;
+    Ok(summary)
+}
+
 fn support_bundle_metrics(
     run_id: &str,
     output_path: &Path,
@@ -1175,14 +1390,47 @@ async fn run_support_bundle_job(
         return Ok(());
     }
 
-    let _ = update_run_state(state, &run_id, |entry| {
+    let _ = update_run_state(state.clone(), &run_id, |entry| {
         entry.result = "success".into();
         entry.finished_at = Some(now_millis());
-        entry.summary.push(SummaryEntry {
-            key: "bundle_path".into(),
-            value: output_path.to_string_lossy().to_string(),
-        });
     })
+    .await;
+
+    let _ = record_output(
+        state,
+        RunOutputEntry {
+            output_id: format!("bundle:{job_id}"),
+            run_id: run_id.clone(),
+            kind: RunOutputKindEntry::Bundle,
+            output_type: "support_bundle".into(),
+            path: output_path.to_string_lossy().to_string(),
+            label: "Support bundle".into(),
+            job_id: Some(job_id.clone()),
+            created_at: now_millis(),
+            metadata: vec![
+                SummaryEntry {
+                    key: "include_logs".into(),
+                    value: req.include_logs.to_string(),
+                },
+                SummaryEntry {
+                    key: "include_config".into(),
+                    value: req.include_config.to_string(),
+                },
+                SummaryEntry {
+                    key: "include_toolchain_provenance".into(),
+                    value: req.include_toolchain_provenance.to_string(),
+                },
+                SummaryEntry {
+                    key: "include_recent_runs".into(),
+                    value: req.include_recent_runs.to_string(),
+                },
+                SummaryEntry {
+                    key: "recent_runs_limit".into(),
+                    value: req.recent_runs_limit.to_string(),
+                },
+            ],
+        },
+    )
     .await;
 
     publish_completed(
@@ -1290,12 +1538,20 @@ async fn run_evidence_bundle_job(
         return Ok(());
     }
 
-    let _ = update_run_state(state, &run_id, |entry| {
-        entry.summary.push(SummaryEntry {
-            key: "evidence_bundle_path".into(),
-            value: output_path.to_string_lossy().to_string(),
-        });
-    })
+    let _ = record_output(
+        state,
+        RunOutputEntry {
+            output_id: format!("bundle:{job_id}"),
+            run_id: run_id.clone(),
+            kind: RunOutputKindEntry::Bundle,
+            output_type: "evidence_bundle".into(),
+            path: output_path.to_string_lossy().to_string(),
+            label: "Evidence bundle".into(),
+            job_id: Some(job_id.clone()),
+            created_at: now_millis(),
+            metadata: Vec::new(),
+        },
+    )
     .await;
 
     publish_completed(
@@ -1376,6 +1632,75 @@ impl ObserveService for Svc {
         }))
     }
 
+    async fn list_run_outputs(
+        &self,
+        request: Request<ListRunOutputsRequest>,
+    ) -> Result<Response<ListRunOutputsResponse>, Status> {
+        let req = request.into_inner();
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::invalid_argument("run_id is required"))?;
+
+        let page = req.page.unwrap_or(Pagination {
+            page_size: DEFAULT_PAGE_SIZE as u32,
+            page_token: String::new(),
+        });
+        let page_size = if page.page_size == 0 {
+            DEFAULT_PAGE_SIZE
+        } else {
+            page.page_size as usize
+        };
+        let start = if page.page_token.trim().is_empty() {
+            0
+        } else {
+            page.page_token
+                .parse::<usize>()
+                .map_err(|_| Status::invalid_argument("invalid page_token"))?
+        };
+
+        let st = self.state.lock().await;
+        let filter = req.filter.unwrap_or_default();
+        let outputs = st
+            .outputs
+            .iter()
+            .filter(|entry| entry.run_id == run_id && output_matches_filter(entry, &filter))
+            .cloned()
+            .collect::<Vec<_>>();
+        let total = outputs.len();
+        if start >= total && total != 0 {
+            return Err(Status::invalid_argument("page_token out of range"));
+        }
+
+        let end = (start + page_size).min(total);
+        let items = outputs[start..end]
+            .iter()
+            .cloned()
+            .map(|entry| entry.to_proto())
+            .collect::<Vec<_>>();
+        let next_token = if end < total {
+            end.to_string()
+        } else {
+            String::new()
+        };
+        let summary = st
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .map(|run| run.output_summary.clone())
+            .unwrap_or_else(|| compute_output_summary(&run_id, &st.outputs));
+
+        Ok(Response::new(ListRunOutputsResponse {
+            outputs: items,
+            page_info: Some(PageInfo {
+                next_page_token: next_token,
+            }),
+            summary: Some(summary.to_proto()),
+        }))
+    }
+
     async fn export_support_bundle(
         &self,
         request: Request<ExportSupportBundleRequest>,
@@ -1448,10 +1773,6 @@ impl ObserveService for Svc {
             run.target_id = target_id.clone();
             run.toolchain_set_id = toolchain_set_id.clone();
             run.job_ids.push(job_id.clone());
-            run.summary.push(SummaryEntry {
-                key: "bundle_type".into(),
-                value: "support".into(),
-            });
             upsert_run(&mut st, run);
             if let Err(err) = save_state(&st) {
                 drop(st);
@@ -1649,6 +1970,7 @@ impl ObserveService for Svc {
             }
         }
         merge_summary(&mut run, req.summary);
+        run.output_summary = compute_output_summary(&run_id, &st.outputs);
 
         upsert_run(&mut st, run.clone());
         if let Err(err) = save_state(&st) {
@@ -1657,6 +1979,85 @@ impl ObserveService for Svc {
 
         Ok(Response::new(UpsertRunResponse {
             run: Some(run.to_proto()),
+        }))
+    }
+
+    async fn upsert_run_outputs(
+        &self,
+        request: Request<UpsertRunOutputsRequest>,
+    ) -> Result<Response<UpsertRunOutputsResponse>, Status> {
+        let req = request.into_inner();
+        let run_id = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::invalid_argument("run_id is required"))?;
+
+        let mut entries = Vec::new();
+        for output in req.outputs {
+            if let Some(output_run_id) = output.run_id.as_ref().map(|id| id.value.trim()) {
+                if !output_run_id.is_empty() && output_run_id != run_id {
+                    return Err(Status::invalid_argument("output run_id mismatch"));
+                }
+            }
+            let output_id = output.output_id.trim();
+            let path = output.path.trim().to_string();
+            if path.is_empty() {
+                return Err(Status::invalid_argument("output path is required"));
+            }
+            let output_type = output.output_type.trim().to_string();
+            let output_id = if output_id.is_empty() {
+                format!("output:{run_id}:{output_type}:{path}")
+            } else {
+                output_id.to_string()
+            };
+            let label = output.label.trim().to_string();
+            let job_id = output
+                .job_id
+                .as_ref()
+                .map(|id| id.value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let created_at = output
+                .created_at
+                .as_ref()
+                .map(|ts| ts.unix_millis)
+                .unwrap_or_else(now_millis);
+            let metadata = output
+                .metadata
+                .into_iter()
+                .filter(|item| !item.key.trim().is_empty())
+                .map(|item| SummaryEntry {
+                    key: item.key,
+                    value: item.value,
+                })
+                .collect::<Vec<_>>();
+
+            entries.push(RunOutputEntry {
+                output_id,
+                run_id: run_id.clone(),
+                kind: run_output_kind_entry(output.kind),
+                output_type,
+                path,
+                label,
+                job_id,
+                created_at,
+                metadata,
+            });
+        }
+
+        let mut st = self.state.lock().await;
+        for entry in entries {
+            st.outputs.retain(|item| item.output_id != entry.output_id);
+            st.outputs.insert(0, entry);
+        }
+        let summary = refresh_run_output_summary(&mut st, &run_id);
+        if let Err(err) = save_state(&st) {
+            return Err(Status::internal(format!("failed to persist state: {err}")));
+        }
+
+        Ok(Response::new(UpsertRunOutputsResponse {
+            summary: Some(summary.to_proto()),
         }))
     }
 }
