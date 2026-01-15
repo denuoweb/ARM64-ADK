@@ -27,6 +27,7 @@ Update this file whenever BuildService behavior changes or when commits touching
 - BuildRequest can include job_id to attach work to an existing JobService job plus correlation_id
   and run_id to group multi-service workflows.
 - Persist build/job artifact records in ~/.local/share/aadk/state/builds.json.
+- When run_id is provided, successful builds upsert artifact outputs to ObserveService for run output inventory.
 - list_artifacts returns stored artifacts when available, applies ArtifactFilter, and falls back to scanning outputs.
 - Artifact discovery scans build outputs for APK/AAB/AAR/mapping/test results, parses output metadata
   when present, and tags metadata (module/variant/build_type/flavors/abi/density/task/type).
@@ -36,11 +37,13 @@ Update this file whenever BuildService behavior changes or when commits touching
 ## Data flow and dependencies
 - Requires JobService to be up for job creation and event streaming.
 - Uses ProjectService GetProject to resolve project_id to a path when not already a path.
+- Uses ObserveService UpsertRunOutputs to attach artifact outputs when run_id is set.
 
 ## Environment / config
 - AADK_BUILD_ADDR sets the bind address (default 127.0.0.1:50054).
 - AADK_JOB_ADDR sets the JobService address.
 - AADK_PROJECT_ADDR sets the ProjectService address.
+- AADK_OBSERVE_ADDR sets the ObserveService address for run output upserts.
 - AADK_GRADLE_DAEMON and AADK_GRADLE_STACKTRACE control Gradle flags.
 - AADK_GRADLE_REQUIRE_WRAPPER forces the Gradle wrapper to be present.
 - AADK_GRADLE_USER_HOME overrides GRADLE_USER_HOME for builds.

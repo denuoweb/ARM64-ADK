@@ -14,12 +14,14 @@ use aadk_proto::aadk::v1::{
     build_service_server::{BuildService, BuildServiceServer},
     job_event::Payload as JobPayload,
     job_service_client::JobServiceClient,
+    observe_service_client::ObserveServiceClient,
     project_service_client::ProjectServiceClient,
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildResponse, BuildVariant, ErrorCode,
     ErrorDetail, Id, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
     JobProgressUpdated, JobState, JobStateChanged, KeyValue, ListArtifactsRequest,
-    ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId, StartJobRequest,
-    StreamJobEventsRequest, GetJobRequest, GetProjectRequest,
+    ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId, RunOutput, RunOutputKind,
+    StartJobRequest, StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, GetJobRequest,
+    GetProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -197,6 +199,10 @@ fn project_addr() -> String {
     std::env::var("AADK_PROJECT_ADDR").unwrap_or_else(|_| "127.0.0.1:50053".into())
 }
 
+fn observe_addr() -> String {
+    std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".into())
+}
+
 async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     let addr = job_addr();
     let endpoint = format!("http://{addr}");
@@ -217,6 +223,17 @@ async fn connect_project() -> Result<ProjectServiceClient<Channel>, Status> {
         .await
         .map_err(|e| Status::unavailable(format!("project service unavailable: {e}")))?;
     Ok(ProjectServiceClient::new(channel))
+}
+
+async fn connect_observe() -> Result<ObserveServiceClient<Channel>, Status> {
+    let addr = observe_addr();
+    let endpoint = format!("http://{addr}");
+    let channel = Channel::from_shared(endpoint)
+        .map_err(|e| Status::internal(format!("invalid observe endpoint: {e}")))?
+        .connect()
+        .await
+        .map_err(|e| Status::unavailable(format!("observe service unavailable: {e}")))?;
+    Ok(ObserveServiceClient::new(channel))
 }
 
 async fn job_is_cancelled(
@@ -497,6 +514,84 @@ async fn publish_failed(
         JobPayload::Failed(JobFailed { error: Some(error) }),
     )
     .await
+}
+
+async fn upsert_run_outputs_best_effort(
+    run_id: &str,
+    job_id: &str,
+    artifacts: &[Artifact],
+) {
+    if run_id.trim().is_empty() || artifacts.is_empty() {
+        return;
+    }
+
+    let mut client = match connect_observe().await {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("run outputs: observe connect failed: {err}");
+            return;
+        }
+    };
+
+    let mut outputs = Vec::new();
+    for artifact in artifacts {
+        let path = artifact.path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let artifact_type =
+            ArtifactType::try_from(artifact.r#type).unwrap_or(ArtifactType::Unspecified);
+        let output_type = artifact_type_label(artifact_type).to_string();
+        let label = if artifact.name.trim().is_empty() {
+            path.to_string()
+        } else {
+            artifact.name.trim().to_string()
+        };
+        let mut metadata = artifact.metadata.clone();
+        metadata.push(KeyValue {
+            key: "artifact_type".into(),
+            value: output_type.clone(),
+        });
+        if !artifact.name.trim().is_empty() {
+            metadata.push(KeyValue {
+                key: "artifact_name".into(),
+                value: artifact.name.clone(),
+            });
+        }
+        outputs.push(RunOutput {
+            output_id: format!("artifact:{job_id}:{path}"),
+            run_id: Some(RunId {
+                value: run_id.to_string(),
+            }),
+            kind: RunOutputKind::RunOutputKindArtifact as i32,
+            output_type,
+            path: path.to_string(),
+            label,
+            job_id: Some(Id {
+                value: job_id.to_string(),
+            }),
+            created_at: Some(Timestamp {
+                unix_millis: now_millis(),
+            }),
+            metadata,
+        });
+    }
+
+    if outputs.is_empty() {
+        return;
+    }
+
+    if let Err(err) = client
+        .upsert_run_outputs(UpsertRunOutputsRequest {
+            run_id: Some(RunId {
+                value: run_id.to_string(),
+            }),
+            outputs,
+        })
+        .await
+    {
+        warn!("run outputs: upsert failed for {run_id}: {err}");
+    }
 }
 
 fn job_error_detail(code: ErrorCode, message: &str, technical: String, correlation_id: &str) -> ErrorDetail {
@@ -2318,6 +2413,14 @@ async fn run_build_job(
             );
             upsert_build_record(&mut st, record);
             save_state_best_effort(&st);
+        }
+        if let Some(run_id) = req
+            .run_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            upsert_run_outputs_best_effort(run_id, &job_id, &artifacts).await;
         }
         let mut outputs = vec![
             KeyValue {
