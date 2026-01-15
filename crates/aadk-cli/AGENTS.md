@@ -15,7 +15,7 @@ Update this file whenever CLI behavior changes or when commits touching this cra
   - toolchain list-providers / list-sets / create-set / set-active / get-active / update / uninstall / cleanup-cache
   - targets list / set-default / get-default / start-cuttlefish / stop-cuttlefish / cuttlefish-status / install-cuttlefish
   - project list-templates / list-recent / create / open / set-config / use-active-defaults
-  - observe list-runs / export-support / export-evidence
+  - observe list-runs / list-outputs / export-support / export-evidence
   - build run / list-artifacts (module/variant_name/tasks + artifact filters, grouped by module)
   - workflow run-pipeline (multi-step orchestration with optional explicit steps)
 - Each command connects directly to the target gRPC service using env/config defaults.

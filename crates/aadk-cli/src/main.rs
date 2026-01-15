@@ -22,8 +22,9 @@ use aadk_proto::aadk::v1::{
     GetCuttlefishStatusRequest, GetDefaultTargetRequest, GetJobRequest, Id,
     InstallCuttlefishRequest, Job, JobEvent, JobEventKind, JobFilter, JobHistoryFilter, JobState,
     KeyValue, ListArtifactsRequest, ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest,
-    ListRecentProjectsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter, RunId,
+    ListRecentProjectsRequest, ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest,
+    ListTemplatesRequest, ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter,
+    RunId, RunOutputFilter, RunOutputKind,
     SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
     StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
     StreamRunEventsRequest, UninstallToolchainRequest, UpdateToolchainRequest,
@@ -430,6 +431,24 @@ enum ObserveCmd {
         toolchain_set_id: Option<String>,
         #[arg(long)]
         result: Option<String>,
+    },
+    /// List outputs for a run
+    ListOutputs {
+        #[arg(long, default_value_t = default_observe_addr())]
+        addr: String,
+        run_id: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        output_type: Option<String>,
+        #[arg(long)]
+        path_contains: Option<String>,
+        #[arg(long)]
+        label_contains: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        page_size: u32,
+        #[arg(long, default_value = "")]
+        page_token: String,
     },
     /// Export a support bundle and stream job events
     ExportSupport {
@@ -1516,14 +1535,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let run_id = run.run_id.map(|i| i.value).unwrap_or_default();
                     let started = run.started_at.map(|t| t.unix_millis).unwrap_or(0);
                     let finished = run.finished_at.map(|t| t.unix_millis).unwrap_or(0);
+                    let output_summary = run.output_summary.as_ref();
+                    let bundle_count = output_summary.map(|s| s.bundle_count).unwrap_or(0);
+                    let artifact_count = output_summary.map(|s| s.artifact_count).unwrap_or(0);
+                    let output_updated = output_summary
+                        .and_then(|s| s.updated_at.as_ref())
+                        .map(|t| t.unix_millis)
+                        .unwrap_or(0);
+                    let last_bundle_id = output_summary
+                        .map(|s| s.last_bundle_id.as_str())
+                        .unwrap_or("");
                     println!(
-                        "{}\tresult={}\tstarted={}\tfinished={}\tjobs={}",
+                        "{}\tresult={}\tstarted={}\tfinished={}\tjobs={}\tbundles={}\tartifacts={}\toutputs_updated={}\tlast_bundle_id={}",
                         run_id,
                         run.result,
                         started,
                         finished,
-                        run.job_ids.len()
+                        run.job_ids.len(),
+                        bundle_count,
+                        artifact_count,
+                        output_updated,
+                        last_bundle_id
                     );
+                }
+                if let Some(page_info) = resp.page_info {
+                    if !page_info.next_page_token.is_empty() {
+                        println!("next_page_token={}", page_info.next_page_token);
+                    }
+                }
+            }
+            ObserveCmd::ListOutputs {
+                addr,
+                run_id,
+                kind,
+                output_type,
+                path_contains,
+                label_contains,
+                page_size,
+                page_token,
+            } => {
+                update_cli_config(|cfg| cfg.observe_addr = addr.clone());
+                let kind_value = kind
+                    .as_deref()
+                    .and_then(parse_run_output_kind)
+                    .unwrap_or(RunOutputKind::RunOutputKindUnspecified);
+                let mut client = ObserveServiceClient::new(connect(&addr).await?);
+                let resp = client
+                    .list_run_outputs(ListRunOutputsRequest {
+                        run_id: Some(RunId { value: run_id }),
+                        page: Some(Pagination {
+                            page_size,
+                            page_token,
+                        }),
+                        filter: Some(RunOutputFilter {
+                            kind: kind_value as i32,
+                            output_type: output_type.unwrap_or_default(),
+                            path_contains: path_contains.unwrap_or_default(),
+                            label_contains: label_contains.unwrap_or_default(),
+                        }),
+                    })
+                    .await?
+                    .into_inner();
+                if let Some(summary) = resp.summary.as_ref() {
+                    let updated = summary
+                        .updated_at
+                        .as_ref()
+                        .map(|t| t.unix_millis)
+                        .unwrap_or(0);
+                    println!(
+                        "summary: bundles={} artifacts={} updated_at={} last_bundle_id={}",
+                        summary.bundle_count,
+                        summary.artifact_count,
+                        updated,
+                        summary.last_bundle_id
+                    );
+                }
+                for output in resp.outputs {
+                    let job_id = output.job_id.map(|id| id.value).unwrap_or_default();
+                    let created_at = output
+                        .created_at
+                        .map(|ts| ts.unix_millis)
+                        .unwrap_or(0);
+                    println!(
+                        "{}\tkind={}\ttype={}\tpath={}\tlabel={}\tjob_id={}\tcreated_at={}",
+                        output.output_id,
+                        run_output_kind_label(output.kind),
+                        output.output_type,
+                        output.path,
+                        output.label,
+                        job_id,
+                        created_at
+                    );
+                    if !output.metadata.is_empty() {
+                        let metadata = output
+                            .metadata
+                            .iter()
+                            .map(|item| format!("{}={}", item.key, item.value))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("  metadata: {metadata}");
+                    }
                 }
                 if let Some(page_info) = resp.page_info {
                     if !page_info.next_page_token.is_empty() {
@@ -2325,6 +2436,23 @@ fn parse_build_variant(value: &str) -> Option<BuildVariant> {
         "debug" => Some(BuildVariant::Debug),
         "release" => Some(BuildVariant::Release),
         _ => None,
+    }
+}
+
+fn parse_run_output_kind(value: &str) -> Option<RunOutputKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "unspecified" => Some(RunOutputKind::RunOutputKindUnspecified),
+        "bundle" | "bundles" => Some(RunOutputKind::RunOutputKindBundle),
+        "artifact" | "artifacts" => Some(RunOutputKind::RunOutputKindArtifact),
+        _ => None,
+    }
+}
+
+fn run_output_kind_label(kind: i32) -> &'static str {
+    match RunOutputKind::try_from(kind).unwrap_or(RunOutputKind::RunOutputKindUnspecified) {
+        RunOutputKind::RunOutputKindBundle => "bundle",
+        RunOutputKind::RunOutputKindArtifact => "artifact",
+        RunOutputKind::RunOutputKindUnspecified => "unspecified",
     }
 }
 
