@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 aadk-proto = { path = "../aadk-proto" }
+aadk-telemetry = { path = "../aadk-telemetry" }
+aadk-util = { path = "../aadk-util" }
 
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time", "sync", "process", "fs", "io-util"] }
 tonic = "0.12"

@@ -26,6 +26,8 @@ completed items or move them into the implementation notes.
 - crates/aadk-observe: ObserveService (run history and bundle export)
 - crates/aadk-ui: GTK4 GUI client
 - crates/aadk-cli: CLI sanity tool
+- crates/aadk-util: Shared helpers (paths, time, service bootstrap, job history)
+- crates/aadk-telemetry: Opt-in telemetry spooler (usage events + crash reports)
 - crates/aadk-proto: Rust gRPC codegen for proto/aadk/v1
 - proto/aadk/v1/*.proto: gRPC contracts
 - scripts/dev/run-all.sh: local dev runner for all services
@@ -71,6 +73,7 @@ Default addresses (override with env vars):
 - Observe state: ~/.local/share/aadk/state/observe.json
 - Observe bundle outputs: ~/.local/share/aadk/bundles
 - UI/CLI log exports: ~/.local/share/aadk/state/*-job-export-*.json
+- Telemetry events/crashes: ~/.local/share/aadk/telemetry/<app>/*
 
 ## Per-service AGENT files
 - crates/aadk-project/AGENTS.md
@@ -82,6 +85,7 @@ Default addresses (override with env vars):
 - crates/aadk-targets/AGENTS.md
 - crates/aadk-ui/AGENTS.md
 - crates/aadk-cli/AGENTS.md
+- crates/aadk-telemetry/AGENTS.md
 - proto/aadk/v1/AGENTS.md
 
 ## Prioritized TODO checklist by service

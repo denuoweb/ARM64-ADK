@@ -1,17 +1,13 @@
 [package]
-name = "aadk-workflow"
+name = "aadk-util"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 aadk-proto = { path = "../aadk-proto" }
 aadk-telemetry = { path = "../aadk-telemetry" }
-aadk-util = { path = "../aadk-util" }
-
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde = "1.0"
+serde_json = "1.0"
 tonic = "0.12"
-prost = "0.13"
-uuid = { version = "1.11", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures-util = "0.3"

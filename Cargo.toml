@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/aadk-util",
+  "crates/aadk-telemetry",
   "crates/aadk-proto",
   "crates/aadk-core",
   "crates/aadk-workflow",
