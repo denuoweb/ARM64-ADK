@@ -582,7 +582,7 @@ fn build_ui(app: &gtk::Application) {
                             projects_for_events.page.clear();
                             targets_for_events.page.clear();
                             console_for_events.page.clear();
-                            evidence_for_events.page.clear();
+                            evidence_for_events.clear();
                             settings_for_events.clear();
                         }
                     }

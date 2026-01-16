@@ -68,6 +68,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Job Control page event routing now keeps the HomePage handle so status labels and log output update together.
 - Project config updates treat empty/"none" toolchain or target selections as unset before sending.
 - Telemetry emits app.start, ui.page.view, and ui.command.* events when opt-in is enabled.
+- Reset-all-state clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
