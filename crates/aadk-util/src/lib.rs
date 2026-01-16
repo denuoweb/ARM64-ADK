@@ -10,7 +10,6 @@ use aadk_proto::aadk::v1::{
 };
 use aadk_telemetry as telemetry;
 use serde::Serialize;
-use tonic::server::NamedService;
 use tonic::transport::{server::Router, Channel, Server};
 use tracing::info;
 
@@ -151,40 +150,39 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn init_service_telemetry(app_name: &str, app_version: &str, service_name: &str) {
+pub fn init_service_telemetry(app_name: &'static str, app_version: &'static str, service_name: &str) {
     telemetry::init_with_env(app_name, app_version);
     telemetry::event("service.start", &[("service", service_name)]);
 }
 
-pub async fn serve_grpc<S, F>(
+pub async fn serve_grpc<F>(
     app_name: &str,
     addr_env: &str,
     default_addr: &str,
     add_service: F,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    S: NamedService,
-    F: FnOnce(Server) -> Router<S>,
+    F: FnOnce(&mut Server) -> Router,
 {
     let addr_str = env_addr(addr_env, default_addr);
     let addr: SocketAddr = addr_str.parse()?;
     info!("{app_name} listening on {addr}");
 
-    add_service(Server::builder()).serve(addr).await?;
+    let mut server = Server::builder();
+    add_service(&mut server).serve(addr).await?;
     Ok(())
 }
 
-pub async fn serve_grpc_with_telemetry<S, F>(
-    app_name: &str,
-    app_version: &str,
+pub async fn serve_grpc_with_telemetry<F>(
+    app_name: &'static str,
+    app_version: &'static str,
     service_name: &str,
     addr_env: &str,
     default_addr: &str,
     add_service: F,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    S: NamedService,
-    F: FnOnce(Server) -> Router<S>,
+    F: FnOnce(&mut Server) -> Router,
 {
     init_tracing()?;
     init_service_telemetry(app_name, app_version, service_name);
