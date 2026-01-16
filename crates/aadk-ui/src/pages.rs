@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, rc::Rc, sync::Arc};
 
 use aadk_proto::aadk::v1::{
     ArtifactFilter, ArtifactType, BuildVariant, KeyValue, RunOutputKind, ToolchainKind,
@@ -313,6 +313,93 @@ fn combo_active_value(combo: &gtk::ComboBoxText) -> String {
 
 fn set_tooltip<W: gtk::prelude::IsA<gtk::Widget>>(widget: &W, text: &str) {
     widget.set_tooltip_text(Some(text));
+}
+
+fn select_folder_dialog(
+    parent: &gtk::ApplicationWindow,
+    path_entry: &gtk::Entry,
+    title: &str,
+    on_accept: Option<Box<dyn Fn(String) + 'static>>,
+) {
+    let dialog = gtk::FileChooserNative::new(
+        Some(title),
+        Some(parent),
+        gtk::FileChooserAction::SelectFolder,
+        Some("Open"),
+        Some("Cancel"),
+    );
+
+    let current = path_entry.text().to_string();
+    if !current.trim().is_empty() {
+        let folder = gtk::gio::File::for_path(current.trim());
+        let _ = dialog.set_current_folder(Some(&folder));
+    }
+
+    let path_entry_dialog = path_entry.clone();
+    let on_accept = on_accept;
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(file) = dialog.file() {
+                if let Some(path) = file.path() {
+                    if let Some(path_str) = path.to_str() {
+                        path_entry_dialog.set_text(path_str);
+                        if let Some(handler) = on_accept.as_ref() {
+                            handler(path_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
+}
+
+fn select_apk_dialog(
+    parent: &gtk::ApplicationWindow,
+    apk_entry: &gtk::Entry,
+    on_accept: Option<Box<dyn Fn(String) + 'static>>,
+) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("Select APK"),
+        Some(parent),
+        gtk::FileChooserAction::Open,
+        Some("Open"),
+        Some("Cancel"),
+    );
+
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Android APK"));
+    filter.add_pattern("*.apk");
+    dialog.add_filter(&filter);
+    dialog.set_filter(&filter);
+
+    let current = apk_entry.text().to_string();
+    if !current.trim().is_empty() {
+        if let Some(parent_dir) = Path::new(current.trim()).parent() {
+            let folder = gtk::gio::File::for_path(parent_dir);
+            let _ = dialog.set_current_folder(Some(&folder));
+        }
+    }
+
+    let apk_entry_dialog = apk_entry.clone();
+    let on_accept = on_accept;
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(file) = dialog.file() {
+                if let Some(path) = file.path() {
+                    if let Some(path_str) = path.to_str() {
+                        apk_entry_dialog.set_text(path_str);
+                        if let Some(handler) = on_accept.as_ref() {
+                            handler(path_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
 }
 
 fn make_page(title: &str, description: &str, connections: &str) -> Page {
@@ -1971,8 +2058,8 @@ pub(crate) fn page_projects(
     set_tooltip(&refresh_templates, "What: Reload template list. Why: reflect new or updated templates. How: click to query ProjectService.");
     set_tooltip(&refresh_defaults, "What: Reload active defaults. Why: keep dropdowns in sync with Toolchain/Target defaults. How: click to fetch from ProjectService.");
     set_tooltip(&list_recent, "What: List recent projects. Why: reuse recent workspaces. How: click to query ProjectService.");
-    set_tooltip(&open_btn, "What: Open a project by path. Why: register it in ProjectService and recents. How: enter a path and click.");
-    set_tooltip(&create_btn, "What: Create a new project from a template. Why: bootstrap a new workspace. How: select template, name, and path, then click.");
+    set_tooltip(&open_btn, "What: Open a project by path. Why: register it in ProjectService and recents. How: enter a path or leave blank to pick a folder.");
+    set_tooltip(&create_btn, "What: Create a new project from a template. Why: bootstrap a new workspace. How: select template and name, then pick a folder if needed.");
     row.append(&refresh_templates);
     row.append(&refresh_defaults);
     row.append(&list_recent);
@@ -2126,28 +2213,44 @@ pub(crate) fn page_projects(
             .ok();
     });
 
+    let parent_window_open = parent.clone();
     let cfg_open = cfg.clone();
     let cmd_tx_open = cmd_tx.clone();
     let path_entry_open = path_entry.clone();
     open_btn.connect_clicked(move |_| {
+        let path = path_entry_open.text().to_string();
+        if path.trim().is_empty() {
+            let parent_window = parent_window_open.clone();
+            let path_entry_dialog = path_entry_open.clone();
+            let cfg_open = cfg_open.clone();
+            let cmd_tx_open = cmd_tx_open.clone();
+            select_folder_dialog(
+                &parent_window,
+                &path_entry_dialog,
+                "Select Project Folder",
+                Some(Box::new(move |path| {
+                    let cfg = cfg_open.lock().unwrap().clone();
+                    cmd_tx_open
+                        .try_send(UiCommand::ProjectOpen { cfg, path })
+                        .ok();
+                })),
+            );
+            return;
+        }
         let cfg = cfg_open.lock().unwrap().clone();
         cmd_tx_open
-            .try_send(UiCommand::ProjectOpen {
-                cfg,
-                path: path_entry_open.text().to_string(),
-            })
+            .try_send(UiCommand::ProjectOpen { cfg, path })
             .ok();
     });
 
     let cfg_create = cfg.clone();
     let cmd_tx_create = cmd_tx.clone();
-    let path_entry_create = path_entry.clone();
     let name_entry_create = name_entry.clone();
     let template_combo_create = template_combo.clone();
     let use_job_id_create = use_job_id_check.clone();
     let job_id_entry_create = job_id_entry.clone();
     let correlation_entry_create = correlation_id_entry.clone();
-    create_btn.connect_clicked(move |_| {
+    let queue_project_create = Rc::new(move |path: String| {
         let job_id_raw = job_id_entry_create.text().to_string();
         let correlation_id = correlation_entry_create.text().to_string();
         let job_id = if use_job_id_create.is_active() && !job_id_raw.trim().is_empty() {
@@ -2176,12 +2279,32 @@ pub(crate) fn page_projects(
             .try_send(UiCommand::ProjectCreate {
                 cfg,
                 name: name_entry_create.text().to_string(),
-                path: path_entry_create.text().to_string(),
+                path,
                 template_id,
                 job_id,
                 correlation_id,
             })
             .ok();
+    });
+    let parent_window_create = parent.clone();
+    let path_entry_create = path_entry.clone();
+    create_btn.connect_clicked(move |_| {
+        let path = path_entry_create.text().to_string();
+        if path.trim().is_empty() {
+            let queue_project_create = queue_project_create.clone();
+            let parent_window = parent_window_create.clone();
+            let path_entry_dialog = path_entry_create.clone();
+            select_folder_dialog(
+                &parent_window,
+                &path_entry_dialog,
+                "Select Project Folder",
+                Some(Box::new(move |path| {
+                    queue_project_create(path);
+                })),
+            );
+            return;
+        }
+        queue_project_create(path);
     });
 
     let cfg_config = cfg.clone();
@@ -2235,37 +2358,15 @@ pub(crate) fn page_projects(
             .ok();
     });
 
-    let parent_window = parent.clone();
+    let parent_window_browse = parent.clone();
     let path_entry_browse = path_entry.clone();
     browse_btn.connect_clicked(move |_| {
-        let dialog = gtk::FileChooserNative::new(
-            Some("Select Project Folder"),
-            Some(&parent_window),
-            gtk::FileChooserAction::SelectFolder,
-            Some("Open"),
-            Some("Cancel"),
+        select_folder_dialog(
+            &parent_window_browse,
+            &path_entry_browse,
+            "Select Project Folder",
+            None,
         );
-
-        let current = path_entry_browse.text().to_string();
-        if !current.trim().is_empty() {
-            let folder = gtk::gio::File::for_path(current.trim());
-            let _ = dialog.set_current_folder(Some(&folder));
-        }
-
-        let path_entry_dialog = path_entry_browse.clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                if let Some(file) = dialog.file() {
-                    if let Some(path) = file.path() {
-                        if let Some(path_str) = path.to_str() {
-                            path_entry_dialog.set_text(path_str);
-                        }
-                    }
-                }
-            }
-            dialog.destroy();
-        });
-        dialog.show();
     });
 
     ProjectsPage {
@@ -2446,7 +2547,7 @@ pub(crate) fn page_targets(
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let install_apk = gtk::Button::with_label("Install APK");
     let launch_app = gtk::Button::with_label("Launch app");
-    set_tooltip(&install_apk, "What: Install APK on the target. Why: deploy build output for testing. How: set Target id and APK path, then click.");
+    set_tooltip(&install_apk, "What: Install APK on the target. Why: deploy build output for testing. How: set Target id and APK path or leave blank to pick an APK.");
     set_tooltip(&launch_app, "What: Launch the app on the target. Why: verify install and run. How: set Target id, application id, and activity, then click.");
     action_row.append(&install_apk);
     action_row.append(&launch_app);
@@ -2688,55 +2789,13 @@ pub(crate) fn page_targets(
             .ok();
     });
 
-    let parent_window = parent.clone();
-    let apk_entry_browse = apk_entry.clone();
-    apk_browse.connect_clicked(move |_| {
-        let dialog = gtk::FileChooserNative::new(
-            Some("Select APK"),
-            Some(&parent_window),
-            gtk::FileChooserAction::Open,
-            Some("Open"),
-            Some("Cancel"),
-        );
-
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Android APK"));
-        filter.add_pattern("*.apk");
-        dialog.add_filter(&filter);
-        dialog.set_filter(&filter);
-
-        let current = apk_entry_browse.text().to_string();
-        if !current.trim().is_empty() {
-            if let Some(parent_dir) = Path::new(current.trim()).parent() {
-                let folder = gtk::gio::File::for_path(parent_dir);
-                let _ = dialog.set_current_folder(Some(&folder));
-            }
-        }
-
-        let apk_entry_dialog = apk_entry_browse.clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                if let Some(file) = dialog.file() {
-                    if let Some(path) = file.path() {
-                        if let Some(path_str) = path.to_str() {
-                            apk_entry_dialog.set_text(path_str);
-                        }
-                    }
-                }
-            }
-            dialog.destroy();
-        });
-        dialog.show();
-    });
-
     let cfg_install_apk = cfg.clone();
     let cmd_tx_install_apk = cmd_tx.clone();
     let target_entry_install = target_entry.clone();
-    let apk_entry_install = apk_entry.clone();
     let use_job_id_install_apk = use_job_id_check.clone();
     let job_id_entry_install_apk = job_id_entry.clone();
     let correlation_entry_install_apk = correlation_id_entry.clone();
-    install_apk.connect_clicked(move |_| {
+    let queue_install_apk = Rc::new(move |apk_path: String| {
         let job_id_raw = job_id_entry_install_apk.text().to_string();
         let correlation_id = correlation_entry_install_apk.text().to_string();
         let job_id = if use_job_id_install_apk.is_active() && !job_id_raw.trim().is_empty() {
@@ -2761,11 +2820,37 @@ pub(crate) fn page_targets(
             .try_send(UiCommand::TargetsInstallApk {
                 cfg,
                 target_id: target_entry_install.text().to_string(),
-                apk_path: apk_entry_install.text().to_string(),
+                apk_path,
                 job_id,
                 correlation_id,
             })
             .ok();
+    });
+
+    let parent_window_browse = parent.clone();
+    let apk_entry_browse = apk_entry.clone();
+    apk_browse.connect_clicked(move |_| {
+        select_apk_dialog(&parent_window_browse, &apk_entry_browse, None);
+    });
+
+    let parent_window_install = parent.clone();
+    let apk_entry_install = apk_entry.clone();
+    install_apk.connect_clicked(move |_| {
+        let apk_path = apk_entry_install.text().to_string();
+        if apk_path.trim().is_empty() {
+            let queue_install_apk = queue_install_apk.clone();
+            let parent_window = parent_window_install.clone();
+            let apk_entry_dialog = apk_entry_install.clone();
+            select_apk_dialog(
+                &parent_window,
+                &apk_entry_dialog,
+                Some(Box::new(move |path| {
+                    queue_install_apk(path);
+                })),
+            );
+            return;
+        }
+        queue_install_apk(apk_path);
     });
 
     let cfg_launch = cfg.clone();

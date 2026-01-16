@@ -69,6 +69,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Project config updates treat empty/"none" toolchain or target selections as unset before sending.
 - Telemetry emits app.start, ui.page.view, and ui.command.* events when opt-in is enabled.
 - Reset-all-state clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
+- Project open/create and target install actions now prompt for a folder/APK when the path is blank.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
