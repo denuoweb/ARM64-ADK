@@ -2,10 +2,9 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs, io,
     io::Write,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use aadk_proto::aadk::v1::{
@@ -21,6 +20,7 @@ use aadk_proto::aadk::v1::{
     StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunOutputsResponse,
     UpsertRunRequest, UpsertRunResponse,
 };
+use aadk_util::{data_dir, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 use tonic::{transport::Channel, Request, Response, Status};
@@ -228,52 +228,16 @@ fn default_schema_version() -> u32 {
     1
 }
 
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn now_ts() -> Timestamp {
-    Timestamp {
-        unix_millis: now_millis(),
-    }
-}
-
-fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
-}
-
-fn state_dir() -> PathBuf {
-    data_dir().join("state")
-}
-
 fn state_file_path() -> PathBuf {
-    state_dir().join(STATE_FILE_NAME)
+    aadk_util::state_file_path(STATE_FILE_NAME)
 }
 
 fn job_state_file_path() -> PathBuf {
-    state_dir().join(JOB_STATE_FILE_NAME)
+    aadk_util::state_file_path(JOB_STATE_FILE_NAME)
 }
 
 fn bundles_dir() -> PathBuf {
     data_dir().join("bundles")
-}
-
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 fn read_env_u64(key: &str, default: u64) -> u64 {
@@ -310,7 +274,7 @@ fn cleanup_bundles() -> io::Result<()> {
         "AADK_OBSERVE_TMP_RETENTION_HOURS",
         DEFAULT_TMP_RETENTION_HOURS,
     );
-    let now = SystemTime::now();
+    let now = std::time::SystemTime::now();
     let max_age = if retention_days == 0 {
         None
     } else {
@@ -674,10 +638,6 @@ impl Svc {
     }
 }
 
-fn job_addr() -> String {
-    std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into())
-}
-
 async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     let addr = job_addr();
     let endpoint = format!("http://{addr}");
@@ -976,7 +936,7 @@ fn gather_env() -> BTreeMap<String, String> {
 
 fn add_state_file(items: &mut Vec<BundleItem>, file_name: &str) {
     items.push(BundleItem::File {
-        source: state_dir().join(file_name),
+        source: aadk_util::state_file_path(file_name),
         name: format!("state/{file_name}"),
     });
 }
@@ -2089,23 +2049,13 @@ impl ObserveService for Svc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
-        )
-        .init();
-
-    let addr_str =
-        std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".to_string());
-    let addr: SocketAddr = addr_str.parse()?;
-
-    let svc = Svc::new();
-    info!("aadk-observe listening on {}", addr);
-
-    tonic::transport::Server::builder()
-        .add_service(ObserveServiceServer::new(svc))
-        .serve(addr)
-        .await?;
-
-    Ok(())
+    serve_grpc_with_telemetry(
+        "aadk-observe",
+        env!("CARGO_PKG_VERSION"),
+        "observe",
+        "AADK_OBSERVE_ADDR",
+        aadk_util::DEFAULT_OBSERVE_ADDR,
+        |server| server.add_service(ObserveServiceServer::new(Svc::new())),
+    )
+    .await
 }

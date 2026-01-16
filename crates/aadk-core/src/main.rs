@@ -2,10 +2,9 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     fs, io,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use aadk_proto::aadk::v1::{
@@ -16,6 +15,9 @@ use aadk_proto::aadk::v1::{
     ListJobHistoryRequest, ListJobHistoryResponse, ListJobsRequest, ListJobsResponse, LogChunk,
     PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation, RunId,
     StartJobRequest, StartJobResponse, StreamJobEventsRequest, StreamRunEventsRequest, Timestamp,
+};
+use aadk_util::{
+    init_service_telemetry, init_tracing, now_millis, now_ts, serve_grpc, write_json_atomic,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
@@ -488,19 +490,6 @@ fn is_known_job_type(job_type: &str) -> bool {
     )
 }
 
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn now_ts() -> Timestamp {
-    Timestamp {
-        unix_millis: now_millis(),
-    }
-}
-
 #[allow(clippy::result_large_err)]
 fn parse_page(page: Option<Pagination>) -> Result<(usize, usize), Status> {
     let page = page.unwrap_or_default();
@@ -715,27 +704,8 @@ fn run_stream_config(req: &StreamRunEventsRequest) -> RunStreamConfig {
     }
 }
 
-fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
-}
-
 fn state_file_path() -> PathBuf {
-    data_dir().join("state").join(STATE_FILE_NAME)
-}
-
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, payload)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    aadk_util::state_file_path(STATE_FILE_NAME)
 }
 
 fn read_env_u64(key: &str, default: u64) -> u64 {
@@ -1552,14 +1522,8 @@ impl JobService for JobSvc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
-        )
-        .init();
-
-    let addr_str = std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
-    let addr: SocketAddr = addr_str.parse()?;
+    init_tracing()?;
+    init_service_telemetry("aadk-core", env!("CARGO_PKG_VERSION"), "job");
 
     let retention = retention_policy_from_env();
     let store = load_store(&retention).await;
@@ -1568,12 +1532,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let svc = JobSvc::new(store, persist_tx.clone());
     let _ = persist_tx.try_send(());
 
-    info!("aadk-core (JobService) listening on {}", addr);
-
-    tonic::transport::Server::builder()
-        .add_service(JobServiceServer::new(svc))
-        .serve(addr)
-        .await?;
-
-    Ok(())
+    serve_grpc(
+        "aadk-core",
+        "AADK_JOB_ADDR",
+        aadk_util::DEFAULT_JOB_ADDR,
+        |server| server.add_service(JobServiceServer::new(svc)),
+    )
+    .await
 }

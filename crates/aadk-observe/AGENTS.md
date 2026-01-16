@@ -12,7 +12,8 @@ Update this file whenever observe behavior changes or when commits touching this
 - RPCs: ListRuns, ListRunOutputs, ExportSupportBundle, ExportEvidenceBundle, UpsertRun, UpsertRunOutputs
 
 ## Current implementation details
-- Implementation lives in crates/aadk-observe/src/main.rs with a tonic server.
+- Implementation lives in crates/aadk-observe/src/main.rs with a tonic server; shared bootstrap
+  and path/time helpers come from `aadk-util`.
 - Run history and output inventory are persisted in ~/.local/share/aadk/state/observe.json and paged in list_runs/list_run_outputs.
 - ListRuns accepts RunFilter (run_id, correlation_id, project/target/toolchain ids, result).
 - UpsertRun merges partial updates (job ids, summary entries, timestamps, result) for best-effort run tracking.
@@ -41,6 +42,10 @@ Update this file whenever observe behavior changes or when commits touching this
 - AADK_OBSERVE_BUNDLE_RETENTION_DAYS controls bundle age retention (default 30, 0 disables).
 - AADK_OBSERVE_BUNDLE_MAX controls max bundle count (default 50, 0 disables).
 - AADK_OBSERVE_TMP_RETENTION_HOURS controls tmp directory retention (default 24, 0 disables).
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=observe) when opt-in telemetry is enabled.
 
 ## Prioritized TODO checklist by service
 - None (run output inventory is stored and exposed via ListRunOutputs).

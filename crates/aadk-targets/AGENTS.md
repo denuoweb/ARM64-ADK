@@ -19,6 +19,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
   (Cuttlefish config/build resolution/jobs), crates/aadk-targets/src/state.rs (persisted state),
   crates/aadk-targets/src/ids.rs (normalization), and crates/aadk-targets/src/jobs.rs (JobService helpers);
   crates/aadk-targets/src/main.rs only wires the tonic server.
+- Service bootstrap, timestamps, and base data paths rely on `aadk-util` for consistent defaults.
 - list_targets uses a provider pipeline (ADB listing plus Cuttlefish augmentation), normalizes
   target IDs/addresses, enriches metadata/health, and merges persisted inventory for offline targets.
 - default target and target inventory are persisted under ~/.local/share/aadk/state/targets.json
@@ -45,6 +46,10 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_TARGETS_ADDR sets the bind address (default 127.0.0.1:50055).
 - AADK_JOB_ADDR sets the JobService address.
 - AADK_ADB_PATH or ANDROID_SDK_ROOT/ANDROID_HOME can override adb lookup.
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=targets) when opt-in telemetry is enabled.
 
 ### Cuttlefish configuration (env vars)
 - AADK_CUTTLEFISH_ENABLE=0 to disable detection

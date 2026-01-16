@@ -155,11 +155,7 @@ impl PersistedToolchainSet {
 }
 
 pub(crate) fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
+    aadk_util::data_dir()
 }
 
 pub(crate) fn default_install_root() -> PathBuf {
@@ -201,13 +197,7 @@ pub(crate) fn version_from_installed(entry: &InstalledToolchain) -> Option<Strin
 }
 
 pub(crate) fn expand_user(path: &str) -> PathBuf {
-    if path == "~" || path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            let rest = path.strip_prefix("~/").unwrap_or("");
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
+    aadk_util::expand_user(path)
 }
 
 pub(crate) fn load_state() -> State {
@@ -364,7 +354,7 @@ pub(crate) fn replace_toolchain_in_sets(
 }
 
 fn state_file_path() -> PathBuf {
-    data_dir().join("state").join("toolchains.json")
+    aadk_util::state_file_path("toolchains.json")
 }
 
 fn save_state(state: &State) -> io::Result<()> {

@@ -2,7 +2,6 @@ use std::io::Read;
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     fs, io,
-    net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -21,6 +20,10 @@ use aadk_proto::aadk::v1::{
     ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId,
     RunOutput, RunOutputKind, StartJobRequest, StreamJobEventsRequest, Timestamp,
     UpsertRunOutputsRequest,
+};
+use aadk_util::{
+    data_dir, expand_user, job_addr, now_millis, now_ts, observe_addr, project_addr,
+    serve_grpc_with_telemetry, write_json_atomic,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -175,31 +178,6 @@ impl ArtifactRecord {
 struct LogLine {
     stream: &'static str,
     line: String,
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn now_ts() -> aadk_proto::aadk::v1::Timestamp {
-    aadk_proto::aadk::v1::Timestamp {
-        unix_millis: now_millis(),
-    }
-}
-
-fn job_addr() -> String {
-    std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into())
-}
-
-fn project_addr() -> String {
-    std::env::var("AADK_PROJECT_ADDR").unwrap_or_else(|_| "127.0.0.1:50053".into())
-}
-
-fn observe_addr() -> String {
-    std::env::var("AADK_OBSERVE_ADDR").unwrap_or_else(|_| "127.0.0.1:50056".into())
 }
 
 async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
@@ -606,37 +584,8 @@ fn job_error_detail(
     }
 }
 
-fn expand_user(path: &str) -> PathBuf {
-    if path == "~" || path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            let rest = path.strip_prefix("~/").unwrap_or("");
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
-fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
-}
-
 fn state_file_path() -> PathBuf {
-    data_dir().join("state").join(STATE_FILE_NAME)
-}
-
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, payload)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    aadk_util::state_file_path(STATE_FILE_NAME)
 }
 
 fn load_state() -> BuildState {
@@ -2682,23 +2631,13 @@ impl BuildService for Svc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
-        )
-        .init();
-
-    let addr_str =
-        std::env::var("AADK_BUILD_ADDR").unwrap_or_else(|_| "127.0.0.1:50054".to_string());
-    let addr: SocketAddr = addr_str.parse()?;
-
-    let svc = Svc::default();
-    info!("aadk-build listening on {}", addr);
-
-    tonic::transport::Server::builder()
-        .add_service(BuildServiceServer::new(svc))
-        .serve(addr)
-        .await?;
-
-    Ok(())
+    serve_grpc_with_telemetry(
+        "aadk-build",
+        env!("CARGO_PKG_VERSION"),
+        "build",
+        "AADK_BUILD_ADDR",
+        aadk_util::DEFAULT_BUILD_ADDR,
+        |server| server.add_service(BuildServiceServer::new(Svc::default())),
+    )
+    .await
 }

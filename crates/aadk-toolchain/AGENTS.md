@@ -22,6 +22,7 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   (JobService helpers), crates/aadk-toolchain/src/hashing.rs (sha256 helpers),
   crates/aadk-toolchain/src/provenance.rs (provenance I/O), and crates/aadk-toolchain/src/cancel.rs;
   crates/aadk-toolchain/src/main.rs only wires the tonic server.
+- Service bootstrap, timestamps, and base data paths rely on `aadk-util` to keep defaults consistent.
 - Providers and versions come from a JSON catalog (crates/aadk-toolchain/catalog.json or
   AADK_TOOLCHAIN_CATALOG override).
 - Catalog pins SDK versions 36.0.0 and 35.0.2 plus NDK versions r29, r28c, r27d, and r26d for the
@@ -59,6 +60,10 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - AADK_TOOLCHAIN_CATALOG overrides the provider catalog path.
 - AADK_TOOLCHAIN_HOST overrides detected host (e.g., linux-aarch64, linux-x86_64).
 - AADK_TOOLCHAIN_HOST_FALLBACK provides a comma-separated fallback host list.
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=toolchain) when opt-in telemetry is enabled.
 
 ## Implementation notes
 - InstallToolchain clones artifact URL/hash when persisting InstalledToolchain so post-install metrics can reuse artifact metadata.

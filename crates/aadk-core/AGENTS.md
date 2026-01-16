@@ -14,7 +14,8 @@ Update this file whenever JobService behavior changes or when commits touching t
 - Core messages: Job, JobEvent, JobProgress, JobLogAppended, JobCompleted, JobFailed, ErrorDetail, RunId
 
 ## Current implementation details
-- Implementation lives in crates/aadk-core/src/main.rs with a tonic server.
+- Implementation lives in crates/aadk-core/src/main.rs with a tonic server; shared bootstrap and
+  path/time helpers come from `aadk-util`.
 - JobStore loads and persists job history/state to `~/.local/share/aadk/state/jobs.json`.
 - Each job has:
   - broadcast::Sender<JobEvent> for live streaming
@@ -45,6 +46,10 @@ Update this file whenever JobService behavior changes or when commits touching t
 - AADK_RUN_STREAM_MAX_DELAY_MS controls ordering delay window (default 1500ms).
 - AADK_RUN_STREAM_DISCOVERY_MS controls late job discovery polling (default 750ms).
 - AADK_RUN_STREAM_FLUSH_MS controls buffer flush cadence (default 200ms).
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=job) when opt-in telemetry is enabled.
 
 ## Prioritized TODO checklist by service
 - No core changes required for the workflow UI and run dashboards; keep StreamRunEvents defaults documented.

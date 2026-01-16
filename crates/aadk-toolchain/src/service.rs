@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use aadk_util::now_ts;
 use aadk_proto::aadk::v1::{
     toolchain_service_server::ToolchainService, CleanupToolchainCacheRequest,
     CleanupToolchainCacheResponse, CreateToolchainSetRequest, CreateToolchainSetResponse,
@@ -12,7 +13,7 @@ use aadk_proto::aadk::v1::{
     ListAvailableRequest, ListAvailableResponse, ListInstalledRequest, ListInstalledResponse,
     ListProvidersRequest, ListProvidersResponse, ListToolchainSetsRequest,
     ListToolchainSetsResponse, PageInfo, SetActiveToolchainSetRequest,
-    SetActiveToolchainSetResponse, Timestamp, ToolchainArtifact, ToolchainKind, ToolchainSet,
+    SetActiveToolchainSetResponse, ToolchainArtifact, ToolchainKind, ToolchainSet,
     UninstallToolchainRequest, UninstallToolchainResponse, UpdateToolchainRequest,
     UpdateToolchainResponse, VerifyToolchainRequest, VerifyToolchainResponse,
 };
@@ -65,14 +66,6 @@ impl Default for Svc {
             catalog: Arc::new(load_catalog()),
         }
     }
-}
-
-fn now_ts() -> Timestamp {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    Timestamp { unix_millis: ms }
 }
 
 impl Svc {

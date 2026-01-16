@@ -4,12 +4,9 @@ use aadk_proto::aadk::v1::{
     JobProgressUpdated, JobState, JobStateChanged, KeyValue, LogChunk, PublishJobEventRequest,
     RunId, StartJobRequest, StreamJobEventsRequest, ToolchainArtifact,
 };
+use aadk_util::job_addr;
 use tokio::sync::watch;
 use tonic::{transport::Channel, Status};
-
-pub(crate) fn job_addr() -> String {
-    std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into())
-}
 
 pub(crate) async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     let addr = job_addr();

@@ -13,7 +13,8 @@ Update this file whenever BuildService behavior changes or when commits touching
 - Shared messages: Artifact, ArtifactType, ArtifactFilter, BuildVariant, KeyValue, Job events (via JobService)
 
 ## Current implementation details
-- Implementation lives in crates/aadk-build/src/main.rs with a tonic server.
+- Implementation lives in crates/aadk-build/src/main.rs with a tonic server; shared bootstrap and
+  path/time helpers come from `aadk-util`.
 - Build requests:
   - Validate project_id and resolve to a path using ProjectService GetProject unless the value already looks like a path.
   - Reject empty/whitespace project_id values before starting the job.
@@ -47,6 +48,10 @@ Update this file whenever BuildService behavior changes or when commits touching
 - AADK_GRADLE_DAEMON and AADK_GRADLE_STACKTRACE control Gradle flags.
 - AADK_GRADLE_REQUIRE_WRAPPER forces the Gradle wrapper to be present.
 - AADK_GRADLE_USER_HOME overrides GRADLE_USER_HOME for builds.
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=build) when opt-in telemetry is enabled.
 
 ## Implementation notes
 - Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.

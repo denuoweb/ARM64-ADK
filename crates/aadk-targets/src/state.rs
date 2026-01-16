@@ -143,11 +143,7 @@ impl TargetInventoryEntry {
 }
 
 pub(crate) fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
+    aadk_util::data_dir()
 }
 
 pub(crate) fn load_state() -> State {
@@ -273,16 +269,9 @@ pub(crate) fn merge_inventory_targets(
 }
 
 fn state_file_path() -> PathBuf {
-    data_dir().join("state").join(STATE_FILE_NAME)
+    aadk_util::state_file_path(STATE_FILE_NAME)
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    aadk_util::write_json_atomic(path, value)
 }

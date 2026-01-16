@@ -14,7 +14,8 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - Shared messages: Id, Project, Template, PageInfo, Timestamp, KeyValue
 
 ## Current implementation details
-- Implementation lives in crates/aadk-project/src/main.rs with a tonic server.
+- Implementation lives in crates/aadk-project/src/main.rs with a tonic server; shared bootstrap
+  and path/time helpers come from `aadk-util`.
 - State is persisted in ~/.local/share/aadk/state/projects.json and cached in-memory.
 - list_templates loads a JSON registry from AADK_PROJECT_TEMPLATES (or templates/registry.json),
   skipping invalid entries and validating resolved defaults.
@@ -39,6 +40,10 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 
 ## Environment / config
 - AADK_PROJECT_ADDR sets the bind address (default 127.0.0.1:50053).
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=project) when opt-in telemetry is enabled.
 
 ## Prioritized TODO checklist by service
 - None (workflow UI consumes existing project RPCs).

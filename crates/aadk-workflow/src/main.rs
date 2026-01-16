@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::Path, time::SystemTime};
+use std::path::Path;
 
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient,
@@ -16,6 +16,10 @@ use aadk_proto::aadk::v1::{
     OpenProjectRequest, PublishJobEventRequest, RunId, RunOutput, RunOutputKind, StartJobRequest,
     StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunRequest,
     WorkflowPipelineRequest, WorkflowPipelineResponse,
+};
+use aadk_util::{
+    build_addr, job_addr, now_millis, observe_addr, project_addr, serve_grpc_with_telemetry,
+    targets_addr, toolchain_addr,
 };
 use futures_util::StreamExt;
 use tonic::{transport::Channel, Request, Response, Status};
@@ -35,45 +39,6 @@ struct WorkflowConfig {
 #[derive(Clone)]
 struct Svc {
     config: WorkflowConfig,
-}
-
-fn env_addr(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn job_addr() -> String {
-    env_addr("AADK_JOB_ADDR", "127.0.0.1:50051")
-}
-
-fn toolchain_addr() -> String {
-    env_addr("AADK_TOOLCHAIN_ADDR", "127.0.0.1:50052")
-}
-
-fn project_addr() -> String {
-    env_addr("AADK_PROJECT_ADDR", "127.0.0.1:50053")
-}
-
-fn build_addr() -> String {
-    env_addr("AADK_BUILD_ADDR", "127.0.0.1:50054")
-}
-
-fn targets_addr() -> String {
-    env_addr("AADK_TARGETS_ADDR", "127.0.0.1:50055")
-}
-
-fn observe_addr() -> String {
-    env_addr("AADK_OBSERVE_ADDR", "127.0.0.1:50056")
-}
-
-fn workflow_addr() -> String {
-    env_addr("AADK_WORKFLOW_ADDR", "127.0.0.1:50057")
-}
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 fn metric(key: &str, value: impl ToString) -> KeyValue {
@@ -2117,13 +2082,6 @@ impl WorkflowService for Svc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
-        )
-        .init();
-
-    let addr: SocketAddr = workflow_addr().parse()?;
     let svc = Svc {
         config: WorkflowConfig {
             job_addr: job_addr(),
@@ -2135,10 +2093,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    info!("aadk-workflow listening on {}", addr);
-    tonic::transport::Server::builder()
-        .add_service(WorkflowServiceServer::new(svc))
-        .serve(addr)
-        .await?;
-    Ok(())
+    serve_grpc_with_telemetry(
+        "aadk-workflow",
+        env!("CARGO_PKG_VERSION"),
+        "workflow",
+        "AADK_WORKFLOW_ADDR",
+        aadk_util::DEFAULT_WORKFLOW_ADDR,
+        |server| server.add_service(WorkflowServiceServer::new(svc)),
+    )
+    .await
 }

@@ -12,7 +12,8 @@ Update this file whenever WorkflowService behavior changes or when commits touch
 - RPCs: RunPipeline
 
 ## Current implementation details
-- Implementation lives in crates/aadk-workflow/src/main.rs with a tonic server.
+- Implementation lives in crates/aadk-workflow/src/main.rs with a tonic server; shared bootstrap,
+  address defaults, and time helpers come from `aadk-util`.
 - RunPipeline creates (or reuses) a JobService job of type workflow.pipeline and returns run_id/job_id.
 - If WorkflowPipelineOptions is omitted, the pipeline infers which steps to run from inputs.
 - Steps include: project.create, project.open, toolchain.verify, build.run, targets.install,
@@ -32,6 +33,10 @@ Update this file whenever WorkflowService behavior changes or when commits touch
 - AADK_WORKFLOW_ADDR sets the bind address (default 127.0.0.1:50057).
 - AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_BUILD_ADDR,
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR configure upstream services.
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+
+## Telemetry
+- Emits service.start (service=workflow) when opt-in telemetry is enabled.
 
 ## Prioritized TODO checklist by service
 - None (run outputs are recorded via ObserveService inventory).

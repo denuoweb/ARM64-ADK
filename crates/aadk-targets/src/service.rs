@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use aadk_util::{now_millis, now_ts};
 use aadk_proto::aadk::v1::{
     job_service_client::JobServiceClient, target_service_server::TargetService, ErrorCode,
     GetCuttlefishStatusRequest, GetCuttlefishStatusResponse, GetDefaultTargetRequest,
@@ -8,7 +9,7 @@ use aadk_proto::aadk::v1::{
     ListTargetsRequest, ListTargetsResponse, LogcatEvent, ResolveCuttlefishBuildRequest,
     ResolveCuttlefishBuildResponse, SetDefaultTargetRequest, SetDefaultTargetResponse,
     StartCuttlefishRequest, StartCuttlefishResponse, StopAppRequest, StopAppResponse,
-    StopCuttlefishRequest, StopCuttlefishResponse, StreamLogcatRequest, Target, Timestamp,
+    StopCuttlefishRequest, StopCuttlefishResponse, StreamLogcatRequest, Target,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -50,18 +51,6 @@ impl Default for Svc {
             state: Arc::new(Mutex::new(load_state())),
         }
     }
-}
-
-fn now_ts() -> Timestamp {
-    let ms = now_millis();
-    Timestamp { unix_millis: ms }
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 enum TargetProvider {
