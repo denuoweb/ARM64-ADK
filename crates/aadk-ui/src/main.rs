@@ -2,13 +2,13 @@ mod commands;
 mod config;
 mod models;
 mod pages;
+mod ui_events;
 mod utils;
 mod worker;
 
 use std::{
-    sync::{mpsc, Arc},
+    sync::Arc,
     thread,
-    time::Duration,
 };
 
 use gtk::gdk;
@@ -16,6 +16,8 @@ use gtk::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk::gio::prelude::ListModelExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use glib::prelude::*;
+use tokio::sync::mpsc;
 
 use commands::{AppEvent, UiCommand};
 use config::AppConfig;
@@ -23,7 +25,9 @@ use pages::{
     page_console, page_evidence, page_home, page_jobs_history, page_projects, page_settings,
     page_targets, page_toolchains, page_workflow,
 };
+use ui_events::{UiEventQueue, DEFAULT_EVENT_QUEUE_SIZE};
 use worker::{handle_command, AppState};
+use aadk_telemetry as telemetry;
 
 fn main() {
     let app = gtk::Application::builder()
@@ -60,6 +64,17 @@ fn default_window_size() -> (i32, i32) {
     (width, height)
 }
 
+fn telemetry_env_override(name: &str) -> Option<bool> {
+    match std::env::var(name) {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
 fn build_ui(app: &gtk::Application) {
     let (default_width, default_height) = default_window_size();
     let window = gtk::ApplicationWindow::builder()
@@ -71,13 +86,47 @@ fn build_ui(app: &gtk::Application) {
         .build();
 
     let cfg = Arc::new(std::sync::Mutex::new(AppConfig::load()));
+    let (usage_enabled, crash_enabled, install_id) = {
+        let mut cfg = cfg.lock().unwrap();
+        let usage_enabled =
+            telemetry_env_override("AADK_TELEMETRY").unwrap_or(cfg.telemetry_usage_enabled);
+        let crash_enabled = telemetry_env_override("AADK_TELEMETRY_CRASH")
+            .unwrap_or(cfg.telemetry_crash_enabled);
+        cfg.telemetry_usage_enabled = usage_enabled;
+        cfg.telemetry_crash_enabled = crash_enabled;
+        if (usage_enabled || crash_enabled) && cfg.telemetry_install_id.trim().is_empty() {
+            cfg.telemetry_install_id = telemetry::generate_install_id();
+            if let Err(err) = cfg.save() {
+                eprintln!("Failed to persist UI config: {err}");
+            }
+        }
+        (
+            usage_enabled,
+            crash_enabled,
+            cfg.telemetry_install_id.clone(),
+        )
+    };
+    telemetry::init(telemetry::TelemetryOptions {
+        app_name: "aadk-ui",
+        app_version: env!("CARGO_PKG_VERSION"),
+        usage_enabled,
+        crash_enabled,
+        install_id: if install_id.trim().is_empty() {
+            None
+        } else {
+            Some(install_id)
+        },
+    });
+    telemetry::event("app.start", &[]);
     let state = Arc::new(std::sync::Mutex::new(AppState::default()));
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>();
-    let (ev_tx, ev_rx) = mpsc::channel::<AppEvent>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>(128);
+    let (event_queue, mut notify_rx) = UiEventQueue::new(DEFAULT_EVENT_QUEUE_SIZE);
+    let ui_events = event_queue.sender();
 
     // Background thread with tokio runtime; holds a private copy of AppState for worker actions.
     // State mutations are pushed to GTK via AppEvent.
+    let mut cmd_rx = cmd_rx;
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -86,10 +135,44 @@ fn build_ui(app: &gtk::Application) {
 
         rt.block_on(async move {
             let mut worker_state = AppState::default();
+            let mut stream_tasks = tokio::task::JoinSet::new();
 
-            while let Ok(cmd) = cmd_rx.recv() {
-                if let Err(e) = handle_command(cmd, &mut worker_state, ev_tx.clone()).await {
-                    eprintln!("worker error: {e}");
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => {
+                        let Some(cmd) = cmd else { break };
+                        let cmd_name = cmd.name();
+                        telemetry::event("ui.command.start", &[("command", cmd_name)]);
+                        let result = handle_command(
+                            cmd,
+                            &mut worker_state,
+                            ui_events.clone(),
+                            &mut stream_tasks,
+                        )
+                        .await;
+                        match result {
+                            Ok(()) => {
+                                telemetry::event(
+                                    "ui.command.result",
+                                    &[("command", cmd_name), ("result", "ok")],
+                                );
+                            }
+                            Err(err) => {
+                                telemetry::event(
+                                    "ui.command.result",
+                                    &[("command", cmd_name), ("result", "err")],
+                                );
+                                eprintln!("worker error: {err}");
+                            }
+                        }
+                    }
+                    Some(result) = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
+                        if let Err(err) = result {
+                            if !err.is_cancelled() {
+                                eprintln!("stream task error: {err}");
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -133,6 +216,12 @@ fn build_ui(app: &gtk::Application) {
     stack.add_titled(&evidence.root, Some("evidence"), "Evidence");
     stack.add_titled(&settings.root, Some("settings"), "Settings");
 
+    stack.connect_visible_child_notify(|stack| {
+        if let Some(name) = stack.visible_child_name() {
+            telemetry::event("ui.page.view", &[("page", name.as_str())]);
+        }
+    });
+
     // Clone page handles for event routing closure.
     let home_page_for_events = home.clone();
     let workflow_for_events = workflow.clone();
@@ -146,10 +235,11 @@ fn build_ui(app: &gtk::Application) {
 
     // Event routing: drain worker events on the GTK thread.
     let state_for_events = state.clone();
-    glib::source::timeout_add_local(Duration::from_millis(50), move || {
-        loop {
-            match ev_rx.try_recv() {
-                Ok(ev) => match ev {
+    let event_queue_for_events = event_queue.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while notify_rx.recv().await.is_some() {
+            for ev in event_queue_for_events.drain() {
+                match ev {
                     AppEvent::Log { page, line } => match page {
                         "home" => home_page_for_events.append(&line),
                         "workflow" => workflow_for_events.append(&line),
@@ -225,12 +315,9 @@ fn build_ui(app: &gtk::Application) {
                             }
                         }
                     }
-                },
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+                }
             }
         }
-        glib::ControlFlow::Continue
     });
 
     // Hook cancel button to current_job_id from GTK-side state
@@ -242,7 +329,7 @@ fn build_ui(app: &gtk::Application) {
             let cfg = cfg.lock().unwrap().clone();
             // If no current job, do nothing (silent).
             if state.lock().unwrap().current_job_id.is_some() {
-                cmd_tx.send(UiCommand::HomeCancelCurrent { cfg }).ok();
+                cmd_tx.try_send(UiCommand::HomeCancelCurrent { cfg }).ok();
             }
         });
     }

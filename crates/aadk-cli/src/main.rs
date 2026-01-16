@@ -3,9 +3,13 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
+use aadk_util::{
+    collect_job_history, data_dir, default_export_path, now_millis, write_json_atomic,
+    DEFAULT_BUILD_ADDR, DEFAULT_JOB_ADDR, DEFAULT_OBSERVE_ADDR, DEFAULT_PROJECT_ADDR,
+    DEFAULT_TARGETS_ADDR, DEFAULT_TOOLCHAIN_ADDR, DEFAULT_WORKFLOW_ADDR,
+};
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient, job_event::Payload as JobPayload,
     job_service_client::JobServiceClient, observe_service_client::ObserveServiceClient,
@@ -25,6 +29,7 @@ use aadk_proto::aadk::v1::{
     StreamRunEventsRequest, UninstallToolchainRequest, UpdateToolchainRequest,
     WorkflowPipelineOptions, WorkflowPipelineRequest,
 };
+use aadk_telemetry as telemetry;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -538,27 +543,8 @@ struct LogExportEvent {
     data: Option<String>,
 }
 
-fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
-}
-
 fn config_path() -> PathBuf {
     data_dir().join("state").join(CLI_CONFIG_FILE)
-}
-
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, payload)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 fn load_cli_config() -> CliConfig {
@@ -701,7 +687,7 @@ fn default_job_addr() -> String {
     if !cfg.job_addr.trim().is_empty() {
         return cfg.job_addr;
     }
-    "127.0.0.1:50051".into()
+    DEFAULT_JOB_ADDR.into()
 }
 fn default_toolchain_addr() -> String {
     if let Ok(val) = std::env::var("AADK_TOOLCHAIN_ADDR") {
@@ -711,7 +697,7 @@ fn default_toolchain_addr() -> String {
     if !cfg.toolchain_addr.trim().is_empty() {
         return cfg.toolchain_addr;
     }
-    "127.0.0.1:50052".into()
+    DEFAULT_TOOLCHAIN_ADDR.into()
 }
 fn default_targets_addr() -> String {
     if let Ok(val) = std::env::var("AADK_TARGETS_ADDR") {
@@ -721,7 +707,7 @@ fn default_targets_addr() -> String {
     if !cfg.targets_addr.trim().is_empty() {
         return cfg.targets_addr;
     }
-    "127.0.0.1:50055".into()
+    DEFAULT_TARGETS_ADDR.into()
 }
 fn default_project_addr() -> String {
     if let Ok(val) = std::env::var("AADK_PROJECT_ADDR") {
@@ -731,7 +717,7 @@ fn default_project_addr() -> String {
     if !cfg.project_addr.trim().is_empty() {
         return cfg.project_addr;
     }
-    "127.0.0.1:50053".into()
+    DEFAULT_PROJECT_ADDR.into()
 }
 fn default_build_addr() -> String {
     if let Ok(val) = std::env::var("AADK_BUILD_ADDR") {
@@ -741,7 +727,7 @@ fn default_build_addr() -> String {
     if !cfg.build_addr.trim().is_empty() {
         return cfg.build_addr;
     }
-    "127.0.0.1:50054".into()
+    DEFAULT_BUILD_ADDR.into()
 }
 fn default_observe_addr() -> String {
     if let Ok(val) = std::env::var("AADK_OBSERVE_ADDR") {
@@ -751,7 +737,7 @@ fn default_observe_addr() -> String {
     if !cfg.observe_addr.trim().is_empty() {
         return cfg.observe_addr;
     }
-    "127.0.0.1:50056".into()
+    DEFAULT_OBSERVE_ADDR.into()
 }
 fn default_workflow_addr() -> String {
     if let Ok(val) = std::env::var("AADK_WORKFLOW_ADDR") {
@@ -761,12 +747,64 @@ fn default_workflow_addr() -> String {
     if !cfg.workflow_addr.trim().is_empty() {
         return cfg.workflow_addr;
     }
-    "127.0.0.1:50057".into()
+    DEFAULT_WORKFLOW_ADDR.into()
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+fn command_name(cmd: &Cmd) -> &'static str {
+    match cmd {
+        Cmd::Job { cmd } => match cmd {
+            JobCmd::Run { .. } => "job.run",
+            JobCmd::List { .. } => "job.list",
+            JobCmd::Watch { .. } => "job.watch",
+            JobCmd::WatchRun { .. } => "job.watch_run",
+            JobCmd::History { .. } => "job.history",
+            JobCmd::Export { .. } => "job.export",
+            JobCmd::Cancel { .. } => "job.cancel",
+        },
+        Cmd::Toolchain { cmd } => match cmd {
+            ToolchainCmd::ListProviders { .. } => "toolchain.list_providers",
+            ToolchainCmd::ListSets { .. } => "toolchain.list_sets",
+            ToolchainCmd::CreateSet { .. } => "toolchain.create_set",
+            ToolchainCmd::SetActive { .. } => "toolchain.set_active",
+            ToolchainCmd::GetActive { .. } => "toolchain.get_active",
+            ToolchainCmd::Update { .. } => "toolchain.update",
+            ToolchainCmd::Uninstall { .. } => "toolchain.uninstall",
+            ToolchainCmd::CleanupCache { .. } => "toolchain.cleanup_cache",
+        },
+        Cmd::Targets { cmd } => match cmd {
+            TargetsCmd::List { .. } => "targets.list",
+            TargetsCmd::SetDefault { .. } => "targets.set_default",
+            TargetsCmd::GetDefault { .. } => "targets.get_default",
+            TargetsCmd::StartCuttlefish { .. } => "targets.start_cuttlefish",
+            TargetsCmd::StopCuttlefish { .. } => "targets.stop_cuttlefish",
+            TargetsCmd::CuttlefishStatus { .. } => "targets.cuttlefish_status",
+            TargetsCmd::InstallCuttlefish { .. } => "targets.install_cuttlefish",
+        },
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::ListTemplates { .. } => "project.list_templates",
+            ProjectCmd::ListRecent { .. } => "project.list_recent",
+            ProjectCmd::Create { .. } => "project.create",
+            ProjectCmd::Open { .. } => "project.open",
+            ProjectCmd::SetConfig { .. } => "project.set_config",
+            ProjectCmd::UseActiveDefaults { .. } => "project.use_active_defaults",
+        },
+        Cmd::Observe { cmd } => match cmd {
+            ObserveCmd::ListRuns { .. } => "observe.list_runs",
+            ObserveCmd::ListOutputs { .. } => "observe.list_outputs",
+            ObserveCmd::ExportSupport { .. } => "observe.export_support",
+            ObserveCmd::ExportEvidence { .. } => "observe.export_evidence",
+        },
+        Cmd::Build { cmd } => match cmd {
+            BuildCmd::Run { .. } => "build.run",
+            BuildCmd::ListArtifacts { .. } => "build.list_artifacts",
+        },
+        Cmd::Workflow { cmd } => match cmd {
+            WorkflowCmd::RunPipeline { .. } => "workflow.run_pipeline",
+        },
+    }
+}
+
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
@@ -2320,53 +2358,6 @@ fn render_job_event(event: &JobEvent) -> bool {
     }
 }
 
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn default_export_path(prefix: &str, job_id: &str) -> PathBuf {
-    let ts = now_millis();
-    data_dir()
-        .join("state")
-        .join(format!("{prefix}-{job_id}-{ts}.json"))
-}
-
-async fn collect_job_history(
-    client: &mut JobServiceClient<Channel>,
-    job_id: &str,
-) -> Result<Vec<JobEvent>, Box<dyn std::error::Error>> {
-    let mut events = Vec::new();
-    let mut page_token = String::new();
-    loop {
-        let resp = client
-            .list_job_history(ListJobHistoryRequest {
-                job_id: Some(Id {
-                    value: job_id.to_string(),
-                }),
-                page: Some(Pagination {
-                    page_size: 200,
-                    page_token: page_token.clone(),
-                }),
-                filter: None,
-            })
-            .await?
-            .into_inner();
-        events.extend(resp.events);
-        let next_token = resp
-            .page_info
-            .map(|page_info| page_info.next_page_token)
-            .unwrap_or_default();
-        if next_token.is_empty() {
-            break;
-        }
-        page_token = next_token;
-    }
-    Ok(events)
-}
-
 fn split_tokens(values: &[String]) -> Vec<String> {
     values
         .iter()
@@ -2761,4 +2752,24 @@ fn render_artifact(artifact: &Artifact) {
 async fn connect(addr: &str) -> Result<Channel, Box<dyn std::error::Error>> {
     let endpoint = format!("http://{addr}");
     Ok(Channel::from_shared(endpoint)?.connect().await?)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    telemetry::init_with_env("aadk-cli", env!("CARGO_PKG_VERSION"));
+    let cmd_name = command_name(&cli.cmd);
+    telemetry::event("cli.command.start", &[("command", cmd_name)]);
+    let result = run(cli).await;
+    match &result {
+        Ok(()) => telemetry::event(
+            "cli.command.result",
+            &[("command", cmd_name), ("result", "ok")],
+        ),
+        Err(_) => telemetry::event(
+            "cli.command.result",
+            &[("command", cmd_name), ("result", "err")],
+        ),
+    }
+    result
 }

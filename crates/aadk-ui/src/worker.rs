@@ -1,5 +1,10 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
+use aadk_util::{collect_job_history, default_export_path, now_millis};
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient, job_event::Payload as JobPayload,
     job_service_client::JobServiceClient, observe_service_client::ObserveServiceClient,
@@ -26,13 +31,23 @@ use serde::Serialize;
 use tonic::transport::Channel;
 
 use crate::commands::{AppEvent, UiCommand};
-use crate::config::{data_dir, write_json_atomic, AppConfig};
+use crate::config::{write_json_atomic, AppConfig};
 use crate::models::{ProjectTemplateOption, TargetOption, ToolchainSetOption};
+use crate::ui_events::UiEventSender;
 use crate::utils::parse_list_tokens;
 
-#[derive(Clone, Default)]
 pub(crate) struct AppState {
     pub(crate) current_job_id: Option<String>,
+    home_stream: Option<tokio::task::AbortHandle>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            current_job_id: None,
+            home_stream: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -192,13 +207,6 @@ fn latest_installed_by_kind(
                 .map(|ts| ts.unix_millis)
                 .unwrap_or_default()
         })
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 impl JobSummary {
@@ -500,7 +508,8 @@ fn format_artifact_line(artifact: &Artifact) -> String {
 pub(crate) async fn handle_command(
     cmd: UiCommand,
     worker_state: &mut AppState,
-    ui: mpsc::Sender<AppEvent>,
+    ui: UiEventSender,
+    stream_tasks: &mut tokio::task::JoinSet<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         UiCommand::HomeStartJob {
@@ -570,8 +579,13 @@ pub(crate) async fn handle_command(
                 state: "Queued".into(),
             })
             .ok();
-
-            stream_job_events_home(&cfg.job_addr, &job_id, ui.clone()).await?;
+            start_home_stream(
+                worker_state,
+                stream_tasks,
+                cfg.job_addr.clone(),
+                job_id.clone(),
+                ui.clone(),
+            );
         }
 
         UiCommand::HomeWatchJob { cfg, job_id } => {
@@ -595,8 +609,13 @@ pub(crate) async fn handle_command(
                 line: format!("Watching job: {job_id}\n"),
             })
             .ok();
-
-            stream_job_events_home(&cfg.job_addr, &job_id, ui.clone()).await?;
+            start_home_stream(
+                worker_state,
+                stream_tasks,
+                cfg.job_addr.clone(),
+                job_id.clone(),
+                ui.clone(),
+            );
         }
 
         UiCommand::HomeCancelCurrent { cfg } => {
@@ -1147,7 +1166,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await
                     {
@@ -1215,7 +1234,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await
                     {
@@ -1280,7 +1299,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await
                     {
@@ -1335,7 +1354,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "toolchains", ui_stream).await
                     {
@@ -1570,7 +1589,7 @@ pub(crate) async fn handle_command(
                             let job_addr = cfg.job_addr.clone();
                             let ui_stream = ui.clone();
                             let ui_err = ui.clone();
-                            tokio::spawn(async move {
+                            stream_tasks.spawn(async move {
                                 if let Err(err) = stream_job_events(
                                     job_addr,
                                     job_id.clone(),
@@ -2280,7 +2299,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "projects", ui_stream).await
                     {
@@ -2719,7 +2738,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "targets", ui_stream).await
                     {
@@ -2805,7 +2824,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "targets", ui_stream).await
                     {
@@ -2854,7 +2873,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "targets", ui_stream).await
                     {
@@ -2967,7 +2986,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "targets", ui_stream).await
                     {
@@ -3054,7 +3073,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), "targets", ui_stream).await
                     {
@@ -3425,7 +3444,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), page, ui_stream).await
                     {
@@ -3490,7 +3509,7 @@ pub(crate) async fn handle_command(
                 let job_addr = cfg.job_addr.clone();
                 let ui_stream = ui.clone();
                 let ui_err = ui.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     if let Err(err) =
                         stream_job_events(job_addr, job_id.clone(), page, ui_stream).await
                     {
@@ -3529,7 +3548,7 @@ pub(crate) async fn handle_command(
             let job_addr = cfg.job_addr.clone();
             let ui_stream = ui.clone();
             let ui_err = ui.clone();
-            tokio::spawn(async move {
+            stream_tasks.spawn(async move {
                 if let Err(err) = stream_run_events(
                     job_addr,
                     run_id_value.clone(),
@@ -3676,7 +3695,7 @@ pub(crate) async fn handle_command(
             let job_addr = cfg.job_addr.clone();
             let ui_stream = ui.clone();
             let ui_err = ui.clone();
-            tokio::spawn(async move {
+            stream_tasks.spawn(async move {
                 if let Err(err) = stream_run_events(
                     job_addr,
                     stream_run_id.clone(),
@@ -3785,7 +3804,7 @@ pub(crate) async fn handle_command(
             let job_addr = cfg.job_addr.clone();
             let ui_stream = ui.clone();
             let ui_err = ui.clone();
-            tokio::spawn(async move {
+            stream_tasks.spawn(async move {
                 if let Err(err) =
                     stream_job_events(job_addr, job_id.clone(), "console", ui_stream).await
                 {
@@ -3885,50 +3904,33 @@ pub(crate) async fn handle_command(
     Ok(())
 }
 
-fn default_export_path(prefix: &str, job_id: &str) -> PathBuf {
-    let ts = now_millis();
-    data_dir()
-        .join("state")
-        .join(format!("{prefix}-{job_id}-{ts}.json"))
-}
-
-async fn collect_job_history(
-    client: &mut JobServiceClient<Channel>,
-    job_id: &str,
-) -> Result<Vec<JobEvent>, Box<dyn std::error::Error>> {
-    let mut events = Vec::new();
-    let mut page_token = String::new();
-    loop {
-        let resp = client
-            .list_job_history(ListJobHistoryRequest {
-                job_id: Some(Id {
-                    value: job_id.to_string(),
-                }),
-                page: Some(Pagination {
-                    page_size: 200,
-                    page_token: page_token.clone(),
-                }),
-                filter: None,
-            })
-            .await?
-            .into_inner();
-        events.extend(resp.events);
-        let next_token = resp
-            .page_info
-            .map(|page_info| page_info.next_page_token)
-            .unwrap_or_default();
-        if next_token.is_empty() {
-            break;
-        }
-        page_token = next_token;
+fn start_home_stream(
+    worker_state: &mut AppState,
+    stream_tasks: &mut tokio::task::JoinSet<()>,
+    job_addr: String,
+    job_id: String,
+    ui: UiEventSender,
+) {
+    if let Some(handle) = worker_state.home_stream.take() {
+        handle.abort();
     }
-    Ok(events)
+    let job_id_for_log = job_id.clone();
+    let ui_err = ui.clone();
+    let abort = stream_tasks.spawn(async move {
+        if let Err(err) = stream_job_events_home(&job_addr, &job_id, ui.clone()).await {
+            let _ = ui_err.send(AppEvent::Log {
+                page: "home",
+                line: format!("job stream error ({job_id_for_log}): {err}\n"),
+            });
+        }
+    });
+    worker_state.home_stream = Some(abort);
 }
 
 async fn stream_job_events_home(
     addr: &str,
     job_id: &str,
-    ui: mpsc::Sender<AppEvent>,
+    ui: UiEventSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = JobServiceClient::new(connect(addr).await?);
     let mut stream = client
@@ -3940,6 +3942,8 @@ async fn stream_job_events_home(
         })
         .await?
         .into_inner();
+    let mut last_progress: Option<(u32, Instant)> = None;
+    let progress_throttle = Duration::from_millis(250);
 
     while let Some(item) = stream.next().await {
         match item {
@@ -3965,10 +3969,21 @@ async fn stream_job_events_home(
                         }
                         JobPayload::Progress(progress) => {
                             if let Some(p) = progress.progress.as_ref() {
-                                ui.send(AppEvent::HomeProgress {
-                                    progress: format!("{}% {}", p.percent, p.phase),
-                                })
-                                .ok();
+                                let now = Instant::now();
+                                let should_emit = match last_progress {
+                                    Some((last_percent, last_at)) => {
+                                        p.percent != last_percent
+                                            || now.duration_since(last_at) >= progress_throttle
+                                    }
+                                    None => true,
+                                };
+                                if should_emit {
+                                    ui.send(AppEvent::HomeProgress {
+                                        progress: format!("{}% {}", p.percent, p.phase),
+                                    })
+                                    .ok();
+                                    last_progress = Some((p.percent, now));
+                                }
                             }
                         }
                         JobPayload::Completed(completed) => {
@@ -4031,7 +4046,7 @@ async fn stream_job_events(
     addr: String,
     job_id: String,
     page: &'static str,
-    ui: mpsc::Sender<AppEvent>,
+    ui: UiEventSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = JobServiceClient::new(connect(&addr).await?);
     let mut stream = client
@@ -4081,7 +4096,7 @@ async fn stream_run_events(
     correlation_id: String,
     include_history: bool,
     page: &'static str,
-    ui: mpsc::Sender<AppEvent>,
+    ui: UiEventSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = JobServiceClient::new(connect(&addr).await?);
     let mut stream = client

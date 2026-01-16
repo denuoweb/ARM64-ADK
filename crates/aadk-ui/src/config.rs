@@ -24,24 +24,28 @@ pub(crate) struct AppConfig {
     pub(crate) last_job_toolchain_set_id: String,
     pub(crate) last_job_id: String,
     pub(crate) last_correlation_id: String,
+    pub(crate) telemetry_usage_enabled: bool,
+    pub(crate) telemetry_crash_enabled: bool,
+    pub(crate) telemetry_install_id: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            job_addr: std::env::var("AADK_JOB_ADDR").unwrap_or_else(|_| "127.0.0.1:50051".into()),
+            job_addr: std::env::var("AADK_JOB_ADDR")
+                .unwrap_or_else(|_| aadk_util::DEFAULT_JOB_ADDR.into()),
             toolchain_addr: std::env::var("AADK_TOOLCHAIN_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50052".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_TOOLCHAIN_ADDR.into()),
             project_addr: std::env::var("AADK_PROJECT_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50053".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_PROJECT_ADDR.into()),
             build_addr: std::env::var("AADK_BUILD_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50054".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_BUILD_ADDR.into()),
             targets_addr: std::env::var("AADK_TARGETS_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50055".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_TARGETS_ADDR.into()),
             observe_addr: std::env::var("AADK_OBSERVE_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50056".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_OBSERVE_ADDR.into()),
             workflow_addr: std::env::var("AADK_WORKFLOW_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:50057".into()),
+                .unwrap_or_else(|_| aadk_util::DEFAULT_WORKFLOW_ADDR.into()),
             last_job_type: String::new(),
             last_job_params: String::new(),
             last_job_project_id: String::new(),
@@ -49,6 +53,9 @@ impl Default for AppConfig {
             last_job_toolchain_set_id: String::new(),
             last_job_id: String::new(),
             last_correlation_id: String::new(),
+            telemetry_usage_enabled: false,
+            telemetry_crash_enabled: false,
+            telemetry_install_id: String::new(),
         }
     }
 }
@@ -99,6 +106,9 @@ impl AppConfig {
                     cfg.last_job_toolchain_set_id = file_cfg.last_job_toolchain_set_id;
                     cfg.last_job_id = file_cfg.last_job_id;
                     cfg.last_correlation_id = file_cfg.last_correlation_id;
+                    cfg.telemetry_usage_enabled = file_cfg.telemetry_usage_enabled;
+                    cfg.telemetry_crash_enabled = file_cfg.telemetry_crash_enabled;
+                    cfg.telemetry_install_id = file_cfg.telemetry_install_id;
                 }
                 Err(err) => {
                     eprintln!("Failed to parse {}: {err}", path.display());
@@ -119,11 +129,7 @@ impl AppConfig {
 }
 
 pub(crate) fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/aadk")
-    } else {
-        PathBuf::from("/tmp/aadk")
-    }
+    aadk_util::data_dir()
 }
 
 fn ui_config_path() -> PathBuf {
@@ -131,12 +137,5 @@ fn ui_config_path() -> PathBuf {
 }
 
 pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    aadk_util::write_json_atomic(path, value)
 }

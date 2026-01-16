@@ -19,13 +19,16 @@ Update this file whenever CLI behavior changes or when commits touching this cra
   - build run / list-artifacts (module/variant_name/tasks + artifact filters, grouped by module)
   - workflow run-pipeline (multi-step orchestration with optional explicit steps)
 - Each command connects directly to the target gRPC service using env/config defaults.
+- Job export helpers and shared data-dir defaults are provided by `aadk-util`.
 - CLI config persists to `~/.local/share/aadk/state/cli-config.json` with last job selections.
+- Telemetry is opt-in via env (AADK_TELEMETRY, AADK_TELEMETRY_CRASH) and emits cli.command.* events.
 - Observe export commands include optional metadata fields (project/target/toolchain ids), currently unset.
 - Long-running commands accept --job-id, --correlation-id, and --run-id to attach to existing jobs and group workflows; job list filters can target correlation_id/run_id.
 
 ## Environment / config
 - AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_BUILD_ADDR, AADK_TARGETS_ADDR,
   AADK_OBSERVE_ADDR, AADK_WORKFLOW_ADDR (defaults to 127.0.0.1 ports).
+- AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable usage/crash reporting (local spool).
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-ui.)

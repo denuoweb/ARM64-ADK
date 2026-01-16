@@ -1,15 +1,14 @@
-use std::{
-    path::Path,
-    sync::{mpsc, Arc},
-};
+use std::{path::Path, sync::Arc};
 
 use aadk_proto::aadk::v1::{
     ArtifactFilter, ArtifactType, BuildVariant, KeyValue, RunOutputKind, ToolchainKind,
     WorkflowPipelineOptions,
 };
+use aadk_telemetry as telemetry;
 use gtk::gio::prelude::FileExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use tokio::sync::mpsc;
 
 use crate::commands::UiCommand;
 use crate::config::AppConfig;
@@ -28,14 +27,24 @@ pub(crate) struct Page {
 impl Page {
     pub(crate) fn append(&self, s: &str) {
         const MAX_CHARS: i32 = 200_000;
+        const TRIM_CHARS: i32 = 20_000;
+        const MAX_LINES: i32 = 2_000;
 
         let mut end = self.buffer.end_iter();
         self.buffer.insert(&mut end, s);
 
+        let line_count = self.buffer.line_count();
+        if line_count > MAX_LINES {
+            let mut start = self.buffer.start_iter();
+            let mut cut = self.buffer.start_iter();
+            cut.forward_lines(line_count - MAX_LINES);
+            self.buffer.delete(&mut start, &mut cut);
+        }
+
         if self.buffer.char_count() > MAX_CHARS {
             let mut start = self.buffer.start_iter();
             let mut cut = self.buffer.start_iter();
-            cut.forward_chars(20_000);
+            cut.forward_chars(TRIM_CHARS);
             self.buffer.delete(&mut start, &mut cut);
         }
 
@@ -535,7 +544,7 @@ pub(crate) fn page_home(
 
         let cfg = cfg_start.lock().unwrap().clone();
         cmd_tx_start
-            .send(UiCommand::HomeStartJob {
+            .try_send(UiCommand::HomeStartJob {
                 cfg,
                 job_type,
                 params_raw,
@@ -564,7 +573,7 @@ pub(crate) fn page_home(
         }
         let cfg = cfg_watch.lock().unwrap().clone();
         cmd_tx_watch
-            .send(UiCommand::HomeWatchJob { cfg, job_id })
+            .try_send(UiCommand::HomeWatchJob { cfg, job_id })
             .ok();
     });
 
@@ -947,7 +956,7 @@ pub(crate) fn page_workflow(
         };
 
         cmd_tx_run
-            .send(UiCommand::WorkflowRunPipeline {
+            .try_send(UiCommand::WorkflowRunPipeline {
                 cfg,
                 run_id,
                 correlation_id,
@@ -980,7 +989,7 @@ pub(crate) fn page_workflow(
     stream_btn.connect_clicked(move |_| {
         let cfg = cfg_stream.lock().unwrap().clone();
         cmd_tx_stream
-            .send(UiCommand::StreamRunEvents {
+            .try_send(UiCommand::StreamRunEvents {
                 cfg,
                 run_id: run_id_entry_stream.text().to_string(),
                 correlation_id: correlation_id_entry_stream.text().to_string(),
@@ -1177,7 +1186,7 @@ pub(crate) fn page_jobs_history(
         let page_size = page_size_entry_list.text().parse::<u32>().unwrap_or(50);
         let cfg = cfg_list.lock().unwrap().clone();
         cmd_tx_list
-            .send(UiCommand::JobsList {
+            .try_send(UiCommand::JobsList {
                 cfg,
                 job_types: job_types_entry_list.text().to_string(),
                 states: states_entry_list.text().to_string(),
@@ -1217,7 +1226,7 @@ pub(crate) fn page_jobs_history(
         }
         let cfg = cfg_history.lock().unwrap().clone();
         cmd_tx_history
-            .send(UiCommand::JobsHistory {
+            .try_send(UiCommand::JobsHistory {
                 cfg,
                 job_id,
                 kinds: kinds_entry_history.text().to_string(),
@@ -1244,7 +1253,7 @@ pub(crate) fn page_jobs_history(
         }
         let cfg = cfg_export.lock().unwrap().clone();
         cmd_tx_export
-            .send(UiCommand::JobsExportLogs {
+            .try_send(UiCommand::JobsExportLogs {
                 cfg,
                 job_id,
                 output_path: output_path_entry_export.text().to_string(),
@@ -1503,7 +1512,7 @@ pub(crate) fn page_toolchains(
     list.connect_clicked(move |_| {
         let cfg = cfg_list.lock().unwrap().clone();
         cmd_tx_list
-            .send(UiCommand::ToolchainListProviders { cfg })
+            .try_send(UiCommand::ToolchainListProviders { cfg })
             .ok();
     });
 
@@ -1512,7 +1521,7 @@ pub(crate) fn page_toolchains(
     list_sdk.connect_clicked(move |_| {
         let cfg = cfg_sdk.lock().unwrap().clone();
         cmd_tx_sdk
-            .send(UiCommand::ToolchainListAvailable {
+            .try_send(UiCommand::ToolchainListAvailable {
                 cfg,
                 provider_id: PROVIDER_SDK_ID.into(),
             })
@@ -1524,7 +1533,7 @@ pub(crate) fn page_toolchains(
     list_ndk.connect_clicked(move |_| {
         let cfg = cfg_ndk.lock().unwrap().clone();
         cmd_tx_ndk
-            .send(UiCommand::ToolchainListAvailable {
+            .try_send(UiCommand::ToolchainListAvailable {
                 cfg,
                 provider_id: PROVIDER_NDK_ID.into(),
             })
@@ -1536,7 +1545,7 @@ pub(crate) fn page_toolchains(
     list_sets.connect_clicked(move |_| {
         let cfg = cfg_list_sets.lock().unwrap().clone();
         cmd_tx_list_sets
-            .send(UiCommand::ToolchainListSets { cfg })
+            .try_send(UiCommand::ToolchainListSets { cfg })
             .ok();
     });
 
@@ -1569,7 +1578,7 @@ pub(crate) fn page_toolchains(
         let cfg = cfg_install_sdk.lock().unwrap().clone();
         let version = combo_active_value(&sdk_version_combo_install);
         cmd_tx_install_sdk
-            .send(UiCommand::ToolchainInstall {
+            .try_send(UiCommand::ToolchainInstall {
                 cfg,
                 provider_id: PROVIDER_SDK_ID.into(),
                 version,
@@ -1609,7 +1618,7 @@ pub(crate) fn page_toolchains(
         let cfg = cfg_install_ndk.lock().unwrap().clone();
         let version = combo_active_value(&ndk_version_combo_install);
         cmd_tx_install_ndk
-            .send(UiCommand::ToolchainInstall {
+            .try_send(UiCommand::ToolchainInstall {
                 cfg,
                 provider_id: PROVIDER_NDK_ID.into(),
                 version,
@@ -1625,7 +1634,7 @@ pub(crate) fn page_toolchains(
     list_installed.connect_clicked(move |_| {
         let cfg = cfg_list_installed.lock().unwrap().clone();
         cmd_tx_list_installed
-            .send(UiCommand::ToolchainListInstalled {
+            .try_send(UiCommand::ToolchainListInstalled {
                 cfg,
                 kind: ToolchainKind::Unspecified,
             })
@@ -1659,7 +1668,7 @@ pub(crate) fn page_toolchains(
         }
         let cfg = cfg_verify_installed.lock().unwrap().clone();
         cmd_tx_verify_installed
-            .send(UiCommand::ToolchainVerifyInstalled {
+            .try_send(UiCommand::ToolchainVerifyInstalled {
                 cfg,
                 job_id,
                 correlation_id,
@@ -1698,7 +1707,7 @@ pub(crate) fn page_toolchains(
         }
         let cfg = cfg_update.lock().unwrap().clone();
         cmd_tx_update
-            .send(UiCommand::ToolchainUpdate {
+            .try_send(UiCommand::ToolchainUpdate {
                 cfg,
                 toolchain_id: toolchain_id_entry_update.text().to_string(),
                 version: update_version_entry_update.text().to_string(),
@@ -1740,7 +1749,7 @@ pub(crate) fn page_toolchains(
         }
         let cfg = cfg_uninstall.lock().unwrap().clone();
         cmd_tx_uninstall
-            .send(UiCommand::ToolchainUninstall {
+            .try_send(UiCommand::ToolchainUninstall {
                 cfg,
                 toolchain_id: toolchain_id_entry_uninstall.text().to_string(),
                 remove_cached: remove_cached_check_uninstall.is_active(),
@@ -1780,7 +1789,7 @@ pub(crate) fn page_toolchains(
         }
         let cfg = cfg_cleanup.lock().unwrap().clone();
         cmd_tx_cleanup
-            .send(UiCommand::ToolchainCleanupCache {
+            .try_send(UiCommand::ToolchainCleanupCache {
                 cfg,
                 dry_run: dry_run_check_cleanup.is_active(),
                 remove_all: remove_all_check_cleanup.is_active(),
@@ -1801,7 +1810,7 @@ pub(crate) fn page_toolchains(
         let ndk_id = ndk_entry_create.text().to_string();
         let display_name = display_entry_create.text().to_string();
         cmd_tx_create_set
-            .send(UiCommand::ToolchainCreateSet {
+            .try_send(UiCommand::ToolchainCreateSet {
                 cfg,
                 sdk_toolchain_id: if sdk_id.trim().is_empty() {
                     None
@@ -1824,7 +1833,7 @@ pub(crate) fn page_toolchains(
     create_set_latest_btn.connect_clicked(move |_| {
         let cfg = cfg_create_latest.lock().unwrap().clone();
         cmd_tx_create_latest
-            .send(UiCommand::ToolchainCreateActiveLatest {
+            .try_send(UiCommand::ToolchainCreateActiveLatest {
                 cfg,
                 display_name: display_entry_latest.text().to_string(),
             })
@@ -1837,7 +1846,7 @@ pub(crate) fn page_toolchains(
     set_active_btn.connect_clicked(move |_| {
         let cfg = cfg_set_active.lock().unwrap().clone();
         cmd_tx_set_active
-            .send(UiCommand::ToolchainSetActive {
+            .try_send(UiCommand::ToolchainSetActive {
                 cfg,
                 toolchain_set_id: active_entry_set.text().to_string(),
             })
@@ -1849,19 +1858,19 @@ pub(crate) fn page_toolchains(
     get_active_btn.connect_clicked(move |_| {
         let cfg = cfg_get_active.lock().unwrap().clone();
         cmd_tx_get_active
-            .send(UiCommand::ToolchainGetActive { cfg })
+            .try_send(UiCommand::ToolchainGetActive { cfg })
             .ok();
     });
     {
         let cfg = cfg.lock().unwrap().clone();
         cmd_tx
-            .send(UiCommand::ToolchainListAvailable {
+            .try_send(UiCommand::ToolchainListAvailable {
                 cfg: cfg.clone(),
                 provider_id: PROVIDER_SDK_ID.into(),
             })
             .ok();
         cmd_tx
-            .send(UiCommand::ToolchainListAvailable {
+            .try_send(UiCommand::ToolchainListAvailable {
                 cfg,
                 provider_id: PROVIDER_NDK_ID.into(),
             })
@@ -2026,7 +2035,7 @@ pub(crate) fn page_projects(
     refresh_templates.connect_clicked(move |_| {
         let cfg = cfg_refresh.lock().unwrap().clone();
         cmd_tx_refresh
-            .send(UiCommand::ProjectListTemplates { cfg })
+            .try_send(UiCommand::ProjectListTemplates { cfg })
             .ok();
     });
 
@@ -2035,7 +2044,7 @@ pub(crate) fn page_projects(
     refresh_defaults.connect_clicked(move |_| {
         let cfg = cfg_defaults.lock().unwrap().clone();
         cmd_tx_defaults
-            .send(UiCommand::ProjectLoadDefaults { cfg })
+            .try_send(UiCommand::ProjectLoadDefaults { cfg })
             .ok();
     });
 
@@ -2044,7 +2053,7 @@ pub(crate) fn page_projects(
     list_recent.connect_clicked(move |_| {
         let cfg = cfg_recent.lock().unwrap().clone();
         cmd_tx_recent
-            .send(UiCommand::ProjectListRecent { cfg })
+            .try_send(UiCommand::ProjectListRecent { cfg })
             .ok();
     });
 
@@ -2054,7 +2063,7 @@ pub(crate) fn page_projects(
     open_btn.connect_clicked(move |_| {
         let cfg = cfg_open.lock().unwrap().clone();
         cmd_tx_open
-            .send(UiCommand::ProjectOpen {
+            .try_send(UiCommand::ProjectOpen {
                 cfg,
                 path: path_entry_open.text().to_string(),
             })
@@ -2095,7 +2104,7 @@ pub(crate) fn page_projects(
             .map(|id| id.to_string())
             .unwrap_or_default();
         cmd_tx_create
-            .send(UiCommand::ProjectCreate {
+            .try_send(UiCommand::ProjectCreate {
                 cfg,
                 name: name_entry_create.text().to_string(),
                 path: path_entry_create.text().to_string(),
@@ -2123,7 +2132,7 @@ pub(crate) fn page_projects(
             .map(|id| id.to_string())
             .unwrap_or_default();
         cmd_tx_config
-            .send(UiCommand::ProjectSetConfig {
+            .try_send(UiCommand::ProjectSetConfig {
                 cfg,
                 project_id,
                 toolchain_set_id: if toolchain_set_id.trim().is_empty()
@@ -2150,7 +2159,7 @@ pub(crate) fn page_projects(
     use_defaults_btn.connect_clicked(move |_| {
         let cfg = cfg_defaults.lock().unwrap().clone();
         cmd_tx_defaults
-            .send(UiCommand::ProjectUseActiveDefaults {
+            .try_send(UiCommand::ProjectUseActiveDefaults {
                 cfg,
                 project_id: project_id_entry_defaults.text().to_string(),
             })
@@ -2404,7 +2413,7 @@ pub(crate) fn page_targets(
     let cmd_tx_list = cmd_tx.clone();
     list.connect_clicked(move |_| {
         let cfg = cfg_list.lock().unwrap().clone();
-        cmd_tx_list.send(UiCommand::TargetsList { cfg }).ok();
+        cmd_tx_list.try_send(UiCommand::TargetsList { cfg }).ok();
     });
 
     let cfg_stream = cfg.clone();
@@ -2412,7 +2421,7 @@ pub(crate) fn page_targets(
     stream.connect_clicked(move |_| {
         let cfg = cfg_stream.lock().unwrap().clone();
         cmd_tx_stream
-            .send(UiCommand::TargetsStreamLogcat {
+            .try_send(UiCommand::TargetsStreamLogcat {
                 cfg,
                 target_id: "target-sample-pixel".into(),
                 filter: "".into(),
@@ -2425,7 +2434,7 @@ pub(crate) fn page_targets(
     status.connect_clicked(move |_| {
         let cfg = cfg_status.lock().unwrap().clone();
         cmd_tx_status
-            .send(UiCommand::TargetsCuttlefishStatus { cfg })
+            .try_send(UiCommand::TargetsCuttlefishStatus { cfg })
             .ok();
     });
 
@@ -2437,7 +2446,7 @@ pub(crate) fn page_targets(
     resolve_build.connect_clicked(move |_| {
         let cfg = cfg_resolve.lock().unwrap().clone();
         cmd_tx_resolve
-            .send(UiCommand::TargetsResolveCuttlefishBuild {
+            .try_send(UiCommand::TargetsResolveCuttlefishBuild {
                 cfg,
                 branch: branch_entry_resolve.text().to_string(),
                 target: target_entry_resolve.text().to_string(),
@@ -2502,7 +2511,7 @@ pub(crate) fn page_targets(
         }
         let cfg = cfg_start.lock().unwrap().clone();
         cmd_tx_start
-            .send(UiCommand::TargetsStartCuttlefish {
+            .try_send(UiCommand::TargetsStartCuttlefish {
                 cfg,
                 show_full_ui: true,
                 job_id,
@@ -2538,7 +2547,7 @@ pub(crate) fn page_targets(
         }
         let cfg = cfg_stop.lock().unwrap().clone();
         cmd_tx_stop
-            .send(UiCommand::TargetsStopCuttlefish {
+            .try_send(UiCommand::TargetsStopCuttlefish {
                 cfg,
                 job_id,
                 correlation_id,
@@ -2552,7 +2561,7 @@ pub(crate) fn page_targets(
     set_default_btn.connect_clicked(move |_| {
         let cfg = cfg_set_default.lock().unwrap().clone();
         cmd_tx_set_default
-            .send(UiCommand::TargetsSetDefault {
+            .try_send(UiCommand::TargetsSetDefault {
                 cfg,
                 target_id: target_entry_default.text().to_string(),
             })
@@ -2564,7 +2573,7 @@ pub(crate) fn page_targets(
     get_default_btn.connect_clicked(move |_| {
         let cfg = cfg_get_default.lock().unwrap().clone();
         cmd_tx_get_default
-            .send(UiCommand::TargetsGetDefault { cfg })
+            .try_send(UiCommand::TargetsGetDefault { cfg })
             .ok();
     });
 
@@ -2598,7 +2607,7 @@ pub(crate) fn page_targets(
         }
         let cfg = cfg_install.lock().unwrap().clone();
         cmd_tx_install
-            .send(UiCommand::TargetsInstallCuttlefish {
+            .try_send(UiCommand::TargetsInstallCuttlefish {
                 cfg,
                 force: false,
                 branch: branch_entry_install.text().to_string(),
@@ -2680,7 +2689,7 @@ pub(crate) fn page_targets(
         }
         let cfg = cfg_install_apk.lock().unwrap().clone();
         cmd_tx_install_apk
-            .send(UiCommand::TargetsInstallApk {
+            .try_send(UiCommand::TargetsInstallApk {
                 cfg,
                 target_id: target_entry_install.text().to_string(),
                 apk_path: apk_entry_install.text().to_string(),
@@ -2720,7 +2729,7 @@ pub(crate) fn page_targets(
         }
         let cfg = cfg_launch.lock().unwrap().clone();
         cmd_tx_launch
-            .send(UiCommand::TargetsLaunchApp {
+            .try_send(UiCommand::TargetsLaunchApp {
                 cfg,
                 target_id: target_entry_launch.text().to_string(),
                 application_id: app_id_entry_launch.text().to_string(),
@@ -3016,7 +3025,7 @@ pub(crate) fn page_console(
         };
         let clean_first = clean_check_run.is_active();
         cmd_tx_run
-            .send(UiCommand::BuildRun {
+            .try_send(UiCommand::BuildRun {
                 cfg,
                 project_ref,
                 variant,
@@ -3062,7 +3071,7 @@ pub(crate) fn page_console(
         };
 
         cmd_tx_list
-            .send(UiCommand::BuildListArtifacts {
+            .try_send(UiCommand::BuildListArtifacts {
                 cfg,
                 project_ref,
                 variant,
@@ -3263,7 +3272,7 @@ pub(crate) fn page_evidence(
     list_runs.connect_clicked(move |_| {
         let cfg = cfg_list.lock().unwrap().clone();
         cmd_tx_list
-            .send(UiCommand::ObserveListRuns {
+            .try_send(UiCommand::ObserveListRuns {
                 cfg,
                 run_id: run_id_entry_list.text().to_string(),
                 correlation_id: correlation_id_entry_list.text().to_string(),
@@ -3282,7 +3291,7 @@ pub(crate) fn page_evidence(
     list_jobs.connect_clicked(move |_| {
         let cfg = cfg_list_jobs.lock().unwrap().clone();
         cmd_tx_list_jobs
-            .send(UiCommand::JobsList {
+            .try_send(UiCommand::JobsList {
                 cfg,
                 job_types: String::new(),
                 states: String::new(),
@@ -3307,7 +3316,7 @@ pub(crate) fn page_evidence(
     stream_run.connect_clicked(move |_| {
         let cfg = cfg_stream.lock().unwrap().clone();
         cmd_tx_stream
-            .send(UiCommand::StreamRunEvents {
+            .try_send(UiCommand::StreamRunEvents {
                 cfg,
                 run_id: run_id_entry_stream.text().to_string(),
                 correlation_id: correlation_id_entry_stream.text().to_string(),
@@ -3332,7 +3341,7 @@ pub(crate) fn page_evidence(
             _ => RunOutputKind::Unspecified as i32,
         };
         cmd_tx_outputs
-            .send(UiCommand::ObserveListOutputs {
+            .try_send(UiCommand::ObserveListOutputs {
                 cfg,
                 run_id: run_id_entry_outputs.text().to_string(),
                 kind,
@@ -3379,7 +3388,7 @@ pub(crate) fn page_evidence(
         let cfg = cfg_support.lock().unwrap().clone();
         let limit = recent_limit_support.text().parse::<u32>().unwrap_or(10);
         cmd_tx_support
-            .send(UiCommand::ObserveExportSupport {
+            .try_send(UiCommand::ObserveExportSupport {
                 cfg,
                 include_logs: include_logs_support.is_active(),
                 include_config: include_config_support.is_active(),
@@ -3421,7 +3430,7 @@ pub(crate) fn page_evidence(
         }
         let cfg = cfg_evidence.lock().unwrap().clone();
         cmd_tx_evidence
-            .send(UiCommand::ObserveExportEvidence {
+            .try_send(UiCommand::ObserveExportEvidence {
                 cfg,
                 run_id: run_id_evidence.text().to_string(),
                 job_id,
@@ -3448,7 +3457,7 @@ pub(crate) fn page_evidence(
         }
         let cfg = cfg_export_jobs.lock().unwrap().clone();
         cmd_tx_export_jobs
-            .send(UiCommand::JobsExportLogs {
+            .try_send(UiCommand::JobsExportLogs {
                 cfg,
                 job_id,
                 output_path: output_path_entry_export.text().to_string(),
@@ -3592,7 +3601,87 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
 
     page.container.insert_child_after(&form, Some(&page.intro));
 
+    let telemetry_frame = gtk::Frame::builder()
+        .label("Telemetry (opt-in)")
+        .build();
+    let telemetry_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let usage_check = gtk::CheckButton::with_label("Send usage analytics");
+    let crash_check = gtk::CheckButton::with_label("Send crash reports");
+    let install_label = gtk::Label::builder().xalign(0.0).build();
+    set_tooltip(
+        &usage_check,
+        "What: Send anonymous usage event counts. Why: helps prioritize fixes. How: opt in to enable.",
+    );
+    set_tooltip(
+        &crash_check,
+        "What: Send crash summaries on next launch. Why: helps debug stability issues. How: opt in to enable.",
+    );
+
+    {
+        let cfg = cfg.lock().unwrap();
+        usage_check.set_active(cfg.telemetry_usage_enabled);
+        crash_check.set_active(cfg.telemetry_crash_enabled);
+        install_label.set_text(&telemetry_label_text(&cfg.telemetry_install_id));
+    }
+
+    let install_label_usage = install_label.clone();
+    let cfg_usage = cfg.clone();
+    usage_check.connect_toggled(move |check| {
+        let enabled = check.is_active();
+        let mut cfg = cfg_usage.lock().unwrap();
+        cfg.telemetry_usage_enabled = enabled;
+        if (enabled || cfg.telemetry_crash_enabled) && cfg.telemetry_install_id.trim().is_empty() {
+            cfg.telemetry_install_id = telemetry::generate_install_id();
+        }
+        if let Err(err) = cfg.save() {
+            eprintln!("Failed to persist UI config: {err}");
+        }
+        let install_id = cfg.telemetry_install_id.clone();
+        drop(cfg);
+        telemetry::set_usage_enabled(enabled);
+        if !install_id.trim().is_empty() {
+            telemetry::set_install_id(Some(install_id.clone()));
+        }
+        install_label_usage.set_text(&telemetry_label_text(&install_id));
+    });
+
+    let install_label_crash = install_label.clone();
+    let cfg_crash = cfg.clone();
+    crash_check.connect_toggled(move |check| {
+        let enabled = check.is_active();
+        let mut cfg = cfg_crash.lock().unwrap();
+        cfg.telemetry_crash_enabled = enabled;
+        if (enabled || cfg.telemetry_usage_enabled) && cfg.telemetry_install_id.trim().is_empty() {
+            cfg.telemetry_install_id = telemetry::generate_install_id();
+        }
+        if let Err(err) = cfg.save() {
+            eprintln!("Failed to persist UI config: {err}");
+        }
+        let install_id = cfg.telemetry_install_id.clone();
+        drop(cfg);
+        telemetry::set_crash_enabled(enabled);
+        if !install_id.trim().is_empty() {
+            telemetry::set_install_id(Some(install_id.clone()));
+        }
+        install_label_crash.set_text(&telemetry_label_text(&install_id));
+    });
+
+    telemetry_box.append(&usage_check);
+    telemetry_box.append(&crash_check);
+    telemetry_box.append(&install_label);
+    telemetry_frame.set_child(Some(&telemetry_box));
+    page.container
+        .insert_child_after(&telemetry_frame, Some(&form));
+
     page
+}
+
+fn telemetry_label_text(install_id: &str) -> String {
+    if install_id.trim().is_empty() {
+        "Install ID: not set".to_string()
+    } else {
+        format!("Install ID: {install_id}")
+    }
 }
 
 fn parse_gradle_args(raw: &str) -> Vec<KeyValue> {

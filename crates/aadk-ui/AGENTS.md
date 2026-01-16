@@ -10,18 +10,23 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Key implementation details
 - Entry point and GTK wiring live in `crates/aadk-ui/src/main.rs`, with modules split into
-  `config.rs`, `commands.rs`, `models.rs`, `pages.rs`, `utils.rs`, and `worker.rs`.
+  `config.rs`, `commands.rs`, `models.rs`, `pages.rs`, `ui_events.rs`, `utils.rs`, and `worker.rs`.
 - AppConfig holds service addresses and pulls defaults from env:
   AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_BUILD_ADDR,
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR, AADK_WORKFLOW_ADDR.
-- AppConfig persists to `~/.local/share/aadk/state/ui-config.json` with last job selections.
+- AppConfig persists to `~/.local/share/aadk/state/ui-config.json` with last job selections and telemetry opt-in.
+- Job log export helpers (default paths + history fetch) and shared data-dir utilities come from `aadk-util`.
 - UiCommand/AppEvent live in `commands.rs`; a background worker in `worker.rs` executes commands and
-  emits AppEvent logs to update the UI.
+  emits AppEvent logs to update the UI via the bounded queue in `ui_events.rs`.
+- AppEvent delivery uses a bounded queue notified via tokio mpsc; a MainContext spawn_local loop
+  drains the queue on the GTK thread, dropping log lines before non-log events and coalescing HomeProgress updates.
 - The UI mostly logs results rather than rendering structured data; it is intentionally minimal.
 - Core flow actions log connection/RPC failures to the page output so bad inputs and service errors are visible.
 - The main window default size is clamped to 90% of the primary monitor so it stays on-screen.
 - Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
 - Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
+- Settings includes opt-in telemetry toggles for usage and crash reporting (env overrides: AADK_TELEMETRY/AADK_TELEMETRY_CRASH).
+- Home job streams run on cancellable worker tasks; new watch requests abort the previous stream and progress updates are throttled.
 - Workflow page runs workflow.pipeline with explicit inputs, optional step overrides, and run-level StreamRunEvents output.
 - Projects auto-fill the project id after create/open and sync the Build project field to the latest selection.
 - Page construction now includes a per-tab header, overview, and connections blurb; control layouts insert after the intro block.
@@ -39,6 +44,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Toolchains/Projects/Targets/Build/Evidence pages include a "Use job id" toggle plus
   correlation id entry to attach work to existing jobs and grouped workflows; the UI derives run_id
   from correlation_id for run-aware services.
+- Log text views apply a ring buffer to cap memory by line/character counts.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
@@ -57,6 +63,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 ## Implementation notes
 - Job Control page event routing now keeps the HomePage handle so status labels and log output update together.
 - Project config updates treat empty/"none" toolchain or target selections as unset before sending.
+- Telemetry emits app.start, ui.page.view, and ui.command.* events when opt-in is enabled.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
