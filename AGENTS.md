@@ -111,4 +111,3 @@ Default addresses (override with env vars):
 ### Clients (aadk-ui, aadk-cli)
 - Add picker integrations for workflow inputs (templates, toolchain sets, targets) to reduce manual ids.
 - Add run filters (project/target/toolchain/result) and output shortcuts (open/export) to Evidence dashboards.
-- Persist last workflow inputs (run id/project/target/toolchain) alongside existing UI config fields.

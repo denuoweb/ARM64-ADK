@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    io,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -1868,6 +1869,14 @@ pub(crate) async fn handle_command(
                     line: format!("Active toolchain set updated to {set_id}\n"),
                 })
                 .ok();
+                ui.send(AppEvent::UpdateActiveContext {
+                    project_id: None,
+                    project_path: None,
+                    toolchain_set_id: Some(set_id.clone()),
+                    target_id: None,
+                    run_id: None,
+                })
+                .ok();
             } else {
                 ui.send(AppEvent::Log {
                     page: "toolchains",
@@ -1909,6 +1918,14 @@ pub(crate) async fn handle_command(
                 ui.send(AppEvent::Log {
                     page: "toolchains",
                     line: format!("Active toolchain set set to {set_id}\n"),
+                })
+                .ok();
+                ui.send(AppEvent::UpdateActiveContext {
+                    project_id: None,
+                    project_path: None,
+                    toolchain_set_id: Some(set_id.clone()),
+                    target_id: None,
+                    run_id: None,
                 })
                 .ok();
             } else {
@@ -1955,6 +1972,16 @@ pub(crate) async fn handle_command(
                     ),
                 })
                 .ok();
+                if !set_id.trim().is_empty() {
+                    ui.send(AppEvent::UpdateActiveContext {
+                        project_id: None,
+                        project_path: None,
+                        toolchain_set_id: Some(set_id.to_string()),
+                        target_id: None,
+                        run_id: None,
+                    })
+                    .ok();
+                }
             } else {
                 ui.send(AppEvent::Log {
                     page: "toolchains",
@@ -2651,6 +2678,14 @@ pub(crate) async fn handle_command(
                     line: format!("Default target set to {target_id}\n"),
                 })
                 .ok();
+                ui.send(AppEvent::UpdateActiveContext {
+                    project_id: None,
+                    project_path: None,
+                    toolchain_set_id: None,
+                    target_id: Some(target_id.clone()),
+                    run_id: None,
+                })
+                .ok();
             } else {
                 ui.send(AppEvent::Log {
                     page: "targets",
@@ -2685,6 +2720,16 @@ pub(crate) async fn handle_command(
                     ),
                 })
                 .ok();
+                if !id.trim().is_empty() {
+                    ui.send(AppEvent::UpdateActiveContext {
+                        project_id: None,
+                        project_path: None,
+                        toolchain_set_id: None,
+                        target_id: Some(id.to_string()),
+                        run_id: None,
+                    })
+                    .ok();
+                }
             } else {
                 ui.send(AppEvent::Log {
                     page: "targets",
@@ -3669,6 +3714,52 @@ pub(crate) async fn handle_command(
                 ),
             })
             .ok();
+            let project_id_update = if !project_id_value.trim().is_empty() {
+                Some(project_id_value.clone())
+            } else if !project_id.trim().is_empty() {
+                Some(project_id.trim().to_string())
+            } else {
+                None
+            };
+            let project_path_update = if project_id_update.is_some()
+                || !project_path.trim().is_empty()
+            {
+                Some(project_path.trim().to_string())
+            } else {
+                None
+            };
+            let toolchain_set_update = if !toolchain_set_id.trim().is_empty() {
+                Some(toolchain_set_id.trim().to_string())
+            } else {
+                None
+            };
+            let target_update = if !target_id.trim().is_empty() {
+                Some(target_id.trim().to_string())
+            } else {
+                None
+            };
+            let run_id_update = if !run_id_value.trim().is_empty() {
+                Some(run_id_value.clone())
+            } else if !run_id.trim().is_empty() {
+                Some(run_id.trim().to_string())
+            } else {
+                None
+            };
+            if project_id_update.is_some()
+                || project_path_update.is_some()
+                || toolchain_set_update.is_some()
+                || target_update.is_some()
+                || run_id_update.is_some()
+            {
+                ui.send(AppEvent::UpdateActiveContext {
+                    project_id: project_id_update,
+                    project_path: project_path_update,
+                    toolchain_set_id: toolchain_set_update,
+                    target_id: target_update,
+                    run_id: run_id_update,
+                })
+                .ok();
+            }
             if !resp.outputs.is_empty() {
                 ui.send(AppEvent::Log {
                     page: "workflow",
@@ -3898,6 +3989,59 @@ pub(crate) async fn handle_command(
                     .ok();
                 }
             }
+        }
+
+        UiCommand::ResetAllState { cfg } => {
+            let _ = cfg;
+            let data_dir = aadk_util::data_dir();
+            let dir_label = data_dir.display();
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: format!("Resetting AADK state under {dir_label}\n"),
+            })
+            .ok();
+
+            let is_safe = data_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name == "aadk")
+                .unwrap_or(false);
+            if !is_safe {
+                ui.send(AppEvent::Log {
+                    page: "settings",
+                    line: format!("Refusing to reset unexpected path: {dir_label}\n"),
+                })
+                .ok();
+                ui.send(AppEvent::ResetAllStateComplete { ok: false }).ok();
+                return Ok(());
+            }
+
+            match std::fs::remove_dir_all(&data_dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("Reset failed: {err}\n"),
+                    })
+                    .ok();
+                    ui.send(AppEvent::ResetAllStateComplete { ok: false }).ok();
+                    return Ok(());
+                }
+            }
+
+            if let Some(handle) = worker_state.home_stream.take() {
+                handle.abort();
+            }
+            worker_state.current_job_id = None;
+            ui.send(AppEvent::SetCurrentJob { job_id: None }).ok();
+            ui.send(AppEvent::HomeResetStatus).ok();
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Reset complete.\n".into(),
+            })
+            .ok();
+            ui.send(AppEvent::ResetAllStateComplete { ok: true }).ok();
         }
     }
 

@@ -21,9 +21,11 @@ use tokio::sync::mpsc;
 
 use commands::{AppEvent, UiCommand};
 use config::AppConfig;
+use models::ActiveContext;
 use pages::{
     page_console, page_evidence, page_home, page_jobs_history, page_projects, page_settings,
-    page_targets, page_toolchains, page_workflow,
+    page_targets, page_toolchains, page_workflow, BuildPage, ProjectsPage, TargetsPage,
+    ToolchainsPage, WorkflowPage,
 };
 use ui_events::{UiEventQueue, DEFAULT_EVENT_QUEUE_SIZE};
 use worker::{handle_command, AppState};
@@ -73,6 +75,63 @@ fn telemetry_env_override(name: &str) -> Option<bool> {
         },
         Err(_) => None,
     }
+}
+
+#[derive(Clone)]
+struct ContextBar {
+    project_label: gtk::Label,
+    toolchain_label: gtk::Label,
+    target_label: gtk::Label,
+    run_label: gtk::Label,
+}
+
+impl ContextBar {
+    fn set_context(&self, ctx: &ActiveContext) {
+        let project_ref = if ctx.project_id.trim().is_empty() {
+            ctx.project_path.trim()
+        } else {
+            ctx.project_id.trim()
+        };
+        self.project_label
+            .set_text(&format!("Project: {}", format_context_value(project_ref)));
+        self.toolchain_label.set_text(&format!(
+            "Toolchain set: {}",
+            format_context_value(ctx.toolchain_set_id.trim())
+        ));
+        self.target_label
+            .set_text(&format!("Target: {}", format_context_value(ctx.target_id.trim())));
+        self.run_label
+            .set_text(&format!("Run: {}", format_context_value(ctx.run_id.trim())));
+    }
+}
+
+fn format_context_value(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
+fn apply_active_context(
+    ctx: &ActiveContext,
+    context_bar: &ContextBar,
+    workflow: &WorkflowPage,
+    projects: &ProjectsPage,
+    targets: &TargetsPage,
+    toolchains: &ToolchainsPage,
+    console: &BuildPage,
+) {
+    context_bar.set_context(ctx);
+    workflow.set_context(ctx);
+    projects.set_active_context(ctx);
+    targets.set_target_id(&ctx.target_id);
+    toolchains.set_active_set_id(&ctx.toolchain_set_id);
+    console.set_project_ref(&ctx.project_ref());
+}
+
+fn set_tooltip<W: gtk::prelude::IsA<gtk::Widget>>(widget: &W, text: &str) {
+    widget.set_tooltip_text(Some(text));
 }
 
 fn build_ui(app: &gtk::Application) {
@@ -178,8 +237,9 @@ fn build_ui(app: &gtk::Application) {
         });
     });
 
-    // Layout: sidebar + stack
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    // Layout: context header + sidebar + stack
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::SlideLeftRight)
@@ -192,8 +252,95 @@ fn build_ui(app: &gtk::Application) {
         .width_request(220)
         .build();
 
-    root.append(&sidebar);
-    root.append(&stack);
+    body.append(&sidebar);
+    body.append(&stack);
+
+    let context_frame = gtk::Frame::builder().label("Active context").build();
+    context_frame.set_margin_top(8);
+    context_frame.set_margin_bottom(8);
+    context_frame.set_margin_start(12);
+    context_frame.set_margin_end(12);
+
+    let context_grid = gtk::Grid::builder()
+        .row_spacing(4)
+        .column_spacing(16)
+        .build();
+    let project_label = gtk::Label::builder()
+        .label("Project: -")
+        .xalign(0.0)
+        .build();
+    let toolchain_label = gtk::Label::builder()
+        .label("Toolchain set: -")
+        .xalign(0.0)
+        .build();
+    let target_label = gtk::Label::builder().label("Target: -").xalign(0.0).build();
+    let run_label = gtk::Label::builder().label("Run: -").xalign(0.0).build();
+    let context_bar = ContextBar {
+        project_label: project_label.clone(),
+        toolchain_label: toolchain_label.clone(),
+        target_label: target_label.clone(),
+        run_label: run_label.clone(),
+    };
+
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let new_project_btn = gtk::Button::with_label("New project");
+    let open_project_btn = gtk::Button::with_label("Open project");
+    let reset_btn = gtk::Button::with_label("Reset all state");
+    set_tooltip(&new_project_btn, "What: Create a new project. Why: start a fresh workspace. How: opens the Projects page.");
+    set_tooltip(&open_project_btn, "What: Open an existing project. Why: set the active project context. How: opens the Projects page.");
+    set_tooltip(&reset_btn, "What: Clear all cached state and UI context. Why: start clean across services. How: confirm the reset prompt.");
+    action_row.append(&new_project_btn);
+    action_row.append(&open_project_btn);
+    action_row.append(&reset_btn);
+
+    context_grid.attach(&project_label, 0, 0, 1, 1);
+    context_grid.attach(&toolchain_label, 1, 0, 1, 1);
+    context_grid.attach(&target_label, 0, 1, 1, 1);
+    context_grid.attach(&run_label, 1, 1, 1, 1);
+    context_grid.attach(&action_row, 2, 0, 1, 2);
+
+    context_frame.set_child(Some(&context_grid));
+
+    let stack_for_new = stack.clone();
+    new_project_btn.connect_clicked(move |_| {
+        stack_for_new.set_visible_child_name("projects");
+    });
+
+    let stack_for_open = stack.clone();
+    open_project_btn.connect_clicked(move |_| {
+        stack_for_open.set_visible_child_name("projects");
+    });
+
+    let cfg_reset = cfg.clone();
+    let cmd_tx_reset = cmd_tx.clone();
+    let window_reset = window.clone();
+    reset_btn.connect_clicked(move |_| {
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&window_reset)
+            .modal(true)
+            .message_type(gtk::MessageType::Warning)
+            .text("Reset all local AADK state?")
+            .secondary_text("This deletes cached state, job history, toolchains, downloads, bundles, and UI selections. Running jobs will keep going.")
+            .build();
+        dialog.add_buttons(&[
+            ("Cancel", gtk::ResponseType::Cancel),
+            ("Reset", gtk::ResponseType::Accept),
+        ]);
+        let cmd_tx_confirm = cmd_tx_reset.clone();
+        let cfg_confirm = cfg_reset.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                let cfg = cfg_confirm.lock().unwrap().clone();
+                cmd_tx_confirm
+                    .try_send(UiCommand::ResetAllState { cfg })
+                    .ok();
+            }
+            dialog.close();
+        });
+        dialog.show();
+    });
+    root.append(&context_frame);
+    root.append(&body);
 
     // Pages
     let home = page_home(cfg.clone(), cmd_tx.clone());
@@ -206,8 +353,22 @@ fn build_ui(app: &gtk::Application) {
     let console = page_console(cfg.clone(), cmd_tx.clone(), &window);
     let settings = page_settings(cfg.clone());
 
+    {
+        let cfg = cfg.lock().unwrap().clone();
+        let ctx = cfg.active_context();
+        apply_active_context(
+            &ctx,
+            &context_bar,
+            &workflow,
+            &projects,
+            &targets,
+            &toolchains,
+            &console,
+        );
+    }
+
     stack.add_titled(&home.page.root, Some("home"), "Job Control");
-    stack.add_titled(&workflow.root, Some("workflow"), "Workflow");
+    stack.add_titled(&workflow.page.root, Some("workflow"), "Workflow");
     stack.add_titled(&toolchains.page.root, Some("toolchains"), "Toolchains");
     stack.add_titled(&projects.page.root, Some("projects"), "Projects");
     stack.add_titled(&console.page.root, Some("console"), "Build");
@@ -231,6 +392,8 @@ fn build_ui(app: &gtk::Application) {
     let targets_for_events = targets.clone();
     let console_for_events = console.clone();
     let evidence_for_events = evidence.clone();
+    let settings_for_events = settings.clone();
+    let context_bar_for_events = context_bar.clone();
     let cfg_for_events = cfg.clone();
 
     // Event routing: drain worker events on the GTK thread.
@@ -249,6 +412,7 @@ fn build_ui(app: &gtk::Application) {
                         "targets" => targets_for_events.append(&line),
                         "console" => console_for_events.append(&line),
                         "evidence" => evidence_for_events.append(&line),
+                        "settings" => settings_for_events.append(&line),
                         _ => {}
                     },
                     AppEvent::SetCurrentJob { job_id } => {
@@ -292,27 +456,134 @@ fn build_ui(app: &gtk::Application) {
                     }
                     AppEvent::ProjectToolchainSets { sets } => {
                         projects_for_events.set_toolchain_sets(&sets);
+                        let ctx = cfg_for_events.lock().unwrap().active_context();
+                        projects_for_events.set_active_context(&ctx);
                     }
                     AppEvent::ProjectTargets { targets } => {
                         projects_for_events.set_targets(&targets);
+                        let ctx = cfg_for_events.lock().unwrap().active_context();
+                        projects_for_events.set_active_context(&ctx);
                     }
                     AppEvent::ProjectSelected {
                         project_id,
                         project_path,
                     } => {
-                        let project_ref = if project_id.trim().is_empty() {
-                            project_path.clone()
-                        } else {
-                            project_id.clone()
-                        };
-                        projects_for_events.set_project_id(&project_id);
-                        console_for_events.set_project_ref(&project_ref);
-                        let mut cfg = cfg_for_events.lock().unwrap();
-                        if !project_ref.trim().is_empty() {
-                            cfg.last_job_project_id = project_ref;
+                        let ctx = {
+                            let mut cfg = cfg_for_events.lock().unwrap();
+                            if !project_id.trim().is_empty() {
+                                cfg.active_project_id = project_id.clone();
+                            }
+                            if !project_path.trim().is_empty() || !project_id.trim().is_empty() {
+                                cfg.active_project_path = project_path.clone();
+                            }
+                            let project_ref = if cfg.active_project_id.trim().is_empty() {
+                                cfg.active_project_path.clone()
+                            } else {
+                                cfg.active_project_id.clone()
+                            };
+                            if !project_ref.trim().is_empty() {
+                                cfg.last_job_project_id = project_ref;
+                            }
                             if let Err(err) = cfg.save() {
                                 eprintln!("Failed to persist UI config: {err}");
                             }
+                            cfg.active_context()
+                        };
+                        apply_active_context(
+                            &ctx,
+                            &context_bar_for_events,
+                            &workflow_for_events,
+                            &projects_for_events,
+                            &targets_for_events,
+                            &toolchains_for_events,
+                            &console_for_events,
+                        );
+                    }
+                    AppEvent::UpdateActiveContext {
+                        project_id,
+                        project_path,
+                        toolchain_set_id,
+                        target_id,
+                        run_id,
+                    } => {
+                        let ctx = {
+                            let mut cfg = cfg_for_events.lock().unwrap();
+                            let mut project_updated = false;
+                            if let Some(value) = project_id {
+                                cfg.active_project_id = value;
+                                project_updated = true;
+                            }
+                            if let Some(value) = project_path {
+                                cfg.active_project_path = value;
+                                project_updated = true;
+                            }
+                            if let Some(value) = toolchain_set_id {
+                                cfg.active_toolchain_set_id = value.clone();
+                                cfg.last_job_toolchain_set_id = value;
+                            }
+                            if let Some(value) = target_id {
+                                cfg.active_target_id = value.clone();
+                                cfg.last_job_target_id = value;
+                            }
+                            if let Some(value) = run_id {
+                                cfg.active_run_id = value;
+                            }
+                            if project_updated {
+                                let project_ref = if cfg.active_project_id.trim().is_empty() {
+                                    cfg.active_project_path.clone()
+                                } else {
+                                    cfg.active_project_id.clone()
+                                };
+                                cfg.last_job_project_id = project_ref;
+                            }
+                            if let Err(err) = cfg.save() {
+                                eprintln!("Failed to persist UI config: {err}");
+                            }
+                            cfg.active_context()
+                        };
+                        apply_active_context(
+                            &ctx,
+                            &context_bar_for_events,
+                            &workflow_for_events,
+                            &projects_for_events,
+                            &targets_for_events,
+                            &toolchains_for_events,
+                            &console_for_events,
+                        );
+                    }
+                    AppEvent::ResetAllStateComplete { ok } => {
+                        if ok {
+                            let ctx = {
+                                let mut cfg = cfg_for_events.lock().unwrap();
+                                cfg.clear_cached_state();
+                                if let Err(err) = cfg.save() {
+                                    eprintln!("Failed to persist UI config: {err}");
+                                }
+                                cfg.active_context()
+                            };
+                            {
+                                let mut state = state_for_events.lock().unwrap();
+                                state.current_job_id = None;
+                            }
+                            home_page_for_events.reset_status();
+                            apply_active_context(
+                                &ctx,
+                                &context_bar_for_events,
+                                &workflow_for_events,
+                                &projects_for_events,
+                                &targets_for_events,
+                                &toolchains_for_events,
+                                &console_for_events,
+                            );
+                            home_page_for_events.page.clear();
+                            workflow_for_events.page.clear();
+                            jobs_for_events.clear();
+                            toolchains_for_events.page.clear();
+                            projects_for_events.page.clear();
+                            targets_for_events.page.clear();
+                            console_for_events.page.clear();
+                            evidence_for_events.page.clear();
+                            settings_for_events.clear();
                         }
                     }
                 }

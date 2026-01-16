@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::UiCommand;
 use crate::config::AppConfig;
-use crate::models::{ProjectTemplateOption, TargetOption, ToolchainSetOption};
+use crate::models::{ActiveContext, ProjectTemplateOption, TargetOption, ToolchainSetOption};
 use crate::utils::parse_list_tokens;
 
 #[derive(Clone)]
@@ -50,6 +50,10 @@ impl Page {
 
         let mut end = self.buffer.end_iter();
         self.textview.scroll_to_iter(&mut end, 0.0, false, 0.0, 0.0);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.buffer.set_text("");
     }
 }
 
@@ -99,6 +103,7 @@ pub(crate) struct TargetsPage {
     pub(crate) page: Page,
     pub(crate) apk_entry: gtk::Entry,
     pub(crate) cuttlefish_build_entry: gtk::Entry,
+    pub(crate) target_entry: gtk::Entry,
 }
 
 #[derive(Clone)]
@@ -106,6 +111,7 @@ pub(crate) struct ToolchainsPage {
     pub(crate) page: Page,
     pub(crate) sdk_version_combo: gtk::ComboBoxText,
     pub(crate) ndk_version_combo: gtk::ComboBoxText,
+    pub(crate) active_set_entry: gtk::Entry,
 }
 
 #[derive(Clone)]
@@ -123,9 +129,23 @@ pub(crate) struct ProjectsPage {
     pub(crate) project_id_entry: gtk::Entry,
 }
 
+#[derive(Clone)]
+pub(crate) struct WorkflowPage {
+    pub(crate) page: Page,
+    pub(crate) run_id_entry: gtk::Entry,
+    pub(crate) project_id_entry: gtk::Entry,
+    pub(crate) project_path_entry: gtk::Entry,
+    pub(crate) toolchain_set_entry: gtk::Entry,
+    pub(crate) target_id_entry: gtk::Entry,
+}
+
 impl TargetsPage {
     pub(crate) fn append(&self, s: &str) {
         self.page.append(s);
+    }
+
+    pub(crate) fn set_target_id(&self, target_id: &str) {
+        self.target_entry.set_text(target_id.trim());
     }
 
     pub(crate) fn set_apk_path(&self, path: &str) {
@@ -146,6 +166,10 @@ impl TargetsPage {
 impl ToolchainsPage {
     pub(crate) fn append(&self, s: &str) {
         self.page.append(s);
+    }
+
+    pub(crate) fn set_active_set_id(&self, set_id: &str) {
+        self.active_set_entry.set_text(set_id.trim());
     }
 
     pub(crate) fn set_available_versions(&self, provider_id: &str, versions: &[String]) {
@@ -171,9 +195,7 @@ impl BuildPage {
     }
 
     pub(crate) fn set_project_ref(&self, project_ref: &str) {
-        if !project_ref.trim().is_empty() {
-            self.project_entry.set_text(project_ref);
-        }
+        self.project_entry.set_text(project_ref.trim());
     }
 }
 
@@ -217,6 +239,45 @@ impl ProjectsPage {
         if !project_id.trim().is_empty() {
             self.project_id_entry.set_text(project_id);
         }
+    }
+
+    pub(crate) fn set_active_context(&self, ctx: &ActiveContext) {
+        let project_id = ctx.project_id.trim();
+        if project_id.is_empty() {
+            self.project_id_entry.set_text("");
+        } else {
+            self.project_id_entry.set_text(project_id);
+        }
+
+        let toolchain_set_id = ctx.toolchain_set_id.trim();
+        if toolchain_set_id.is_empty() {
+            self.toolchain_set_combo.set_active_id(Some("none"));
+        } else {
+            self.toolchain_set_combo
+                .set_active_id(Some(toolchain_set_id));
+        }
+
+        let target_id = ctx.target_id.trim();
+        if target_id.is_empty() {
+            self.target_combo.set_active_id(Some("none"));
+        } else {
+            self.target_combo.set_active_id(Some(target_id));
+        }
+    }
+}
+
+impl WorkflowPage {
+    pub(crate) fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    pub(crate) fn set_context(&self, ctx: &ActiveContext) {
+        self.run_id_entry.set_text(ctx.run_id.trim());
+        self.project_id_entry.set_text(ctx.project_id.trim());
+        self.project_path_entry.set_text(ctx.project_path.trim());
+        self.toolchain_set_entry
+            .set_text(ctx.toolchain_set_id.trim());
+        self.target_id_entry.set_text(ctx.target_id.trim());
     }
 }
 
@@ -591,7 +652,7 @@ pub(crate) fn page_workflow(
     cfg: Arc<std::sync::Mutex<AppConfig>>,
     cmd_tx: mpsc::Sender<UiCommand>,
     parent: &gtk::ApplicationWindow,
-) -> Page {
+) -> WorkflowPage {
     let page = make_page(
         "Workflow - Pipeline orchestration",
         "Overview: Run workflow.pipeline with explicit step inputs and watch run-level events as the pipeline fans out across services.",
@@ -999,7 +1060,14 @@ pub(crate) fn page_workflow(
             .ok();
     });
 
-    page
+    WorkflowPage {
+        page,
+        run_id_entry,
+        project_id_entry,
+        project_path_entry,
+        toolchain_set_entry,
+        target_id_entry,
+    }
 }
 
 pub(crate) fn page_jobs_history(
@@ -1880,6 +1948,7 @@ pub(crate) fn page_toolchains(
         page,
         sdk_version_combo,
         ndk_version_combo,
+        active_set_entry,
     }
 }
 
@@ -2744,6 +2813,7 @@ pub(crate) fn page_targets(
         page,
         apk_entry,
         cuttlefish_build_entry: cuttlefish_build_entry.clone(),
+        target_entry,
     }
 }
 

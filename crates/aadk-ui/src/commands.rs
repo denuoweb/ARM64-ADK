@@ -295,6 +295,9 @@ pub(crate) enum UiCommand {
         variant: BuildVariant,
         filter: ArtifactFilter,
     },
+    ResetAllState {
+        cfg: AppConfig,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +341,16 @@ pub(crate) enum AppEvent {
     ProjectSelected {
         project_id: String,
         project_path: String,
+    },
+    UpdateActiveContext {
+        project_id: Option<String>,
+        project_path: Option<String>,
+        toolchain_set_id: Option<String>,
+        target_id: Option<String>,
+        run_id: Option<String>,
+    },
+    ResetAllStateComplete {
+        ok: bool,
     },
 }
 
@@ -389,6 +402,7 @@ impl UiCommand {
             UiCommand::WorkflowRunPipeline { .. } => "workflow.run_pipeline",
             UiCommand::BuildRun { .. } => "build.run",
             UiCommand::BuildListArtifacts { .. } => "build.list_artifacts",
+            UiCommand::ResetAllState { .. } => "ui.reset_all_state",
         }
     }
 }

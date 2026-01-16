@@ -45,6 +45,10 @@ Update this file whenever UI behavior changes or when commits touching this crat
   correlation id entry to attach work to existing jobs and grouped workflows; the UI derives run_id
   from correlation_id for run-aware services.
 - Log text views apply a ring buffer to cap memory by line/character counts.
+- The UI tracks an active context (project/toolchain set/target/run) persisted in ui-config, surfaces
+  it in the header, and applies it to Workflow/Projects/Targets/Build fields.
+- Workflow run responses, toolchain active set updates, and target default updates sync the active context.
+- The header "Reset all state" action clears ~/.local/share/aadk, resets UI cached fields, and clears logs.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
@@ -69,4 +73,3 @@ Update this file whenever UI behavior changes or when commits touching this crat
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
 - Add template/toolchain/target pickers to the Workflow page to avoid manual id entry.
 - Add run filters (project/target/toolchain/result) and output shortcuts (open/export) to the Evidence dashboard.
-- Persist last workflow inputs (run id, project refs, target id) in UI config.
