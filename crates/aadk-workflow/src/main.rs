@@ -13,9 +13,9 @@ use aadk_proto::aadk::v1::{
     ErrorCode, ErrorDetail, ExportEvidenceBundleRequest, ExportSupportBundleRequest, GetJobRequest,
     Id, InstallApkRequest, JobCompleted, JobEvent, JobFailed, JobLogAppended, JobProgress,
     JobProgressUpdated, JobState, JobStateChanged, KeyValue, LaunchRequest, ListArtifactsRequest,
-    OpenProjectRequest, PublishJobEventRequest, RunId, RunOutput, RunOutputKind, StartJobRequest,
-    StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunRequest,
-    WorkflowPipelineRequest, WorkflowPipelineResponse,
+    OpenProjectRequest, PublishJobEventRequest, ReloadStateRequest, ReloadStateResponse, RunId,
+    RunOutput, RunOutputKind, StartJobRequest, StreamJobEventsRequest, Timestamp,
+    UpsertRunOutputsRequest, UpsertRunRequest, WorkflowPipelineRequest, WorkflowPipelineResponse,
 };
 use aadk_util::{
     build_addr, job_addr, now_millis, observe_addr, project_addr, serve_grpc_with_telemetry,
@@ -23,7 +23,7 @@ use aadk_util::{
 };
 use futures_util::StreamExt;
 use tonic::{transport::Channel, Request, Response, Status};
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -2076,6 +2076,17 @@ impl WorkflowService for Svc {
             job_id: Some(Id { value: job_id }),
             project_id: project_id_for_response,
             outputs: vec![metric("correlation_id", correlation_id)],
+        }))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: 0,
+            detail: "workflow has no persistent state".into(),
         }))
     }
 }

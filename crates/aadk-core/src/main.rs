@@ -2,7 +2,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     fs, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -13,8 +13,9 @@ use aadk_proto::aadk::v1::{
     Job, JobCompleted, JobEvent, JobEventKind, JobFailed, JobFilter, JobHistoryFilter,
     JobLogAppended, JobProgress, JobProgressUpdated, JobRef, JobState, JobStateChanged, KeyValue,
     ListJobHistoryRequest, ListJobHistoryResponse, ListJobsRequest, ListJobsResponse, LogChunk,
-    PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, Remediation, RunId,
-    StartJobRequest, StartJobResponse, StreamJobEventsRequest, StreamRunEventsRequest, Timestamp,
+    PageInfo, Pagination, PublishJobEventRequest, PublishJobEventResponse, ReloadStateRequest,
+    ReloadStateResponse, Remediation, RunId, StartJobRequest, StartJobResponse,
+    StreamJobEventsRequest, StreamRunEventsRequest, Timestamp,
 };
 use aadk_util::{
     init_service_telemetry, init_tracing, now_millis, now_ts, serve_grpc, write_json_atomic,
@@ -856,6 +857,12 @@ impl JobStore {
         let mut inner = self.inner.lock().await;
         inner.retain(|job_id, _| keep_ids.contains(job_id));
     }
+
+    async fn replace_with(&self, other: JobStore) {
+        let mut inner = self.inner.lock().await;
+        let mut other_inner = other.inner.lock().await;
+        *inner = std::mem::take(&mut *other_inner);
+    }
 }
 
 async fn discover_run_jobs(
@@ -1033,11 +1040,16 @@ fn spawn_retention_tick(tx: mpsc::Sender<()>) {
 struct JobSvc {
     store: JobStore,
     persist_tx: mpsc::Sender<()>,
+    policy: RetentionPolicy,
 }
 
 impl JobSvc {
-    fn new(store: JobStore, persist_tx: mpsc::Sender<()>) -> Self {
-        Self { store, persist_tx }
+    fn new(store: JobStore, persist_tx: mpsc::Sender<()>, policy: RetentionPolicy) -> Self {
+        Self {
+            store,
+            persist_tx,
+            policy,
+        }
     }
 
     fn schedule_persist(&self) {
@@ -1518,6 +1530,21 @@ impl JobService for JobSvc {
             }),
         }))
     }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let store = load_store(&self.policy).await;
+        let count = store.list_jobs().await.len() as u32;
+        self.store.replace_with(store).await;
+        self.schedule_persist();
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: count,
+            detail: "job state reloaded".into(),
+        }))
+    }
 }
 
 #[tokio::main]
@@ -1529,7 +1556,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = load_store(&retention).await;
     let persist_tx = spawn_persist_worker(store.clone(), retention);
     spawn_retention_tick(persist_tx.clone());
-    let svc = JobSvc::new(store, persist_tx.clone());
+    let svc = JobSvc::new(store, persist_tx.clone(), retention);
     let _ = persist_tx.try_send(());
 
     serve_grpc(

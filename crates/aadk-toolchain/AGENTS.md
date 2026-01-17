@@ -12,7 +12,7 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - proto/aadk/v1/toolchain.proto
 - RPCs: ListProviders, ListAvailable, ListInstalled, ListToolchainSets, InstallToolchain,
   VerifyToolchain, UpdateToolchain, UninstallToolchain, CleanupToolchainCache,
-  CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet
+  CreateToolchainSet, SetActiveToolchainSet, GetActiveToolchainSet, ReloadState
 
 ## Current implementation details
 - Implementation is split across crates/aadk-toolchain/src/service.rs (gRPC + orchestration),
@@ -25,9 +25,10 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - Service bootstrap, timestamps, and base data paths rely on `aadk-util` to keep defaults consistent.
 - Providers and versions come from a JSON catalog (crates/aadk-toolchain/catalog.json or
   AADK_TOOLCHAIN_CATALOG override).
-- Catalog pins SDK versions 36.0.0 and 35.0.2 plus NDK versions r29, r28c, r27d, and r26d for the
-  android-* custom providers, with linux-aarch64 (musl), aarch64-linux-android, and
-  aarch64_be-linux-musl artifacts where available.
+- Catalog pins SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d for the android-* custom providers. Linux
+  ARM64 artifacts use linux-aarch64 (musl), aarch64-linux-android, and aarch64_be-linux-musl; Windows
+  ARM64 NDK artifacts (windows-aarch64 .7z) are included for r29/r28c/r27d. No darwin SDK/NDK
+  artifacts are available in the custom catalogs.
 - Host selection uses AADK_TOOLCHAIN_HOST when set and falls back to host aliases (for example,
   linux-aarch64 -> aarch64-linux-musl/aarch64-linux-android/aarch64_be-linux-musl) plus
   AADK_TOOLCHAIN_HOST_FALLBACK when the catalog lacks a matching artifact.
@@ -47,6 +48,7 @@ Update this file whenever ToolchainService behavior changes or when commits touc
   honoring correlation_id and run_id for grouped job streams.
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
   toolchain set id.
+- ReloadState reloads persisted toolchain installs and set metadata from disk.
 
 ## Data flow and dependencies
 - Uses JobService for install/verify jobs and publishes logs/progress events.
@@ -67,6 +69,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 
 ## Implementation notes
 - InstallToolchain clones artifact URL/hash when persisting InstalledToolchain so post-install metrics can reuse artifact metadata.
+- Archive extraction supports .7z via `7z` when needed (Windows ARM64 NDK artifacts).
+- Toolchain sources are kept rustfmt-formatted to align with workspace style.
 
 ## Prioritized TODO checklist by service
 - None (workflow UI consumes existing toolchain RPCs).

@@ -45,4 +45,5 @@ message WorkflowPipelineResponse {
 
 service WorkflowService {
   rpc RunPipeline(WorkflowPipelineRequest) returns (WorkflowPipelineResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

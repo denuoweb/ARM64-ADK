@@ -117,4 +117,5 @@ service ObserveService {
   rpc ExportEvidenceBundle(ExportEvidenceBundleRequest) returns (ExportEvidenceBundleResponse);
   rpc UpsertRun(UpsertRunRequest) returns (UpsertRunResponse);
   rpc UpsertRunOutputs(UpsertRunOutputsRequest) returns (UpsertRunOutputsResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

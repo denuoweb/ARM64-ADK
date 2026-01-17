@@ -15,14 +15,16 @@ use aadk_proto::aadk::v1::{
     JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
     ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
-    PublishJobEventRequest, RunId, SetProjectConfigRequest, SetProjectConfigResponse,
-    StartJobRequest, StreamJobEventsRequest, Template, Timestamp,
+    PublishJobEventRequest, ReloadStateRequest, ReloadStateResponse, RunId, SetProjectConfigRequest,
+    SetProjectConfigResponse, StartJobRequest, StreamJobEventsRequest, Template, Timestamp,
 };
-use aadk_util::{expand_user, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic};
+use aadk_util::{
+    expand_user, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch, Mutex};
 use tonic::{transport::Channel, Request, Response, Status};
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
 
 const STATE_FILE_NAME: &str = "projects.json";
@@ -1549,6 +1551,21 @@ impl ProjectService for Svc {
             .map_err(|err| Status::internal(format!("failed to persist state: {err}")))?;
 
         Ok(Response::new(SetProjectConfigResponse { ok: true }))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let state = load_state();
+        let count = state.recent.len() as u32;
+        let mut st = self.state.lock().await;
+        *st = state;
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: count,
+            detail: "project state reloaded".into(),
+        }))
     }
 }
 

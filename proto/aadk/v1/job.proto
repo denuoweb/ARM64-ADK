@@ -188,4 +188,5 @@ service JobService {
   rpc PublishJobEvent(PublishJobEventRequest) returns (PublishJobEventResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc ListJobHistory(ListJobHistoryRequest) returns (ListJobHistoryResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

@@ -1,16 +1,16 @@
 use std::{path::Path, sync::Arc};
 
-use aadk_util::{now_millis, now_ts};
 use aadk_proto::aadk::v1::{
     job_service_client::JobServiceClient, target_service_server::TargetService, ErrorCode,
     GetCuttlefishStatusRequest, GetCuttlefishStatusResponse, GetDefaultTargetRequest,
     GetDefaultTargetResponse, Id, InstallApkRequest, InstallApkResponse, InstallCuttlefishRequest,
     InstallCuttlefishResponse, JobState, KeyValue, LaunchRequest, LaunchResponse,
-    ListTargetsRequest, ListTargetsResponse, LogcatEvent, ResolveCuttlefishBuildRequest,
-    ResolveCuttlefishBuildResponse, SetDefaultTargetRequest, SetDefaultTargetResponse,
-    StartCuttlefishRequest, StartCuttlefishResponse, StopAppRequest, StopAppResponse,
-    StopCuttlefishRequest, StopCuttlefishResponse, StreamLogcatRequest, Target,
+    ListTargetsRequest, ListTargetsResponse, LogcatEvent, ReloadStateRequest, ReloadStateResponse,
+    ResolveCuttlefishBuildRequest, ResolveCuttlefishBuildResponse, SetDefaultTargetRequest,
+    SetDefaultTargetResponse, StartCuttlefishRequest, StartCuttlefishResponse, StopAppRequest,
+    StopAppResponse, StopCuttlefishRequest, StopCuttlefishResponse, StreamLogcatRequest, Target,
 };
+use aadk_util::{now_millis, now_ts};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -1160,5 +1160,20 @@ impl TargetService for Svc {
         ));
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let state = load_state();
+        let count = state.inventory.len() as u32;
+        let mut st = self.state.lock().await;
+        *st = state;
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: count,
+            detail: "target state reloaded".into(),
+        }))
     }
 }

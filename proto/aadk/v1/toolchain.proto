@@ -139,4 +139,5 @@ service ToolchainService {
   rpc CreateToolchainSet(CreateToolchainSetRequest) returns (CreateToolchainSetResponse);
   rpc SetActiveToolchainSet(SetActiveToolchainSetRequest) returns (SetActiveToolchainSetResponse);
   rpc GetActiveToolchainSet(GetActiveToolchainSetRequest) returns (GetActiveToolchainSetResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

@@ -10,7 +10,7 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 
 ## gRPC contract
 - proto/aadk/v1/project.proto
-- RPCs: ListTemplates, CreateProject, OpenProject, ListRecentProjects, GetProject, SetProjectConfig
+- RPCs: ListTemplates, CreateProject, OpenProject, ListRecentProjects, GetProject, SetProjectConfig, ReloadState
 - Shared messages: Id, Project, Template, PageInfo, Timestamp, KeyValue
 
 ## Current implementation details
@@ -33,6 +33,9 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - get_project resolves a project by id for authoritative build resolution.
 - set_project_config updates metadata and persists recent state; missing fields leave existing
   values unchanged.
+- ReloadState reloads recent project metadata from disk and replaces the in-memory cache.
+- Unused `tracing::info` imports were removed to keep builds warning-free.
+- Project sources are kept rustfmt-formatted to align with workspace style.
 
 ## Data flow and dependencies
 - BuildService resolves project_id to a path by calling ProjectService GetProject.

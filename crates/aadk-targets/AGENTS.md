@@ -11,7 +11,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 ## gRPC contract
 - proto/aadk/v1/target.proto
 - RPCs: ListTargets, SetDefaultTarget, GetDefaultTarget, InstallApk, Launch, StopApp,
-  StreamLogcat, InstallCuttlefish, ResolveCuttlefishBuild, StartCuttlefish, StopCuttlefish, GetCuttlefishStatus
+  StreamLogcat, InstallCuttlefish, ResolveCuttlefishBuild, StartCuttlefish, StopCuttlefish, GetCuttlefishStatus, ReloadState
 
 ## Current implementation details
 - Implementation is split across crates/aadk-targets/src/service.rs (gRPC + job orchestration),
@@ -25,8 +25,9 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - default target and target inventory are persisted under ~/.local/share/aadk/state/targets.json
   and reconciled against live discovery when possible.
 - APK install/launch/stop and logcat are implemented via adb commands.
-- Cuttlefish install can accept per-request branch/target/build_id overrides; build resolution is
-  exposed via ResolveCuttlefishBuild.
+- Cuttlefish install uses AADK_CUTTLEFISH_INSTALL_CMD when set; otherwise Debian-like hosts use the
+  android-cuttlefish apt repo install command. Other distros require a custom install command.
+  Per-request branch/target/build_id overrides are supported via ResolveCuttlefishBuild.
 - Cuttlefish operations run external commands and report state via JobService events.
 - Job progress metrics include target/app identifiers, adb serials, install/launch inputs, and
   target health/ABI/SDK details plus Cuttlefish env/artifact details.
@@ -37,6 +38,8 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - GPU mode can be set via AADK_CUTTLEFISH_GPU_MODE and is appended to launch arguments when starting Cuttlefish.
 - Start adds --start_webrtc based on show_full_ui unless already provided in AADK_CUTTLEFISH_START_ARGS.
 - Cuttlefish details and job outputs include WebRTC and environment control URLs.
+- ReloadState reloads persisted targets/defaults from ~/.local/share/aadk/state/targets.json.
+- Target sources are kept rustfmt-formatted to align with workspace style.
 
 ## Data flow and dependencies
 - Requires JobService to publish job state/log/progress for install/launch/stop/cuttlefish jobs.
@@ -68,7 +71,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_CUTTLEFISH_HOST_DIR=/path (or _16K/_4K variants)
 - AADK_CUTTLEFISH_START_CMD / AADK_CUTTLEFISH_START_ARGS
 - AADK_CUTTLEFISH_STOP_CMD
-- AADK_CUTTLEFISH_INSTALL_CMD
+- AADK_CUTTLEFISH_INSTALL_CMD (optional override; required on non-Debian hosts)
 - AADK_CUTTLEFISH_INSTALL_HOST=0
 - AADK_CUTTLEFISH_INSTALL_IMAGES=0
 - AADK_CUTTLEFISH_ADD_GROUPS=0

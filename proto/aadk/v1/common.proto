@@ -39,3 +39,11 @@ message Pagination {
 message PageInfo {
   string next_page_token = 1;
 }
+
+message ReloadStateRequest {}
+
+message ReloadStateResponse {
+  bool ok = 1;
+  uint32 item_count = 2;
+  string detail = 3;
+}

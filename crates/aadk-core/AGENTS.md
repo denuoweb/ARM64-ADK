@@ -10,7 +10,7 @@ Update this file whenever JobService behavior changes or when commits touching t
 
 ## gRPC contract
 - proto/aadk/v1/job.proto
-- RPCs: StartJob, GetJob, CancelJob, StreamJobEvents, StreamRunEvents, PublishJobEvent, ListJobs, ListJobHistory
+- RPCs: StartJob, GetJob, CancelJob, StreamJobEvents, StreamRunEvents, PublishJobEvent, ListJobs, ListJobHistory, ReloadState
 - Core messages: Job, JobEvent, JobProgress, JobLogAppended, JobCompleted, JobFailed, ErrorDetail, RunId
 
 ## Current implementation details
@@ -31,6 +31,8 @@ Update this file whenever JobService behavior changes or when commits touching t
   for orchestrated multi-step flows.
 - StartJob accepts optional correlation_id and run_id; ListJobs can filter by either to group related jobs.
 - Retention trims completed jobs by age/count; active jobs are preserved.
+- ReloadState reloads persisted jobs from disk, applies retention, and swaps the in-memory JobStore.
+- Unused `std::path::Path` import was removed to keep builds warning-free.
 
 ## Data flow and dependencies
 - ToolchainService, BuildService, TargetService, and ObserveService are expected to create jobs

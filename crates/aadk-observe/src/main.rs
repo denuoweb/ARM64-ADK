@@ -15,16 +15,18 @@ use aadk_proto::aadk::v1::{
     ExportSupportBundleRequest, ExportSupportBundleResponse, GetJobRequest, Id, JobCompleted,
     JobEvent, JobFailed, JobLogAppended, JobProgress, JobProgressUpdated, JobState,
     JobStateChanged, KeyValue, ListRunOutputsRequest, ListRunOutputsResponse, ListRunsRequest,
-    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, RunFilter, RunId,
-    RunOutput, RunOutputFilter, RunOutputKind, RunOutputSummary, RunRecord, StartJobRequest,
-    StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest, UpsertRunOutputsResponse,
-    UpsertRunRequest, UpsertRunResponse,
+    ListRunsResponse, LogChunk, PageInfo, Pagination, PublishJobEventRequest, ReloadStateRequest,
+    ReloadStateResponse, RunFilter, RunId, RunOutput, RunOutputFilter, RunOutputKind,
+    RunOutputSummary, RunRecord, StartJobRequest, StreamJobEventsRequest, Timestamp,
+    UpsertRunOutputsRequest, UpsertRunOutputsResponse, UpsertRunRequest, UpsertRunResponse,
 };
-use aadk_util::{data_dir, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic};
+use aadk_util::{
+    data_dir, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 use tonic::{transport::Channel, Request, Response, Status};
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
@@ -2043,6 +2045,22 @@ impl ObserveService for Svc {
 
         Ok(Response::new(UpsertRunOutputsResponse {
             summary: Some(summary.to_proto()),
+        }))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let state = load_state();
+        let runs = state.runs.len();
+        let outputs = state.outputs.len();
+        let mut st = self.state.lock().await;
+        *st = state;
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: runs.saturating_add(outputs) as u32,
+            detail: format!("runs={runs} outputs={outputs}"),
         }))
     }
 }

@@ -60,4 +60,5 @@ message ListArtifactsResponse { repeated Artifact artifacts = 1; }
 service BuildService {
   rpc Build(BuildRequest) returns (BuildResponse);
   rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

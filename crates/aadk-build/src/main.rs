@@ -17,9 +17,9 @@ use aadk_proto::aadk::v1::{
     Artifact, ArtifactFilter, ArtifactType, BuildRequest, BuildResponse, BuildVariant, ErrorCode,
     ErrorDetail, GetJobRequest, GetProjectRequest, Id, JobCompleted, JobEvent, JobFailed,
     JobLogAppended, JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
-    ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest, RunId,
-    RunOutput, RunOutputKind, StartJobRequest, StreamJobEventsRequest, Timestamp,
-    UpsertRunOutputsRequest,
+    ListArtifactsRequest, ListArtifactsResponse, LogChunk, PublishJobEventRequest,
+    ReloadStateRequest, ReloadStateResponse, RunId, RunOutput, RunOutputKind, StartJobRequest,
+    StreamJobEventsRequest, Timestamp, UpsertRunOutputsRequest,
 };
 use aadk_util::{
     data_dir, expand_user, job_addr, now_millis, now_ts, observe_addr, project_addr,
@@ -33,7 +33,7 @@ use tokio::{
     sync::{mpsc, watch, Mutex},
 };
 use tonic::{transport::Channel, Request, Response, Status};
-use tracing::{info, warn};
+use tracing::warn;
 
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 const RECENT_LOG_LIMIT: usize = 200;
@@ -2626,6 +2626,21 @@ impl BuildService for Svc {
         let artifacts = collect_artifacts(&project_path, &query, None);
 
         Ok(Response::new(ListArtifactsResponse { artifacts }))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let state = load_state();
+        let count = state.records.len() as u32;
+        let mut st = self.state.lock().await;
+        *st = state;
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: count,
+            detail: "build state reloaded".into(),
+        }))
     }
 }
 

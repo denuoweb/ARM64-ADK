@@ -9,7 +9,7 @@ Update this file whenever WorkflowService behavior changes or when commits touch
 
 ## gRPC contract
 - proto/aadk/v1/workflow.proto
-- RPCs: RunPipeline
+- RPCs: RunPipeline, ReloadState
 
 ## Current implementation details
 - Implementation lives in crates/aadk-workflow/src/main.rs with a tonic server; shared bootstrap,
@@ -23,6 +23,8 @@ Update this file whenever WorkflowService behavior changes or when commits touch
 - The service waits on each step job by streaming JobService events and validates success.
 - Run records are upserted in ObserveService on start, failure (best-effort), and success.
 - After build steps, workflow upserts artifact outputs to ObserveService so run dashboards can list outputs.
+- ReloadState is a no-op (WorkflowService has no persisted state).
+- Unused `tracing::info` imports were removed to keep builds warning-free.
 
 ## Data flow and dependencies
 - Uses JobService for pipeline job creation and event publishing.

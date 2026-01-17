@@ -55,4 +55,5 @@ service ProjectService {
   rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
   rpc ListRecentProjects(ListRecentProjectsRequest) returns (ListRecentProjectsResponse);
   rpc SetProjectConfig(SetProjectConfigRequest) returns (SetProjectConfigResponse);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

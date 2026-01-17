@@ -9,7 +9,7 @@ Update this file whenever BuildService behavior changes or when commits touching
 
 ## gRPC contract
 - proto/aadk/v1/build.proto
-- RPCs: Build, ListArtifacts
+- RPCs: Build, ListArtifacts, ReloadState
 - Shared messages: Artifact, ArtifactType, ArtifactFilter, BuildVariant, KeyValue, Job events (via JobService)
 
 ## Current implementation details
@@ -34,6 +34,8 @@ Update this file whenever BuildService behavior changes or when commits touching
   when present, and tags metadata (module/variant/build_type/flavors/abi/density/task/type).
 - Job completion outputs include module/variant/tasks plus artifact path/type entries.
 - Artifact sha256 is populated for stored artifacts.
+- ReloadState reloads persisted build state from ~/.local/share/aadk/state/builds.json on demand.
+- Unused `tracing::info` imports were removed to keep builds warning-free.
 
 ## Data flow and dependencies
 - Requires JobService to be up for job creation and event streaming.

@@ -9,7 +9,7 @@ Update this file whenever observe behavior changes or when commits touching this
 
 ## gRPC contract
 - proto/aadk/v1/observe.proto
-- RPCs: ListRuns, ListRunOutputs, ExportSupportBundle, ExportEvidenceBundle, UpsertRun, UpsertRunOutputs
+- RPCs: ListRuns, ListRunOutputs, ExportSupportBundle, ExportEvidenceBundle, UpsertRun, UpsertRunOutputs, ReloadState
 
 ## Current implementation details
 - Implementation lives in crates/aadk-observe/src/main.rs with a tonic server; shared bootstrap
@@ -31,6 +31,9 @@ Update this file whenever observe behavior changes or when commits touching this
 - Bundle contents include a manifest, config snapshots (env + state files), optional toolchain
   state, optional recent run snapshots, and job log capture from JobService history
   (`~/.local/share/aadk/state/jobs.json`).
+- ReloadState reloads run history/output inventory from disk for immediate UI/CLI refresh.
+- Unused `tracing::info` imports were removed to keep builds warning-free.
+- Observe sources are kept rustfmt-formatted to align with workspace style.
 
 ## Data flow and dependencies
 - Uses JobService for bundle jobs and event streaming.

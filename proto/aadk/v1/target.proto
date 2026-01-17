@@ -123,4 +123,5 @@ service TargetService {
   rpc GetCuttlefishStatus(GetCuttlefishStatusRequest) returns (GetCuttlefishStatusResponse);
 
   rpc StreamLogcat(StreamLogcatRequest) returns (stream LogcatEvent);
+  rpc ReloadState(ReloadStateRequest) returns (ReloadStateResponse);
 }

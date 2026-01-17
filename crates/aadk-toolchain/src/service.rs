@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use aadk_util::now_ts;
 use aadk_proto::aadk::v1::{
     toolchain_service_server::ToolchainService, CleanupToolchainCacheRequest,
     CleanupToolchainCacheResponse, CreateToolchainSetRequest, CreateToolchainSetResponse,
@@ -12,11 +11,12 @@ use aadk_proto::aadk::v1::{
     InstallToolchainRequest, InstallToolchainResponse, InstalledToolchain, JobState, KeyValue,
     ListAvailableRequest, ListAvailableResponse, ListInstalledRequest, ListInstalledResponse,
     ListProvidersRequest, ListProvidersResponse, ListToolchainSetsRequest,
-    ListToolchainSetsResponse, PageInfo, SetActiveToolchainSetRequest,
-    SetActiveToolchainSetResponse, ToolchainArtifact, ToolchainKind, ToolchainSet,
-    UninstallToolchainRequest, UninstallToolchainResponse, UpdateToolchainRequest,
+    ListToolchainSetsResponse, PageInfo, ReloadStateRequest, ReloadStateResponse,
+    SetActiveToolchainSetRequest, SetActiveToolchainSetResponse, ToolchainArtifact, ToolchainKind,
+    ToolchainSet, UninstallToolchainRequest, UninstallToolchainResponse, UpdateToolchainRequest,
     UpdateToolchainResponse, VerifyToolchainRequest, VerifyToolchainResponse,
 };
+use aadk_util::now_ts;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::warn;
@@ -2430,6 +2430,22 @@ impl ToolchainService for Svc {
             .cloned();
         Ok(Response::new(GetActiveToolchainSetResponse {
             set: active_set,
+        }))
+    }
+
+    async fn reload_state(
+        &self,
+        _request: Request<ReloadStateRequest>,
+    ) -> Result<Response<ReloadStateResponse>, Status> {
+        let state = load_state();
+        let installed = state.installed.len();
+        let sets = state.toolchain_sets.len();
+        let mut st = self.state.lock().await;
+        *st = state;
+        Ok(Response::new(ReloadStateResponse {
+            ok: true,
+            item_count: installed.saturating_add(sets) as u32,
+            detail: format!("installed={installed} sets={sets}"),
         }))
     }
 }
