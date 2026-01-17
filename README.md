@@ -154,6 +154,26 @@ cargo run -p aadk-cli -- observe export-support
 cargo run -p aadk-cli -- project use-active-defaults <project_id>
 ```
 
+## Release builds (Linux aarch64)
+Build all workspace binaries:
+```bash
+cargo build --release --workspace
+ls -1 target/release/aadk-*
+```
+
+Optional packaging for a GitHub release asset:
+```bash
+VERSION=0.1.0
+OUT=dist/aadk-${VERSION}-linux-aarch64
+mkdir -p "${OUT}"
+cp target/release/aadk-{core,workflow,toolchain,project,build,targets,observe,ui,cli} "${OUT}/"
+cp scripts/dev/run-all.sh README.md LICENSE "${OUT}/"
+tar -C dist -czf "aadk-${VERSION}-linux-aarch64.tar.gz" "aadk-${VERSION}-linux-aarch64"
+sha256sum "aadk-${VERSION}-linux-aarch64.tar.gz" > "aadk-${VERSION}-linux-aarch64.tar.gz.sha256"
+```
+
+See `docs/release.md` and `scripts/release/build.sh` for a scripted flow.
+
 ## What is implemented today
 
 ### JobService (aadk-core)

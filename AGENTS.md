@@ -34,6 +34,8 @@ completed items or move them into the implementation notes.
 - crates/aadk-proto: Rust gRPC codegen for proto/aadk/v1
 - proto/aadk/v1/*.proto: gRPC contracts
 - scripts/dev/run-all.sh: local dev runner for all services
+- scripts/release/build.sh: release build + packaging helper
+- docs/release.md: release build steps
 - SampleConsole: Minimal Compose sample app (Sample Console) bundled with AADK
 - CS492_Assignment1_RosenauJ/CS492A1RosenauJ: Course assignment sample app
 
