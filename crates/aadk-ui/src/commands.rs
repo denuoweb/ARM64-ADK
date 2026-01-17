@@ -295,6 +295,25 @@ pub(crate) enum UiCommand {
         variant: BuildVariant,
         filter: ArtifactFilter,
     },
+    StateSave {
+        cfg: AppConfig,
+        output_path: String,
+        exclude_downloads: bool,
+        exclude_toolchains: bool,
+        exclude_bundles: bool,
+        exclude_telemetry: bool,
+    },
+    StateOpen {
+        cfg: AppConfig,
+        archive_path: String,
+        exclude_downloads: bool,
+        exclude_toolchains: bool,
+        exclude_bundles: bool,
+        exclude_telemetry: bool,
+    },
+    StateReload {
+        cfg: AppConfig,
+    },
     ResetAllState {
         cfg: AppConfig,
     },
@@ -352,6 +371,9 @@ pub(crate) enum AppEvent {
     ResetAllStateComplete {
         ok: bool,
     },
+    ConfigReloaded {
+        cfg: AppConfig,
+    },
 }
 
 impl UiCommand {
@@ -402,6 +424,9 @@ impl UiCommand {
             UiCommand::WorkflowRunPipeline { .. } => "workflow.run_pipeline",
             UiCommand::BuildRun { .. } => "build.run",
             UiCommand::BuildListArtifacts { .. } => "build.list_artifacts",
+            UiCommand::StateSave { .. } => "state.save",
+            UiCommand::StateOpen { .. } => "state.open",
+            UiCommand::StateReload { .. } => "state.reload",
             UiCommand::ResetAllState { .. } => "ui.reset_all_state",
         }
     }

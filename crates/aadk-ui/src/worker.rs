@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aadk_util::{collect_job_history, default_export_path, now_millis};
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient, job_event::Payload as JobPayload,
     job_service_client::JobServiceClient, observe_service_client::ObserveServiceClient,
@@ -20,12 +19,17 @@ use aadk_proto::aadk::v1::{
     KeyValue, LaunchRequest, ListArtifactsRequest, ListAvailableRequest, ListInstalledRequest,
     ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest, ListRecentProjectsRequest,
     ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ResolveCuttlefishBuildRequest,
-    RunFilter, RunId, RunOutputFilter, RunOutputKind, SetActiveToolchainSetRequest,
-    SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
-    StopCuttlefishRequest, StreamJobEventsRequest, StreamLogcatRequest, StreamRunEventsRequest,
-    Timestamp, ToolchainKind, UninstallToolchainRequest, UpdateToolchainRequest,
-    VerifyToolchainRequest, WorkflowPipelineRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ReloadStateRequest,
+    ResolveCuttlefishBuildRequest, RunFilter, RunId, RunOutputFilter, RunOutputKind,
+    SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
+    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
+    StreamLogcatRequest, StreamRunEventsRequest, Timestamp, ToolchainKind,
+    UninstallToolchainRequest, UpdateToolchainRequest, VerifyToolchainRequest,
+    WorkflowPipelineRequest,
+};
+use aadk_util::{
+    collect_job_history, default_export_path, expand_user, now_millis, open_state_archive,
+    save_state_archive_to, state_export_path, StateArchiveOptions, StateOpGuard,
 };
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -504,6 +508,217 @@ fn format_artifact_line(artifact: &Artifact) -> String {
         artifact.size_bytes,
         artifact.path
     )
+}
+
+fn job_state_label(job: &Job) -> String {
+    let state = JobState::try_from(job.state).unwrap_or(JobState::Unspecified);
+    format!("{state:?}")
+}
+
+fn format_active_job(job: &Job) -> String {
+    let job_id = job
+        .job_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("-");
+    let job_type = if job.job_type.trim().is_empty() {
+        "-"
+    } else {
+        job.job_type.as_str()
+    };
+    let created_at = job
+        .created_at
+        .as_ref()
+        .map(|ts| ts.unix_millis)
+        .unwrap_or_default();
+    format!(
+        "latest job is {} job_id={job_id} job_type={job_type} created={created_at}",
+        job_state_label(job)
+    )
+}
+
+async fn latest_active_job(addr: &str) -> Result<Option<Job>, Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(addr).await?);
+    let resp = client
+        .list_jobs(ListJobsRequest {
+            page: Some(Pagination {
+                page_size: 50,
+                page_token: String::new(),
+            }),
+            filter: Some(JobFilter {
+                job_types: vec![],
+                states: vec![JobState::Queued as i32, JobState::Running as i32],
+                created_after: None,
+                created_before: None,
+                finished_after: None,
+                finished_before: None,
+                correlation_id: String::new(),
+                run_id: None,
+            }),
+        })
+        .await?
+        .into_inner();
+    let latest = resp
+        .jobs
+        .into_iter()
+        .max_by_key(|job| job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or(0));
+    Ok(latest)
+}
+
+fn format_state_exclusions(opts: &StateArchiveOptions) -> String {
+    let mut excluded = Vec::new();
+    if opts.exclude_downloads {
+        excluded.push("downloads");
+    }
+    if opts.exclude_toolchains {
+        excluded.push("toolchains");
+    }
+    if opts.exclude_bundles {
+        excluded.push("bundles");
+    }
+    if opts.exclude_telemetry {
+        excluded.push("telemetry");
+    }
+    excluded.push("state-exports");
+    excluded.push("state-ops");
+    excluded.join(", ")
+}
+
+fn log_reload_result(
+    ui: &UiEventSender,
+    name: &str,
+    addr: &str,
+    resp: &aadk_proto::aadk::v1::ReloadStateResponse,
+) {
+    let detail = if resp.detail.trim().is_empty() {
+        "-"
+    } else {
+        resp.detail.as_str()
+    };
+    ui.send(AppEvent::Log {
+        page: "settings",
+        line: format!(
+            "  {name}: ok={} items={} addr={addr} detail={detail}\n",
+            resp.ok, resp.item_count
+        ),
+    })
+    .ok();
+}
+
+async fn reload_job_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_toolchain_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = ToolchainServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_project_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = ProjectServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_build_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = BuildServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_targets_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = TargetServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_observe_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = ObserveServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_workflow_state(
+    addr: &str,
+) -> Result<aadk_proto::aadk::v1::ReloadStateResponse, Box<dyn std::error::Error>> {
+    let mut client = WorkflowServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+async fn reload_all_state(cfg: &AppConfig, ui: &UiEventSender) -> Result<(), Box<dyn std::error::Error>> {
+    let mut errors = Vec::new();
+
+    match reload_job_state(&cfg.job_addr).await {
+        Ok(resp) => log_reload_result(ui, "job", &cfg.job_addr, &resp),
+        Err(err) => errors.push(format!("job: {err}")),
+    }
+    match reload_toolchain_state(&cfg.toolchain_addr).await {
+        Ok(resp) => log_reload_result(ui, "toolchain", &cfg.toolchain_addr, &resp),
+        Err(err) => errors.push(format!("toolchain: {err}")),
+    }
+    match reload_project_state(&cfg.project_addr).await {
+        Ok(resp) => log_reload_result(ui, "project", &cfg.project_addr, &resp),
+        Err(err) => errors.push(format!("project: {err}")),
+    }
+    match reload_build_state(&cfg.build_addr).await {
+        Ok(resp) => log_reload_result(ui, "build", &cfg.build_addr, &resp),
+        Err(err) => errors.push(format!("build: {err}")),
+    }
+    match reload_targets_state(&cfg.targets_addr).await {
+        Ok(resp) => log_reload_result(ui, "targets", &cfg.targets_addr, &resp),
+        Err(err) => errors.push(format!("targets: {err}")),
+    }
+    match reload_observe_state(&cfg.observe_addr).await {
+        Ok(resp) => log_reload_result(ui, "observe", &cfg.observe_addr, &resp),
+        Err(err) => errors.push(format!("observe: {err}")),
+    }
+    match reload_workflow_state(&cfg.workflow_addr).await {
+        Ok(resp) => log_reload_result(ui, "workflow", &cfg.workflow_addr, &resp),
+        Err(err) => errors.push(format!("workflow: {err}")),
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("reload failures: {}", errors.join("; ")).into())
+    }
 }
 
 pub(crate) async fn handle_command(
@@ -3721,13 +3936,12 @@ pub(crate) async fn handle_command(
             } else {
                 None
             };
-            let project_path_update = if project_id_update.is_some()
-                || !project_path.trim().is_empty()
-            {
-                Some(project_path.trim().to_string())
-            } else {
-                None
-            };
+            let project_path_update =
+                if project_id_update.is_some() || !project_path.trim().is_empty() {
+                    Some(project_path.trim().to_string())
+                } else {
+                    None
+                };
             let toolchain_set_update = if !toolchain_set_id.trim().is_empty() {
                 Some(toolchain_set_id.trim().to_string())
             } else {
@@ -3988,6 +4202,240 @@ pub(crate) async fn handle_command(
                     })
                     .ok();
                 }
+            }
+        }
+
+        UiCommand::StateSave {
+            cfg,
+            output_path,
+            exclude_downloads,
+            exclude_toolchains,
+            exclude_bundles,
+            exclude_telemetry,
+        } => {
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Saving local AADK state...\n".into(),
+            })
+            .ok();
+            match latest_active_job(&cfg.job_addr).await {
+                Ok(Some(job)) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "State operation blocked: {}\n",
+                            format_active_job(&job)
+                        ),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("State operation blocked: job check failed: {err}\n"),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            }
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Waiting for state-op FIFO...\n".into(),
+            })
+            .ok();
+            let _guard = match StateOpGuard::acquire("ui.save") {
+                Ok(guard) => guard,
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("State queue error: {err}\n"),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            };
+
+            let opts = StateArchiveOptions {
+                exclude_downloads,
+                exclude_toolchains,
+                exclude_bundles,
+                exclude_telemetry,
+            };
+            let output_path = if output_path.trim().is_empty() {
+                state_export_path()
+            } else {
+                expand_user(&output_path)
+            };
+            match save_state_archive_to(&output_path, &opts) {
+                Ok(result) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "Saved archive: {}\n",
+                            result.output_path.display()
+                        ),
+                    })
+                    .ok();
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "Archive contents: files={} dirs={} bytes={}\n",
+                            result.file_count, result.dir_count, result.total_bytes
+                        ),
+                    })
+                    .ok();
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("Exclusions: {}\n", format_state_exclusions(&opts)),
+                    })
+                    .ok();
+                }
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("Save state failed: {err}\n"),
+                    })
+                    .ok();
+                }
+            }
+        }
+
+        UiCommand::StateOpen {
+            cfg,
+            archive_path,
+            exclude_downloads,
+            exclude_toolchains,
+            exclude_bundles,
+            exclude_telemetry,
+        } => {
+            if archive_path.trim().is_empty() {
+                ui.send(AppEvent::Log {
+                    page: "settings",
+                    line: "Open state requires a zip path.\n".into(),
+                })
+                .ok();
+                return Ok(());
+            }
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Opening AADK state archive...\n".into(),
+            })
+            .ok();
+            match latest_active_job(&cfg.job_addr).await {
+                Ok(Some(job)) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "State operation blocked: {}\n",
+                            format_active_job(&job)
+                        ),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("State operation blocked: job check failed: {err}\n"),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            }
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Waiting for state-op FIFO...\n".into(),
+            })
+            .ok();
+            let _guard = match StateOpGuard::acquire("ui.open") {
+                Ok(guard) => guard,
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("State queue error: {err}\n"),
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            };
+
+            let opts = StateArchiveOptions {
+                exclude_downloads,
+                exclude_toolchains,
+                exclude_bundles,
+                exclude_telemetry,
+            };
+            let archive_path = expand_user(&archive_path);
+            match open_state_archive(&archive_path, &opts) {
+                Ok(result) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "Opened archive: {}\n",
+                            archive_path.display()
+                        ),
+                    })
+                    .ok();
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!(
+                            "Archive restored: files={} dirs={}\n",
+                            result.restored_files, result.restored_dirs
+                        ),
+                    })
+                    .ok();
+                    if !result.preserved_dirs.is_empty() {
+                        ui.send(AppEvent::Log {
+                            page: "settings",
+                            line: format!(
+                                "Preserved: {}\n",
+                                result.preserved_dirs.join(", ")
+                            ),
+                        })
+                        .ok();
+                    }
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("Exclusions: {}\n", format_state_exclusions(&opts)),
+                    })
+                    .ok();
+
+                    let new_cfg = AppConfig::load();
+                    if let Err(err) = reload_all_state(&new_cfg, &ui).await {
+                        ui.send(AppEvent::Log {
+                            page: "settings",
+                            line: format!("Reload state failed: {err}\n"),
+                        })
+                        .ok();
+                    }
+                    ui.send(AppEvent::ConfigReloaded { cfg: new_cfg })
+                        .ok();
+                }
+                Err(err) => {
+                    ui.send(AppEvent::Log {
+                        page: "settings",
+                        line: format!("Open state failed: {err}\n"),
+                    })
+                    .ok();
+                }
+            }
+        }
+
+        UiCommand::StateReload { cfg } => {
+            ui.send(AppEvent::Log {
+                page: "settings",
+                line: "Reloading services from disk...\n".into(),
+            })
+            .ok();
+            if let Err(err) = reload_all_state(&cfg, &ui).await {
+                ui.send(AppEvent::Log {
+                    page: "settings",
+                    line: format!("Reload state failed: {err}\n"),
+                })
+                .ok();
             }
         }
 

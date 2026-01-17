@@ -5,6 +5,7 @@ use aadk_proto::aadk::v1::{
     WorkflowPipelineOptions,
 };
 use aadk_telemetry as telemetry;
+use aadk_util::{data_dir, state_export_path};
 use gtk::gio::prelude::FileExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -127,6 +128,7 @@ pub(crate) struct ProjectsPage {
     pub(crate) toolchain_set_combo: gtk::ComboBoxText,
     pub(crate) target_combo: gtk::ComboBoxText,
     pub(crate) project_id_entry: gtk::Entry,
+    pub(crate) path_entry: gtk::Entry,
 }
 
 #[derive(Clone)]
@@ -137,6 +139,21 @@ pub(crate) struct WorkflowPage {
     pub(crate) project_path_entry: gtk::Entry,
     pub(crate) toolchain_set_entry: gtk::Entry,
     pub(crate) target_id_entry: gtk::Entry,
+}
+
+#[derive(Clone)]
+pub(crate) struct SettingsPage {
+    pub(crate) page: Page,
+    job_entry: gtk::Entry,
+    toolchain_entry: gtk::Entry,
+    project_entry: gtk::Entry,
+    build_entry: gtk::Entry,
+    targets_entry: gtk::Entry,
+    observe_entry: gtk::Entry,
+    workflow_entry: gtk::Entry,
+    usage_check: gtk::CheckButton,
+    crash_check: gtk::CheckButton,
+    install_label: gtk::Label,
 }
 
 impl TargetsPage {
@@ -235,12 +252,6 @@ impl ProjectsPage {
         self.target_combo.set_active(Some(0));
     }
 
-    pub(crate) fn set_project_id(&self, project_id: &str) {
-        if !project_id.trim().is_empty() {
-            self.project_id_entry.set_text(project_id);
-        }
-    }
-
     pub(crate) fn set_active_context(&self, ctx: &ActiveContext) {
         let project_id = ctx.project_id.trim();
         if project_id.is_empty() {
@@ -264,6 +275,15 @@ impl ProjectsPage {
             self.target_combo.set_active_id(Some(target_id));
         }
     }
+
+    pub(crate) fn prompt_project_path(
+        &self,
+        parent: &gtk::ApplicationWindow,
+        cfg: &Arc<std::sync::Mutex<AppConfig>>,
+        cmd_tx: &mpsc::Sender<UiCommand>,
+    ) {
+        select_project_path(parent, &self.path_entry, cfg, cmd_tx);
+    }
 }
 
 impl WorkflowPage {
@@ -278,6 +298,30 @@ impl WorkflowPage {
         self.toolchain_set_entry
             .set_text(ctx.toolchain_set_id.trim());
         self.target_id_entry.set_text(ctx.target_id.trim());
+    }
+}
+
+impl SettingsPage {
+    pub(crate) fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.page.clear();
+    }
+
+    pub(crate) fn apply_config(&self, cfg: &AppConfig) {
+        self.job_entry.set_text(cfg.job_addr.trim());
+        self.toolchain_entry.set_text(cfg.toolchain_addr.trim());
+        self.project_entry.set_text(cfg.project_addr.trim());
+        self.build_entry.set_text(cfg.build_addr.trim());
+        self.targets_entry.set_text(cfg.targets_addr.trim());
+        self.observe_entry.set_text(cfg.observe_addr.trim());
+        self.workflow_entry.set_text(cfg.workflow_addr.trim());
+        self.usage_check.set_active(cfg.telemetry_usage_enabled);
+        self.crash_check.set_active(cfg.telemetry_crash_enabled);
+        self.install_label
+            .set_text(&telemetry_label_text(&cfg.telemetry_install_id));
     }
 }
 
@@ -355,6 +399,54 @@ fn select_folder_dialog(
     dialog.show();
 }
 
+fn is_aadk_project_dir(path: &str) -> bool {
+    let path = path.trim();
+    if path.is_empty() {
+        return false;
+    }
+    Path::new(path)
+        .join(".aadk")
+        .join("project.json")
+        .is_file()
+}
+
+fn queue_project_open(
+    cfg: &Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: &mpsc::Sender<UiCommand>,
+    path: &str,
+) -> bool {
+    let path = path.trim();
+    if path.is_empty() || !is_aadk_project_dir(path) {
+        return false;
+    }
+    let cfg = cfg.lock().unwrap().clone();
+    cmd_tx
+        .try_send(UiCommand::ProjectOpen {
+            cfg,
+            path: path.to_string(),
+        })
+        .ok();
+    true
+}
+
+fn select_project_path(
+    parent: &gtk::ApplicationWindow,
+    path_entry: &gtk::Entry,
+    cfg: &Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: &mpsc::Sender<UiCommand>,
+) {
+    let cfg = cfg.clone();
+    let cmd_tx = cmd_tx.clone();
+    select_folder_dialog(
+        parent,
+        path_entry,
+        "Select Project Folder",
+        Some(Box::new(move |path| {
+            queue_project_open(&cfg, &cmd_tx, &path);
+        })),
+    );
+}
+
 fn select_apk_dialog(
     parent: &gtk::ApplicationWindow,
     apk_entry: &gtk::Entry,
@@ -400,6 +492,107 @@ fn select_apk_dialog(
         dialog.destroy();
     });
     dialog.show();
+}
+
+fn select_zip_dialog(
+    parent: &gtk::ApplicationWindow,
+    path_entry: &gtk::Entry,
+    title: &str,
+    action: gtk::FileChooserAction,
+    accept_label: &str,
+    default_name: Option<&str>,
+    on_accept: Option<Box<dyn Fn(String) + 'static>>,
+) {
+    let dialog = gtk::FileChooserNative::new(
+        Some(title),
+        Some(parent),
+        action,
+        Some(accept_label),
+        Some("Cancel"),
+    );
+
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("AADK State Archive (.zip)"));
+    filter.add_pattern("*.zip");
+    dialog.add_filter(&filter);
+    dialog.set_filter(&filter);
+
+    let current = path_entry.text().to_string();
+    if !current.trim().is_empty() {
+        let current_path = Path::new(current.trim());
+        if let Some(parent_dir) = current_path.parent() {
+            let folder = gtk::gio::File::for_path(parent_dir);
+            let _ = dialog.set_current_folder(Some(&folder));
+        }
+    }
+
+    if action == gtk::FileChooserAction::Save {
+        if let Some(name) = default_name {
+            if !name.trim().is_empty() {
+                dialog.set_current_name(name);
+            }
+        }
+    }
+
+    let path_entry_dialog = path_entry.clone();
+    let on_accept = on_accept;
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(file) = dialog.file() {
+                if let Some(path) = file.path() {
+                    if let Some(path_str) = path.to_str() {
+                        let mut path_out = path_str.to_string();
+                        if action == gtk::FileChooserAction::Save
+                            && !path_out.to_ascii_lowercase().ends_with(".zip")
+                        {
+                            path_out.push_str(".zip");
+                        }
+                        path_entry_dialog.set_text(&path_out);
+                        if let Some(handler) = on_accept.as_ref() {
+                            handler(path_out);
+                        }
+                    }
+                }
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
+}
+
+fn select_zip_open_dialog(
+    parent: &gtk::ApplicationWindow,
+    path_entry: &gtk::Entry,
+    title: &str,
+    on_accept: Option<Box<dyn Fn(String) + 'static>>,
+) {
+    select_zip_dialog(
+        parent,
+        path_entry,
+        title,
+        gtk::FileChooserAction::Open,
+        "Open",
+        None,
+        on_accept,
+    );
+}
+
+fn select_zip_save_dialog(
+    parent: &gtk::ApplicationWindow,
+    path_entry: &gtk::Entry,
+    title: &str,
+    default_name: Option<String>,
+    on_accept: Option<Box<dyn Fn(String) + 'static>>,
+) {
+    select_zip_dialog(
+        parent,
+        path_entry,
+        title,
+        gtk::FileChooserAction::Save,
+        "Save",
+        default_name.as_deref(),
+        on_accept,
+    );
 }
 
 fn make_page(title: &str, description: &str, connections: &str) -> Page {
@@ -2053,17 +2246,14 @@ pub(crate) fn page_projects(
     let refresh_templates = gtk::Button::with_label("Refresh templates");
     let refresh_defaults = gtk::Button::with_label("Refresh defaults");
     let list_recent = gtk::Button::with_label("List recent");
-    let open_btn = gtk::Button::with_label("Open project");
     let create_btn = gtk::Button::with_label("Create project");
     set_tooltip(&refresh_templates, "What: Reload template list. Why: reflect new or updated templates. How: click to query ProjectService.");
     set_tooltip(&refresh_defaults, "What: Reload active defaults. Why: keep dropdowns in sync with Toolchain/Target defaults. How: click to fetch from ProjectService.");
     set_tooltip(&list_recent, "What: List recent projects. Why: reuse recent workspaces. How: click to query ProjectService.");
-    set_tooltip(&open_btn, "What: Open a project by path. Why: register it in ProjectService and recents. How: enter a path or leave blank to pick a folder.");
     set_tooltip(&create_btn, "What: Create a new project from a template. Why: bootstrap a new workspace. How: select template and name, then pick a folder if needed.");
     row.append(&refresh_templates);
     row.append(&refresh_defaults);
     row.append(&list_recent);
-    row.append(&open_btn);
     row.append(&create_btn);
     page.container.insert_child_after(&row, Some(&page.intro));
 
@@ -2213,36 +2403,6 @@ pub(crate) fn page_projects(
             .ok();
     });
 
-    let parent_window_open = parent.clone();
-    let cfg_open = cfg.clone();
-    let cmd_tx_open = cmd_tx.clone();
-    let path_entry_open = path_entry.clone();
-    open_btn.connect_clicked(move |_| {
-        let path = path_entry_open.text().to_string();
-        if path.trim().is_empty() {
-            let parent_window = parent_window_open.clone();
-            let path_entry_dialog = path_entry_open.clone();
-            let cfg_open = cfg_open.clone();
-            let cmd_tx_open = cmd_tx_open.clone();
-            select_folder_dialog(
-                &parent_window,
-                &path_entry_dialog,
-                "Select Project Folder",
-                Some(Box::new(move |path| {
-                    let cfg = cfg_open.lock().unwrap().clone();
-                    cmd_tx_open
-                        .try_send(UiCommand::ProjectOpen { cfg, path })
-                        .ok();
-                })),
-            );
-            return;
-        }
-        let cfg = cfg_open.lock().unwrap().clone();
-        cmd_tx_open
-            .try_send(UiCommand::ProjectOpen { cfg, path })
-            .ok();
-    });
-
     let cfg_create = cfg.clone();
     let cmd_tx_create = cmd_tx.clone();
     let name_entry_create = name_entry.clone();
@@ -2286,6 +2446,8 @@ pub(crate) fn page_projects(
             })
             .ok();
     });
+    let cfg_open_existing = cfg.clone();
+    let cmd_tx_open_existing = cmd_tx.clone();
     let parent_window_create = parent.clone();
     let path_entry_create = path_entry.clone();
     create_btn.connect_clicked(move |_| {
@@ -2294,14 +2456,22 @@ pub(crate) fn page_projects(
             let queue_project_create = queue_project_create.clone();
             let parent_window = parent_window_create.clone();
             let path_entry_dialog = path_entry_create.clone();
+            let cfg_open_existing = cfg_open_existing.clone();
+            let cmd_tx_open_existing = cmd_tx_open_existing.clone();
             select_folder_dialog(
                 &parent_window,
                 &path_entry_dialog,
                 "Select Project Folder",
                 Some(Box::new(move |path| {
+                    if queue_project_open(&cfg_open_existing, &cmd_tx_open_existing, &path) {
+                        return;
+                    }
                     queue_project_create(path);
                 })),
             );
+            return;
+        }
+        if queue_project_open(&cfg_open_existing, &cmd_tx_open_existing, &path) {
             return;
         }
         queue_project_create(path);
@@ -2360,12 +2530,14 @@ pub(crate) fn page_projects(
 
     let parent_window_browse = parent.clone();
     let path_entry_browse = path_entry.clone();
+    let cfg_browse = cfg.clone();
+    let cmd_tx_browse = cmd_tx.clone();
     browse_btn.connect_clicked(move |_| {
-        select_folder_dialog(
+        select_project_path(
             &parent_window_browse,
             &path_entry_browse,
-            "Select Project Folder",
-            None,
+            &cfg_browse,
+            &cmd_tx_browse,
         );
     });
 
@@ -2375,6 +2547,7 @@ pub(crate) fn page_projects(
         toolchain_set_combo,
         target_combo: default_target_combo,
         project_id_entry,
+        path_entry,
     }
 }
 
@@ -3624,7 +3797,11 @@ pub(crate) fn page_evidence(
     page
 }
 
-pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
+pub(crate) fn page_settings(
+    cfg: Arc<std::sync::Mutex<AppConfig>>,
+    cmd_tx: mpsc::Sender<UiCommand>,
+    parent: &gtk::ApplicationWindow,
+) -> SettingsPage {
     let page = make_page(
         "Settings - Service endpoints",
         "Overview: Edit the host:port addresses the UI uses to connect to each service.",
@@ -3640,17 +3817,19 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
                    label: &str,
                    tooltip: &str,
                    initial: String,
-                   setter: Box<dyn Fn(String) + 'static>| {
+                   setter: Box<dyn Fn(String) + 'static>|
+     -> gtk::Entry {
         let l = gtk::Label::builder().label(label).xalign(0.0).build();
         let e = gtk::Entry::builder().text(initial).hexpand(true).build();
         set_tooltip(&e, tooltip);
         e.connect_changed(move |ent| setter(ent.text().to_string()));
         form.attach(&l, 0, row, 1, 1);
         form.attach(&e, 1, row, 1, 1);
+        e
     };
 
     let cfg1 = cfg.clone();
-    add_row(
+    let job_entry = add_row(
         0,
         "JobService",
         "What: JobService address (host:port). Why: Job Control and Job History use it for job control/logs. How: enter an address like 127.0.0.1:50051.",
@@ -3665,7 +3844,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg2 = cfg.clone();
-    add_row(
+    let toolchain_entry = add_row(
         1,
         "ToolchainService",
         "What: ToolchainService address (host:port). Why: Toolchains tab uses it for SDK/NDK operations. How: enter an address like 127.0.0.1:50052.",
@@ -3680,7 +3859,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg3 = cfg.clone();
-    add_row(
+    let project_entry = add_row(
         2,
         "ProjectService",
         "What: ProjectService address (host:port). Why: Projects tab uses it to create/open projects. How: enter an address like 127.0.0.1:50053.",
@@ -3695,7 +3874,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg4 = cfg.clone();
-    add_row(
+    let build_entry = add_row(
         3,
         "BuildService",
         "What: BuildService address (host:port). Why: Build tab uses it for builds and artifacts. How: enter an address like 127.0.0.1:50054.",
@@ -3710,7 +3889,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg5 = cfg.clone();
-    add_row(
+    let targets_entry = add_row(
         4,
         "TargetService",
         "What: TargetService address (host:port). Why: Targets tab uses it for ADB and Cuttlefish actions. How: enter an address like 127.0.0.1:50055.",
@@ -3725,7 +3904,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg6 = cfg.clone();
-    add_row(
+    let observe_entry = add_row(
         5,
         "ObserveService",
         "What: ObserveService address (host:port). Why: Evidence tab uses it for runs and bundles. How: enter an address like 127.0.0.1:50056.",
@@ -3740,7 +3919,7 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
     );
 
     let cfg7 = cfg.clone();
-    add_row(
+    let workflow_entry = add_row(
         6,
         "WorkflowService",
         "What: WorkflowService address (host:port). Why: Workflow tab uses it for pipeline runs. How: enter an address like 127.0.0.1:50057.",
@@ -3756,13 +3935,212 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
 
     page.container.insert_child_after(&form, Some(&page.intro));
 
-    let telemetry_frame = gtk::Frame::builder()
-        .label("Telemetry (opt-in)")
+    let state_frame = gtk::Frame::builder().label("State archives").build();
+    let state_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let state_intro = gtk::Label::builder()
+        .label("Save or open the local AADK state directory (zip). Exclusions skip large folders; state-exports and state-ops are always excluded.")
+        .xalign(0.0)
+        .wrap(true)
         .build();
+    state_box.append(&state_intro);
+
+    let exclude_downloads = gtk::CheckButton::with_label("Exclude downloads");
+    let exclude_toolchains = gtk::CheckButton::with_label("Exclude toolchains");
+    let exclude_bundles = gtk::CheckButton::with_label("Exclude bundles");
+    let exclude_telemetry = gtk::CheckButton::with_label("Exclude telemetry");
+    set_tooltip(&exclude_downloads, "What: Skip ~/.local/share/aadk/downloads. Why: it can be large. How: enable to exclude from save/open.");
+    set_tooltip(&exclude_toolchains, "What: Skip ~/.local/share/aadk/toolchains. Why: toolchains can be large. How: enable to exclude from save/open.");
+    set_tooltip(&exclude_bundles, "What: Skip ~/.local/share/aadk/bundles. Why: bundle zips can be large. How: enable to exclude from save/open.");
+    set_tooltip(&exclude_telemetry, "What: Skip ~/.local/share/aadk/telemetry. Why: telemetry is optional and can be large. How: enable to exclude from save/open.");
+    let exclude_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    exclude_box.append(&exclude_downloads);
+    exclude_box.append(&exclude_toolchains);
+    exclude_box.append(&exclude_bundles);
+    exclude_box.append(&exclude_telemetry);
+    state_box.append(&exclude_box);
+
+    let save_label = gtk::Label::builder()
+        .label("Save archive path")
+        .xalign(0.0)
+        .build();
+    let save_entry = gtk::Entry::builder()
+        .placeholder_text("Archive path (.zip)")
+        .hexpand(true)
+        .build();
+    let save_browse = gtk::Button::with_label("Browse...");
+    let save_btn = gtk::Button::with_label("Save state");
+    set_tooltip(&save_entry, "What: Output zip path. Why: choose where to store the archive. How: type a path or use Browse.");
+    set_tooltip(&save_browse, "What: Pick an output zip path. Why: avoid typos. How: choose a file location.");
+    set_tooltip(&save_btn, "What: Save the local state to a zip archive. Why: snapshot current AADK state. How: choose exclusions and click.");
+    let save_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    save_row.append(&save_entry);
+    save_row.append(&save_browse);
+    save_row.append(&save_btn);
+    state_box.append(&save_label);
+    state_box.append(&save_row);
+
+    let open_label = gtk::Label::builder()
+        .label("Open archive path")
+        .xalign(0.0)
+        .build();
+    let open_entry = gtk::Entry::builder()
+        .placeholder_text("Archive path (.zip)")
+        .hexpand(true)
+        .build();
+    let open_browse = gtk::Button::with_label("Browse...");
+    let open_btn = gtk::Button::with_label("Open state");
+    set_tooltip(&open_entry, "What: Zip archive path to open. Why: restore a saved state. How: type a path or use Browse.");
+    set_tooltip(&open_browse, "What: Pick a zip archive. Why: avoid typos. How: choose the archive to open.");
+    set_tooltip(&open_btn, "What: Open an archive and reload services. Why: restore a previous AADK state. How: choose exclusions and click.");
+    let open_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    open_row.append(&open_entry);
+    open_row.append(&open_browse);
+    open_row.append(&open_btn);
+    state_box.append(&open_label);
+    state_box.append(&open_row);
+
+    let reload_btn = gtk::Button::with_label("Reload state");
+    set_tooltip(&reload_btn, "What: Reload in-memory state from disk. Why: apply recent state changes without restart. How: click to call ReloadState on all services.");
+    state_box.append(&reload_btn);
+
+    let cfg_state_save = cfg.clone();
+    let cmd_tx_state_save = cmd_tx.clone();
+    let save_entry_state = save_entry.clone();
+    let exclude_downloads_save = exclude_downloads.clone();
+    let exclude_toolchains_save = exclude_toolchains.clone();
+    let exclude_bundles_save = exclude_bundles.clone();
+    let exclude_telemetry_save = exclude_telemetry.clone();
+    let queue_state_save = Rc::new(move |path: String| {
+        let cfg = cfg_state_save.lock().unwrap().clone();
+        cmd_tx_state_save
+            .try_send(UiCommand::StateSave {
+                cfg,
+                output_path: path,
+                exclude_downloads: exclude_downloads_save.is_active(),
+                exclude_toolchains: exclude_toolchains_save.is_active(),
+                exclude_bundles: exclude_bundles_save.is_active(),
+                exclude_telemetry: exclude_telemetry_save.is_active(),
+            })
+            .ok();
+    });
+
+    let parent_save = parent.clone();
+    let save_entry_dialog = save_entry.clone();
+    let queue_state_save_dialog = queue_state_save.clone();
+    save_btn.connect_clicked(move |_| {
+        let path = save_entry_dialog.text().to_string();
+        if path.trim().is_empty() {
+            let default_name = state_export_path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("aadk-state.zip")
+                .to_string();
+            select_zip_save_dialog(
+                &parent_save,
+                &save_entry_dialog,
+                "Save AADK State Archive",
+                Some(default_name),
+                Some(Box::new(move |path| {
+                    queue_state_save_dialog(path);
+                })),
+            );
+            return;
+        }
+        queue_state_save_dialog(path);
+    });
+
+    let parent_save_browse = parent.clone();
+    let save_entry_browse = save_entry.clone();
+    save_browse.connect_clicked(move |_| {
+        let default_name = state_export_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("aadk-state.zip")
+            .to_string();
+        select_zip_save_dialog(
+            &parent_save_browse,
+            &save_entry_browse,
+            "Save AADK State Archive",
+            Some(default_name),
+            None,
+        );
+    });
+
+    let cfg_state_open = cfg.clone();
+    let cmd_tx_state_open = cmd_tx.clone();
+    let exclude_downloads_open = exclude_downloads.clone();
+    let exclude_toolchains_open = exclude_toolchains.clone();
+    let exclude_bundles_open = exclude_bundles.clone();
+    let exclude_telemetry_open = exclude_telemetry.clone();
+    let queue_state_open = Rc::new(move |path: String| {
+        let cfg = cfg_state_open.lock().unwrap().clone();
+        cmd_tx_state_open
+            .try_send(UiCommand::StateOpen {
+                cfg,
+                archive_path: path,
+                exclude_downloads: exclude_downloads_open.is_active(),
+                exclude_toolchains: exclude_toolchains_open.is_active(),
+                exclude_bundles: exclude_bundles_open.is_active(),
+                exclude_telemetry: exclude_telemetry_open.is_active(),
+            })
+            .ok();
+    });
+
+    let parent_open = parent.clone();
+    let open_entry_dialog = open_entry.clone();
+    let queue_state_open_dialog = queue_state_open.clone();
+    open_btn.connect_clicked(move |_| {
+        let path = open_entry_dialog.text().to_string();
+        if path.trim().is_empty() {
+            select_zip_open_dialog(
+                &parent_open,
+                &open_entry_dialog,
+                "Open AADK State Archive",
+                Some(Box::new(move |path| {
+                    queue_state_open_dialog(path);
+                })),
+            );
+            return;
+        }
+        queue_state_open_dialog(path);
+    });
+
+    let parent_open_browse = parent.clone();
+    let open_entry_browse = open_entry.clone();
+    open_browse.connect_clicked(move |_| {
+        select_zip_open_dialog(
+            &parent_open_browse,
+            &open_entry_browse,
+            "Open AADK State Archive",
+            None,
+        );
+    });
+
+    let cfg_state_reload = cfg.clone();
+    let cmd_tx_state_reload = cmd_tx.clone();
+    reload_btn.connect_clicked(move |_| {
+        let cfg = cfg_state_reload.lock().unwrap().clone();
+        cmd_tx_state_reload
+            .try_send(UiCommand::StateReload { cfg })
+            .ok();
+    });
+
+    state_frame.set_child(Some(&state_box));
+    page.container
+        .insert_child_after(&state_frame, Some(&form));
+
+    let telemetry_frame = gtk::Frame::builder().label("Telemetry (opt-in)").build();
     let telemetry_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let usage_check = gtk::CheckButton::with_label("Send usage analytics");
     let crash_check = gtk::CheckButton::with_label("Send crash reports");
     let install_label = gtk::Label::builder().xalign(0.0).build();
+    let telemetry_dir = data_dir().join("telemetry").join("aadk-ui");
+    let telemetry_events = telemetry_dir.join("events.jsonl");
+    let telemetry_crashes = telemetry_dir.join("crashes");
+    let telemetry_events_label = gtk::Label::builder().xalign(0.0).wrap(true).build();
+    let telemetry_crashes_label = gtk::Label::builder().xalign(0.0).wrap(true).build();
+    let open_telemetry = gtk::Button::with_label("Open telemetry folder");
+    let open_crashes = gtk::Button::with_label("Open crash reports folder");
     set_tooltip(
         &usage_check,
         "What: Send anonymous usage event counts. Why: helps prioritize fixes. How: opt in to enable.",
@@ -3771,6 +4149,18 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
         &crash_check,
         "What: Send crash summaries on next launch. Why: helps debug stability issues. How: opt in to enable.",
     );
+    set_tooltip(
+        &open_telemetry,
+        "What: Open the telemetry folder. Why: review events.jsonl. How: uses the default file manager.",
+    );
+    set_tooltip(
+        &open_crashes,
+        "What: Open the crash reports folder. Why: review crash JSON files. How: uses the default file manager.",
+    );
+    telemetry_events_label.set_selectable(true);
+    telemetry_events_label.set_text(&format!("Telemetry events: {}", telemetry_events.display()));
+    telemetry_crashes_label.set_selectable(true);
+    telemetry_crashes_label.set_text(&format!("Crash reports: {}", telemetry_crashes.display()));
 
     {
         let cfg = cfg.lock().unwrap();
@@ -3821,14 +4211,52 @@ pub(crate) fn page_settings(cfg: Arc<std::sync::Mutex<AppConfig>>) -> Page {
         install_label_crash.set_text(&telemetry_label_text(&install_id));
     });
 
+    let page_telemetry = page.clone();
+    let telemetry_dir_open = telemetry_dir.clone();
+    open_telemetry.connect_clicked(move |_| {
+        let uri = gtk::gio::File::for_path(&telemetry_dir_open).uri();
+        match gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>) {
+            Ok(_) => page_telemetry.append(&format!("Opened telemetry folder: {uri}\n")),
+            Err(err) => page_telemetry.append(&format!("Failed to open telemetry folder: {err}\n")),
+        }
+    });
+
+    let page_crashes = page.clone();
+    let telemetry_crashes_open = telemetry_crashes.clone();
+    open_crashes.connect_clicked(move |_| {
+        let uri = gtk::gio::File::for_path(&telemetry_crashes_open).uri();
+        match gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>) {
+            Ok(_) => page_crashes.append(&format!("Opened crash reports folder: {uri}\n")),
+            Err(err) => {
+                page_crashes.append(&format!("Failed to open crash reports folder: {err}\n"))
+            }
+        }
+    });
+
     telemetry_box.append(&usage_check);
     telemetry_box.append(&crash_check);
     telemetry_box.append(&install_label);
+    telemetry_box.append(&telemetry_events_label);
+    telemetry_box.append(&telemetry_crashes_label);
+    telemetry_box.append(&open_telemetry);
+    telemetry_box.append(&open_crashes);
     telemetry_frame.set_child(Some(&telemetry_box));
     page.container
-        .insert_child_after(&telemetry_frame, Some(&form));
+        .insert_child_after(&telemetry_frame, Some(&state_frame));
 
-    page
+    SettingsPage {
+        page,
+        job_entry,
+        toolchain_entry,
+        project_entry,
+        build_entry,
+        targets_entry,
+        observe_entry,
+        workflow_entry,
+        usage_check,
+        crash_check,
+        install_label,
+    }
 }
 
 fn telemetry_label_text(install_id: &str) -> String {

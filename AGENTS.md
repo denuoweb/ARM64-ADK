@@ -59,6 +59,8 @@ Default addresses (override with env vars):
 - RunId is a first-class identifier for multi-service workflows; correlation_id remains a secondary grouping key.
 - JobService StreamRunEvents aggregates run events across jobs using bounded buffering and best-effort timestamp ordering for late discovery.
 - WorkflowService orchestrates workflow.pipeline runs and upserts run records to ObserveService.
+- UI/CLI can export/import local state archives and invoke ReloadState RPCs to rehydrate service state after import.
+- UI header New project runs reset-all-state then opens the project folder picker; Open project uses the picker and auto-opens existing projects.
 
 ## Shared data and locations
 - Job state: ~/.local/share/aadk/state/jobs.json
@@ -73,6 +75,8 @@ Default addresses (override with env vars):
 - Observe state: ~/.local/share/aadk/state/observe.json
 - Observe bundle outputs: ~/.local/share/aadk/bundles
 - UI/CLI log exports: ~/.local/share/aadk/state/*-job-export-*.json
+- State export archives: ~/.local/share/aadk/state-exports/*.zip
+- State operation queue/locks: ~/.local/share/aadk/state-ops
 - Telemetry events/crashes: ~/.local/share/aadk/telemetry/<app>/*
 
 ## Per-service AGENT files

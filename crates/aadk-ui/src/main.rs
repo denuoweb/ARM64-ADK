@@ -6,30 +6,27 @@ mod ui_events;
 mod utils;
 mod worker;
 
-use std::{
-    sync::Arc,
-    thread,
-};
+use std::{sync::Arc, thread};
 
+use glib::prelude::*;
 use gtk::gdk;
 use gtk::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk::gio::prelude::ListModelExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use glib::prelude::*;
 use tokio::sync::mpsc;
 
+use aadk_telemetry as telemetry;
 use commands::{AppEvent, UiCommand};
 use config::AppConfig;
 use models::ActiveContext;
 use pages::{
     page_console, page_evidence, page_home, page_jobs_history, page_projects, page_settings,
     page_targets, page_toolchains, page_workflow, BuildPage, ProjectsPage, TargetsPage,
-    ToolchainsPage, WorkflowPage,
+    SettingsPage, ToolchainsPage, WorkflowPage,
 };
 use ui_events::{UiEventQueue, DEFAULT_EVENT_QUEUE_SIZE};
 use worker::{handle_command, AppState};
-use aadk_telemetry as telemetry;
 
 fn main() {
     let app = gtk::Application::builder()
@@ -98,8 +95,10 @@ impl ContextBar {
             "Toolchain set: {}",
             format_context_value(ctx.toolchain_set_id.trim())
         ));
-        self.target_label
-            .set_text(&format!("Target: {}", format_context_value(ctx.target_id.trim())));
+        self.target_label.set_text(&format!(
+            "Target: {}",
+            format_context_value(ctx.target_id.trim())
+        ));
         self.run_label
             .set_text(&format!("Run: {}", format_context_value(ctx.run_id.trim())));
     }
@@ -149,8 +148,8 @@ fn build_ui(app: &gtk::Application) {
         let mut cfg = cfg.lock().unwrap();
         let usage_enabled =
             telemetry_env_override("AADK_TELEMETRY").unwrap_or(cfg.telemetry_usage_enabled);
-        let crash_enabled = telemetry_env_override("AADK_TELEMETRY_CRASH")
-            .unwrap_or(cfg.telemetry_crash_enabled);
+        let crash_enabled =
+            telemetry_env_override("AADK_TELEMETRY_CRASH").unwrap_or(cfg.telemetry_crash_enabled);
         cfg.telemetry_usage_enabled = usage_enabled;
         cfg.telemetry_crash_enabled = crash_enabled;
         if (usage_enabled || crash_enabled) && cfg.telemetry_install_id.trim().is_empty() {
@@ -178,6 +177,7 @@ fn build_ui(app: &gtk::Application) {
     });
     telemetry::event("app.start", &[]);
     let state = Arc::new(std::sync::Mutex::new(AppState::default()));
+    let pending_project_prompt = Arc::new(std::sync::Mutex::new(false));
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>(128);
     let (event_queue, mut notify_rx) = UiEventQueue::new(DEFAULT_EVENT_QUEUE_SIZE);
@@ -285,13 +285,13 @@ fn build_ui(app: &gtk::Application) {
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let new_project_btn = gtk::Button::with_label("New project");
     let open_project_btn = gtk::Button::with_label("Open project");
-    let reset_btn = gtk::Button::with_label("Reset all state");
-    set_tooltip(&new_project_btn, "What: Create a new project. Why: start a fresh workspace. How: opens the Projects page.");
-    set_tooltip(&open_project_btn, "What: Open an existing project. Why: set the active project context. How: opens the Projects page.");
-    set_tooltip(&reset_btn, "What: Clear all cached state and UI context. Why: start clean across services. How: confirm the reset prompt.");
+    set_tooltip(
+        &new_project_btn,
+        "What: Start a new project. Why: reset local state and pick a workspace. How: confirm reset, then choose a project folder.",
+    );
+    set_tooltip(&open_project_btn, "What: Open an existing project. Why: set the active project context. How: choose a project folder.");
     action_row.append(&new_project_btn);
     action_row.append(&open_project_btn);
-    action_row.append(&reset_btn);
 
     context_grid.attach(&project_label, 0, 0, 1, 1);
     context_grid.attach(&toolchain_label, 1, 0, 1, 1);
@@ -301,44 +301,6 @@ fn build_ui(app: &gtk::Application) {
 
     context_frame.set_child(Some(&context_grid));
 
-    let stack_for_new = stack.clone();
-    new_project_btn.connect_clicked(move |_| {
-        stack_for_new.set_visible_child_name("projects");
-    });
-
-    let stack_for_open = stack.clone();
-    open_project_btn.connect_clicked(move |_| {
-        stack_for_open.set_visible_child_name("projects");
-    });
-
-    let cfg_reset = cfg.clone();
-    let cmd_tx_reset = cmd_tx.clone();
-    let window_reset = window.clone();
-    reset_btn.connect_clicked(move |_| {
-        let dialog = gtk::MessageDialog::builder()
-            .transient_for(&window_reset)
-            .modal(true)
-            .message_type(gtk::MessageType::Warning)
-            .text("Reset all local AADK state?")
-            .secondary_text("This deletes cached state, job history, toolchains, downloads, bundles, and UI selections. Running jobs will keep going.")
-            .build();
-        dialog.add_buttons(&[
-            ("Cancel", gtk::ResponseType::Cancel),
-            ("Reset", gtk::ResponseType::Accept),
-        ]);
-        let cmd_tx_confirm = cmd_tx_reset.clone();
-        let cfg_confirm = cfg_reset.clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                let cfg = cfg_confirm.lock().unwrap().clone();
-                cmd_tx_confirm
-                    .try_send(UiCommand::ResetAllState { cfg })
-                    .ok();
-            }
-            dialog.close();
-        });
-        dialog.show();
-    });
     root.append(&context_frame);
     root.append(&body);
 
@@ -351,7 +313,53 @@ fn build_ui(app: &gtk::Application) {
     let targets = page_targets(cfg.clone(), cmd_tx.clone(), &window);
     let evidence = page_evidence(cfg.clone(), cmd_tx.clone());
     let console = page_console(cfg.clone(), cmd_tx.clone(), &window);
-    let settings = page_settings(cfg.clone());
+    let settings = page_settings(cfg.clone(), cmd_tx.clone(), &window);
+
+    let stack_for_new = stack.clone();
+    let cfg_reset = cfg.clone();
+    let cmd_tx_reset = cmd_tx.clone();
+    let window_reset = window.clone();
+    let pending_project_prompt_reset = pending_project_prompt.clone();
+    new_project_btn.connect_clicked(move |_| {
+        stack_for_new.set_visible_child_name("projects");
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&window_reset)
+            .modal(true)
+            .message_type(gtk::MessageType::Warning)
+            .text("Reset all local AADK state before starting a new project?")
+            .secondary_text("This deletes cached state, job history, toolchains, downloads, bundles, and UI selections. Running jobs will keep going.")
+            .build();
+        dialog.add_buttons(&[
+            ("Cancel", gtk::ResponseType::Cancel),
+            ("Reset and continue", gtk::ResponseType::Accept),
+        ]);
+        let cmd_tx_confirm = cmd_tx_reset.clone();
+        let cfg_confirm = cfg_reset.clone();
+        let pending_confirm = pending_project_prompt_reset.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                let cfg = cfg_confirm.lock().unwrap().clone();
+                if cmd_tx_confirm
+                    .try_send(UiCommand::ResetAllState { cfg })
+                    .is_ok()
+                {
+                    *pending_confirm.lock().unwrap() = true;
+                }
+            }
+            dialog.close();
+        });
+        dialog.show();
+    });
+
+    let stack_for_open = stack.clone();
+    let window_open = window.clone();
+    let cfg_open = cfg.clone();
+    let cmd_tx_open = cmd_tx.clone();
+    let projects_open = projects.clone();
+    open_project_btn.connect_clicked(move |_| {
+        stack_for_open.set_visible_child_name("projects");
+        projects_open.prompt_project_path(&window_open, &cfg_open, &cmd_tx_open);
+    });
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -375,7 +383,7 @@ fn build_ui(app: &gtk::Application) {
     stack.add_titled(&targets.page.root, Some("targets"), "Targets");
     stack.add_titled(&jobs_history.root, Some("jobs"), "Job History");
     stack.add_titled(&evidence.root, Some("evidence"), "Evidence");
-    stack.add_titled(&settings.root, Some("settings"), "Settings");
+    stack.add_titled(&settings.page.root, Some("settings"), "Settings");
 
     stack.connect_visible_child_notify(|stack| {
         if let Some(name) = stack.visible_child_name() {
@@ -395,6 +403,9 @@ fn build_ui(app: &gtk::Application) {
     let settings_for_events = settings.clone();
     let context_bar_for_events = context_bar.clone();
     let cfg_for_events = cfg.clone();
+    let pending_project_prompt_for_events = pending_project_prompt.clone();
+    let window_for_events = window.clone();
+    let cmd_tx_for_events = cmd_tx.clone();
 
     // Event routing: drain worker events on the GTK thread.
     let state_for_events = state.clone();
@@ -585,6 +596,36 @@ fn build_ui(app: &gtk::Application) {
                             evidence_for_events.clear();
                             settings_for_events.clear();
                         }
+                        let should_prompt = {
+                            let mut pending = pending_project_prompt_for_events.lock().unwrap();
+                            let should_prompt = *pending && ok;
+                            *pending = false;
+                            should_prompt
+                        };
+                        if should_prompt {
+                            projects_for_events.prompt_project_path(
+                                &window_for_events,
+                                &cfg_for_events,
+                                &cmd_tx_for_events,
+                            );
+                        }
+                    }
+                    AppEvent::ConfigReloaded { cfg } => {
+                        {
+                            let mut cfg_guard = cfg_for_events.lock().unwrap();
+                            *cfg_guard = cfg.clone();
+                        }
+                        let ctx = cfg.active_context();
+                        apply_active_context(
+                            &ctx,
+                            &context_bar_for_events,
+                            &workflow_for_events,
+                            &projects_for_events,
+                            &targets_for_events,
+                            &toolchains_for_events,
+                            &console_for_events,
+                        );
+                        settings_for_events.apply_config(&cfg);
                     }
                 }
             }

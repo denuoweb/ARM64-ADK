@@ -1,15 +1,5 @@
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, io, io::Write, path::PathBuf};
 
-use aadk_util::{
-    collect_job_history, data_dir, default_export_path, now_millis, write_json_atomic,
-    DEFAULT_BUILD_ADDR, DEFAULT_JOB_ADDR, DEFAULT_OBSERVE_ADDR, DEFAULT_PROJECT_ADDR,
-    DEFAULT_TARGETS_ADDR, DEFAULT_TOOLCHAIN_ADDR, DEFAULT_WORKFLOW_ADDR,
-};
 use aadk_proto::aadk::v1::{
     build_service_client::BuildServiceClient, job_event::Payload as JobPayload,
     job_service_client::JobServiceClient, observe_service_client::ObserveServiceClient,
@@ -23,13 +13,20 @@ use aadk_proto::aadk::v1::{
     JobEventKind, JobFilter, JobHistoryFilter, JobState, KeyValue, ListArtifactsRequest,
     ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest, ListRecentProjectsRequest,
     ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, RunFilter, RunId, RunOutputFilter,
-    RunOutputKind, SetActiveToolchainSetRequest, SetDefaultTargetRequest, SetProjectConfigRequest,
-    StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest, StreamJobEventsRequest,
-    StreamRunEventsRequest, UninstallToolchainRequest, UpdateToolchainRequest,
-    WorkflowPipelineOptions, WorkflowPipelineRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ReloadStateRequest, RunFilter,
+    RunId, RunOutputFilter, RunOutputKind, SetActiveToolchainSetRequest,
+    SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
+    StopCuttlefishRequest, StreamJobEventsRequest, StreamRunEventsRequest,
+    UninstallToolchainRequest, UpdateToolchainRequest, WorkflowPipelineOptions,
+    WorkflowPipelineRequest,
 };
 use aadk_telemetry as telemetry;
+use aadk_util::{
+    collect_job_history, data_dir, default_export_path, expand_user, now_millis,
+    open_state_archive, save_state_archive_to, state_export_path, StateArchiveOptions,
+    StateOpGuard, write_json_atomic, DEFAULT_BUILD_ADDR, DEFAULT_JOB_ADDR, DEFAULT_OBSERVE_ADDR,
+    DEFAULT_PROJECT_ADDR, DEFAULT_TARGETS_ADDR, DEFAULT_TOOLCHAIN_ADDR, DEFAULT_WORKFLOW_ADDR,
+};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -79,6 +76,11 @@ enum Cmd {
     Workflow {
         #[command(subcommand)]
         cmd: WorkflowCmd,
+    },
+    /// Local state archive commands (save/open/reload)
+    State {
+        #[command(subcommand)]
+        cmd: StateCmd,
     },
 }
 
@@ -679,6 +681,70 @@ enum WorkflowCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum StateCmd {
+    /// Save local AADK state to a zip archive
+    Save {
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        /// Output path for the archive (defaults to ~/.local/share/aadk/state-exports)
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long)]
+        exclude_downloads: bool,
+        #[arg(long)]
+        exclude_toolchains: bool,
+        #[arg(long)]
+        exclude_bundles: bool,
+        #[arg(long)]
+        exclude_telemetry: bool,
+    },
+    /// Open a local AADK state archive and reload services
+    Open {
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        toolchain_addr: String,
+        #[arg(long, default_value_t = default_project_addr())]
+        project_addr: String,
+        #[arg(long, default_value_t = default_build_addr())]
+        build_addr: String,
+        #[arg(long, default_value_t = default_targets_addr())]
+        targets_addr: String,
+        #[arg(long, default_value_t = default_observe_addr())]
+        observe_addr: String,
+        #[arg(long, default_value_t = default_workflow_addr())]
+        workflow_addr: String,
+        /// Archive path to import (zip)
+        archive: String,
+        #[arg(long)]
+        exclude_downloads: bool,
+        #[arg(long)]
+        exclude_toolchains: bool,
+        #[arg(long)]
+        exclude_bundles: bool,
+        #[arg(long)]
+        exclude_telemetry: bool,
+    },
+    /// Reload in-memory state from disk across services
+    Reload {
+        #[arg(long, default_value_t = default_job_addr())]
+        job_addr: String,
+        #[arg(long, default_value_t = default_toolchain_addr())]
+        toolchain_addr: String,
+        #[arg(long, default_value_t = default_project_addr())]
+        project_addr: String,
+        #[arg(long, default_value_t = default_build_addr())]
+        build_addr: String,
+        #[arg(long, default_value_t = default_targets_addr())]
+        targets_addr: String,
+        #[arg(long, default_value_t = default_observe_addr())]
+        observe_addr: String,
+        #[arg(long, default_value_t = default_workflow_addr())]
+        workflow_addr: String,
+    },
+}
+
 fn default_job_addr() -> String {
     if let Ok(val) = std::env::var("AADK_JOB_ADDR") {
         return val;
@@ -801,11 +867,15 @@ fn command_name(cmd: &Cmd) -> &'static str {
         Cmd::Workflow { cmd } => match cmd {
             WorkflowCmd::RunPipeline { .. } => "workflow.run_pipeline",
         },
+        Cmd::State { cmd } => match cmd {
+            StateCmd::Save { .. } => "state.save",
+            StateCmd::Open { .. } => "state.open",
+            StateCmd::Reload { .. } => "state.reload",
+        },
     }
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-
     match cli.cmd {
         Cmd::Job { cmd } => match cmd {
             JobCmd::Run {
@@ -2219,6 +2289,129 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::State { cmd } => match cmd {
+            StateCmd::Save {
+                job_addr,
+                output,
+                exclude_downloads,
+                exclude_toolchains,
+                exclude_bundles,
+                exclude_telemetry,
+            } => {
+                update_cli_config(|cfg| cfg.job_addr = job_addr.clone());
+                if let Err(err) = ensure_no_running_jobs(&job_addr).await {
+                    eprintln!("{err}");
+                    return Ok(());
+                }
+                println!("Waiting for state-op FIFO...");
+                let _guard = StateOpGuard::acquire("cli.save")?;
+                let opts = StateArchiveOptions {
+                    exclude_downloads,
+                    exclude_toolchains,
+                    exclude_bundles,
+                    exclude_telemetry,
+                };
+                let output_path = output
+                    .as_deref()
+                    .map(expand_user)
+                    .unwrap_or_else(state_export_path);
+                let result = save_state_archive_to(&output_path, &opts)?;
+                println!("Saved state archive:");
+                println!("  path={}", result.output_path.display());
+                println!(
+                    "  files={} dirs={} bytes={}",
+                    result.file_count, result.dir_count, result.total_bytes
+                );
+                print_state_exclusions(&opts);
+            }
+            StateCmd::Open {
+                job_addr,
+                toolchain_addr,
+                project_addr,
+                build_addr,
+                targets_addr,
+                observe_addr,
+                workflow_addr,
+                archive,
+                exclude_downloads,
+                exclude_toolchains,
+                exclude_bundles,
+                exclude_telemetry,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = job_addr.clone();
+                    cfg.toolchain_addr = toolchain_addr.clone();
+                    cfg.project_addr = project_addr.clone();
+                    cfg.build_addr = build_addr.clone();
+                    cfg.targets_addr = targets_addr.clone();
+                    cfg.observe_addr = observe_addr.clone();
+                    cfg.workflow_addr = workflow_addr.clone();
+                });
+                if let Err(err) = ensure_no_running_jobs(&job_addr).await {
+                    eprintln!("{err}");
+                    return Ok(());
+                }
+                println!("Waiting for state-op FIFO...");
+                let _guard = StateOpGuard::acquire("cli.open")?;
+                let opts = StateArchiveOptions {
+                    exclude_downloads,
+                    exclude_toolchains,
+                    exclude_bundles,
+                    exclude_telemetry,
+                };
+                let archive_path = expand_user(&archive);
+                let result = open_state_archive(&archive_path, &opts)?;
+                println!("Opened state archive:");
+                println!("  path={}", archive_path.display());
+                println!(
+                    "  restored_files={} restored_dirs={}",
+                    result.restored_files, result.restored_dirs
+                );
+                if !result.preserved_dirs.is_empty() {
+                    println!("  preserved={}", result.preserved_dirs.join(", "));
+                }
+                print_state_exclusions(&opts);
+                reload_all_state(&StateServiceAddrs {
+                    job_addr,
+                    toolchain_addr,
+                    project_addr,
+                    build_addr,
+                    targets_addr,
+                    observe_addr,
+                    workflow_addr,
+                })
+                .await?;
+            }
+            StateCmd::Reload {
+                job_addr,
+                toolchain_addr,
+                project_addr,
+                build_addr,
+                targets_addr,
+                observe_addr,
+                workflow_addr,
+            } => {
+                update_cli_config(|cfg| {
+                    cfg.job_addr = job_addr.clone();
+                    cfg.toolchain_addr = toolchain_addr.clone();
+                    cfg.project_addr = project_addr.clone();
+                    cfg.build_addr = build_addr.clone();
+                    cfg.targets_addr = targets_addr.clone();
+                    cfg.observe_addr = observe_addr.clone();
+                    cfg.workflow_addr = workflow_addr.clone();
+                });
+                reload_all_state(&StateServiceAddrs {
+                    job_addr,
+                    toolchain_addr,
+                    project_addr,
+                    build_addr,
+                    targets_addr,
+                    observe_addr,
+                    workflow_addr,
+                })
+                .await?;
+            }
+        },
     }
 
     Ok(())
@@ -2747,6 +2940,193 @@ fn render_artifact(artifact: &Artifact) {
     if !artifact.sha256.is_empty() {
         println!("  sha256={}", artifact.sha256);
     }
+}
+
+struct StateServiceAddrs {
+    job_addr: String,
+    toolchain_addr: String,
+    project_addr: String,
+    build_addr: String,
+    targets_addr: String,
+    observe_addr: String,
+    workflow_addr: String,
+}
+
+fn print_state_exclusions(opts: &StateArchiveOptions) {
+    let mut excluded = Vec::new();
+    if opts.exclude_downloads {
+        excluded.push("downloads");
+    }
+    if opts.exclude_toolchains {
+        excluded.push("toolchains");
+    }
+    if opts.exclude_bundles {
+        excluded.push("bundles");
+    }
+    if opts.exclude_telemetry {
+        excluded.push("telemetry");
+    }
+    excluded.push("state-exports");
+    excluded.push("state-ops");
+    println!("  excluded={}", excluded.join(", "));
+}
+
+async fn ensure_no_running_jobs(
+    job_addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(job_addr).await?);
+    let resp = client
+        .list_jobs(ListJobsRequest {
+            page: Some(Pagination {
+                page_size: 50,
+                page_token: String::new(),
+            }),
+            filter: Some(JobFilter {
+                job_types: vec![],
+                states: vec![JobState::Queued as i32, JobState::Running as i32],
+                created_after: None,
+                created_before: None,
+                finished_after: None,
+                finished_before: None,
+                correlation_id: String::new(),
+                run_id: None,
+            }),
+        })
+        .await?
+        .into_inner();
+    if resp.jobs.is_empty() {
+        return Ok(());
+    }
+    let latest = resp
+        .jobs
+        .iter()
+        .max_by_key(|job| job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or(0))
+        .unwrap();
+    let job_id = latest
+        .job_id
+        .as_ref()
+        .map(|id| id.value.as_str())
+        .unwrap_or("-");
+    let job_type = latest.job_type.as_str();
+    let state = JobState::try_from(latest.state).unwrap_or(JobState::Unspecified);
+    Err(format!(
+        "State operation blocked: latest job is {state:?} job_id={job_id} job_type={job_type}"
+    )
+    .into())
+}
+
+async fn reload_all_state(addrs: &StateServiceAddrs) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Reloading services from disk:");
+    let mut errors = Vec::new();
+
+    if let Err(err) = reload_job_state(&addrs.job_addr).await {
+        errors.push(format!("job: {err}"));
+    }
+    if let Err(err) = reload_toolchain_state(&addrs.toolchain_addr).await {
+        errors.push(format!("toolchain: {err}"));
+    }
+    if let Err(err) = reload_project_state(&addrs.project_addr).await {
+        errors.push(format!("project: {err}"));
+    }
+    if let Err(err) = reload_build_state(&addrs.build_addr).await {
+        errors.push(format!("build: {err}"));
+    }
+    if let Err(err) = reload_targets_state(&addrs.targets_addr).await {
+        errors.push(format!("targets: {err}"));
+    }
+    if let Err(err) = reload_observe_state(&addrs.observe_addr).await {
+        errors.push(format!("observe: {err}"));
+    }
+    if let Err(err) = reload_workflow_state(&addrs.workflow_addr).await {
+        errors.push(format!("workflow: {err}"));
+    }
+
+    if !errors.is_empty() {
+        return Err(format!("reload failures: {}", errors.join("; ")).into());
+    }
+    Ok(())
+}
+
+fn print_reload_result(name: &str, addr: &str, resp: &aadk_proto::aadk::v1::ReloadStateResponse) {
+    let detail = if resp.detail.trim().is_empty() {
+        "-".to_string()
+    } else {
+        resp.detail.clone()
+    };
+    println!(
+        "  {name}: ok={} items={} addr={addr} detail={detail}",
+        resp.ok, resp.item_count
+    );
+}
+
+async fn reload_job_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = JobServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("job", addr, &resp);
+    Ok(())
+}
+
+async fn reload_toolchain_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = ToolchainServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("toolchain", addr, &resp);
+    Ok(())
+}
+
+async fn reload_project_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = ProjectServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("project", addr, &resp);
+    Ok(())
+}
+
+async fn reload_build_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = BuildServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("build", addr, &resp);
+    Ok(())
+}
+
+async fn reload_targets_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = TargetServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("targets", addr, &resp);
+    Ok(())
+}
+
+async fn reload_observe_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = ObserveServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("observe", addr, &resp);
+    Ok(())
+}
+
+async fn reload_workflow_state(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = WorkflowServiceClient::new(connect(addr).await?);
+    let resp = client
+        .reload_state(ReloadStateRequest {})
+        .await?
+        .into_inner();
+    print_reload_result("workflow", addr, &resp);
+    Ok(())
 }
 
 async fn connect(addr: &str) -> Result<Channel, Box<dyn std::error::Error>> {

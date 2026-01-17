@@ -57,7 +57,10 @@ impl UiEventQueue {
         }
 
         if queue.len() >= self.max_len {
-            if let Some(pos) = queue.iter().position(|ev| matches!(ev, AppEvent::Log { .. })) {
+            if let Some(pos) = queue
+                .iter()
+                .position(|ev| matches!(ev, AppEvent::Log { .. }))
+            {
                 queue.remove(pos);
             } else if matches!(event, AppEvent::Log { .. }) {
                 return false;

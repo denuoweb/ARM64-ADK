@@ -26,6 +26,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
 - Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
 - Settings includes opt-in telemetry toggles for usage and crash reporting (env overrides: AADK_TELEMETRY/AADK_TELEMETRY_CRASH).
+- Settings includes local state archive Save/Open/Reload controls with archive exclusions and zip path selection.
 - Home job streams run on cancellable worker tasks; new watch requests abort the previous stream and progress updates are throttled.
 - Workflow page runs workflow.pipeline with explicit inputs, optional step overrides, and run-level StreamRunEvents output.
 - Projects auto-fill the project id after create/open and sync the Build project field to the latest selection.
@@ -48,7 +49,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - The UI tracks an active context (project/toolchain set/target/run) persisted in ui-config, surfaces
   it in the header, and applies it to Workflow/Projects/Targets/Build fields.
 - Workflow run responses, toolchain active set updates, and target default updates sync the active context.
-- The header "Reset all state" action clears ~/.local/share/aadk, resets UI cached fields, and clears logs.
+- The header "New project" action runs reset-all-state (clearing ~/.local/share/aadk, cached UI fields, and logs) and then opens the project folder picker; "Open project" opens the folder picker and auto-opens existing projects.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
@@ -68,8 +69,13 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Job Control page event routing now keeps the HomePage handle so status labels and log output update together.
 - Project config updates treat empty/"none" toolchain or target selections as unset before sending.
 - Telemetry emits app.start, ui.page.view, and ui.command.* events when opt-in is enabled.
-- Reset-all-state clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
-- Project open/create and target install actions now prompt for a folder/APK when the path is blank.
+- Settings shows telemetry log/crash locations and provides buttons to open the folders.
+- State archive operations block if the latest job is queued/running and serialize via a FIFO queue under ~/.local/share/aadk/state-ops.
+- Open State reloads all services via ReloadState RPCs and refreshes the UI config from disk.
+- Reset-all-state (triggered by the header New project flow) clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
+- Project open/create and target install actions now prompt for a folder/APK when the path is blank, and project folder picks auto-open existing projects when metadata is present.
+- Projects page removed an unused project-id setter to keep builds warning-free.
+- UI sources are kept rustfmt-formatted to align with workspace style.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
