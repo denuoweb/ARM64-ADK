@@ -5,9 +5,10 @@ are thin clients; all real work lives in the service crates. JobService is the e
 streams job state/progress/logs to clients.
 
 ## Supported host
-- Linux ARM64 (aarch64) only.
-- Other host architectures are not supported; x86_64 is intentionally out of scope because Android Studio already covers it.
-- SDK/NDK catalog entries and Cuttlefish host tooling are pinned to ARM64 hosts.
+- Linux ARM64 (aarch64) is the only supported host for running the full stack (services/UI/Cuttlefish).
+- x86_64 is intentionally out of scope because Android Studio already covers it.
+- Toolchain catalog includes Linux ARM64 SDK/NDK artifacts plus Windows ARM64 NDK artifacts (r29/r28c/r27d);
+  no darwin SDK/NDK artifacts are published in the custom catalogs.
 
 ## Architecture at a glance
 - GTK4 UI and CLI call gRPC services; they do not implement business logic.
@@ -81,8 +82,16 @@ This repo does not bundle third-party toolchains; services download or invoke th
     - r28c (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64_be-linux-musl.tar.xz`
     - r27d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64_be-linux-musl.tar.xz`
     - r26d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r26/android-ndk-r26d-aarch64_be-linux-musl.tar.xz`
+  - NDK (windows-aarch64, .7z):
+    - r29 (2025-09-08): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-w64-mingw32.7z`
+    - r28c (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-w64-mingw32.7z`
+    - r27d (2025-07-19): `https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-w64-mingw32.7z`
+  - Windows ARM64 NDK archives require `7z` for extraction; no darwin SDK/NDK artifacts are
+    currently published in the custom catalogs.
   - These repos are MIT licensed; review upstream Android SDK/NDK terms if you plan to redistribute.
-- Cuttlefish host packages from `https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts`.
+- Cuttlefish host tools install uses the android-cuttlefish apt repo on Debian/Ubuntu by default
+  (`https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts`); override with
+  `AADK_CUTTLEFISH_INSTALL_CMD` for other distros.
 - Cuttlefish images from `ci.android.com` / `android-ci.googleusercontent.com`.
 - Gradle via `gradlew` or system `gradle`.
 - adb/platform-tools from the Android SDK or Cuttlefish host tools.
@@ -250,6 +259,7 @@ Prerequisites (per Android Cuttlefish docs):
 - KVM virtualization is required. Check `/dev/kvm` (or `find /dev -name kvm` on ARM64); enable nested virtualization on cloud hosts.
 - Ensure the user is in `kvm`, `cvdnetwork`, and `render` groups; re-login or reboot after group changes.
 - Host tools and images should come from the same build id (Install Cuttlefish enforces this).
+- Debian/Ubuntu hosts install Cuttlefish host tools from the android-cuttlefish apt repo by default; other distros require `AADK_CUTTLEFISH_INSTALL_CMD`.
 
 Defaults (when not overridden):
 - Branch: `aosp-android-latest-release` for 4K hosts; `main-16k-with-phones` for 16K.
@@ -305,7 +315,7 @@ Configuration (env vars):
 - `AADK_CUTTLEFISH_START_CMD="..."` to override the start command
 - `AADK_CUTTLEFISH_START_ARGS="..."` to append args to `cvd start`/`launch_cvd`
 - `AADK_CUTTLEFISH_STOP_CMD="..."` to override the stop command
-- `AADK_CUTTLEFISH_INSTALL_CMD="..."` to override the host install command
+- `AADK_CUTTLEFISH_INSTALL_CMD="..."` to override the host install command (required on non-Debian hosts)
 - `AADK_CUTTLEFISH_INSTALL_HOST=0` to skip host package installation
 - `AADK_CUTTLEFISH_INSTALL_IMAGES=0` to skip image downloads
 - `AADK_CUTTLEFISH_ADD_GROUPS=0` to skip adding the user to kvm/cvdnetwork/render

@@ -144,22 +144,30 @@ pub(crate) async fn extract_archive(
     cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> Result<(), Status> {
     let archive_str = archive.to_string_lossy();
-    let mut cmd = Command::new("tar");
-
-    if archive_str.ends_with(".tar.xz") || archive_str.ends_with(".txz") {
-        cmd.arg("-xJf");
-    } else if archive_str.ends_with(".tar.zst") || archive_str.ends_with(".tzst") {
-        cmd.arg("-I").arg("zstd").arg("-xf");
-    } else if archive_str.ends_with(".tar.gz") || archive_str.ends_with(".tgz") {
-        cmd.arg("-xzf");
+    let mut cmd = if archive_str.ends_with(".7z") {
+        let mut cmd = Command::new("7z");
+        cmd.arg("x")
+            .arg("-y")
+            .arg(format!("-o{}", dest.display()))
+            .arg(archive);
+        cmd
     } else {
-        return Err(Status::invalid_argument(
-            "unsupported archive format (expected .tar.xz, .tar.zst, or .tar.gz)",
-        ));
-    }
-
-    cmd.arg(archive);
-    cmd.arg("-C").arg(dest);
+        let mut cmd = Command::new("tar");
+        if archive_str.ends_with(".tar.xz") || archive_str.ends_with(".txz") {
+            cmd.arg("-xJf");
+        } else if archive_str.ends_with(".tar.zst") || archive_str.ends_with(".tzst") {
+            cmd.arg("-I").arg("zstd").arg("-xf");
+        } else if archive_str.ends_with(".tar.gz") || archive_str.ends_with(".tgz") {
+            cmd.arg("-xzf");
+        } else {
+            return Err(Status::invalid_argument(
+                "unsupported archive format (expected .tar.xz, .tar.zst, .tar.gz, or .7z)",
+            ));
+        }
+        cmd.arg(archive);
+        cmd.arg("-C").arg(dest);
+        cmd
+    };
 
     tracing::info!(
         "Extracting archive {} into {}",

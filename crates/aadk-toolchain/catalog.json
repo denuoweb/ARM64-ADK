@@ -75,6 +75,12 @@
               "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64_be-linux-musl.tar.xz",
               "sha256": "3fec28f19335fde0e58d345f922c296d4e67713e1e96a7bbfd5d9d398a4e48d9",
               "size_bytes": 198670936
+            },
+            {
+              "host": "windows-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-w64-mingw32.7z",
+              "sha256": "e8f2e49af602473bc1a7e74ed0467e038384b2151db255f75c9c53aee5af52f8",
+              "size_bytes": 229479969
             }
           ]
         },
@@ -100,6 +106,12 @@
               "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64_be-linux-musl.tar.xz",
               "sha256": "ff7b7e219b824c7ca4ae493fd69fd854a2a11dd8e5d31ad6a8751eaf0f19806a",
               "size_bytes": 294017020
+            },
+            {
+              "host": "windows-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-w64-mingw32.7z",
+              "sha256": "698db68117298a8f2e1e3618a7dfb0c36a1caf947fe56c658d176513505ed39f",
+              "size_bytes": 214057355
             }
           ]
         },
@@ -125,6 +137,12 @@
               "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64_be-linux-musl.tar.xz",
               "sha256": "58f3697f528dffd37de687d632f5981af7e1b6012b593bb8c41cb952e3e259e3",
               "size_bytes": 283945528
+            },
+            {
+              "host": "windows-aarch64",
+              "url": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r27/android-ndk-r27d-aarch64-w64-mingw32.7z",
+              "sha256": "df07b197e7d1281dc0462523b4ecda7466477d25c092dd9b4995cc85375d0ea7",
+              "size_bytes": 197848063
             }
           ]
         },

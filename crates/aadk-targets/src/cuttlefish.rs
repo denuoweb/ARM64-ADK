@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -119,6 +120,93 @@ fn find_command(cmd: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn read_os_release() -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    let mut raw = None;
+    for path in ["/etc/os-release", "/usr/lib/os-release"] {
+        if let Ok(contents) = fs::read_to_string(path) {
+            raw = Some(contents);
+            break;
+        }
+    }
+    let Some(raw) = raw else {
+        return values;
+    };
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, '=');
+        let key = match parts.next() {
+            Some(key) if !key.trim().is_empty() => key.trim(),
+            _ => continue,
+        };
+        let value = match parts.next() {
+            Some(value) => value.trim(),
+            None => continue,
+        };
+        let value = value.trim_matches('"').trim_matches('\'').to_string();
+        values.insert(key.to_string(), value);
+    }
+    values
+}
+
+fn os_release_tokens(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn linux_distro_summary() -> String {
+    let values = read_os_release();
+    let mut parts = Vec::new();
+    if let Some(id) = values.get("ID") {
+        if !id.trim().is_empty() {
+            parts.push(format!("id={}", id.trim()));
+        }
+    }
+    if let Some(like) = values.get("ID_LIKE") {
+        if !like.trim().is_empty() {
+            parts.push(format!("id_like={}", like.trim()));
+        }
+    }
+    if let Some(name) = values.get("NAME") {
+        if !name.trim().is_empty() {
+            parts.push(format!("name={}", name.trim()));
+        }
+    }
+    if parts.is_empty() {
+        "id=unknown".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn is_debian_like() -> bool {
+    let values = read_os_release();
+    let mut tokens = Vec::new();
+    if let Some(id) = values.get("ID") {
+        tokens.extend(os_release_tokens(id));
+    }
+    if let Some(like) = values.get("ID_LIKE") {
+        tokens.extend(os_release_tokens(like));
+    }
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "debian" | "ubuntu" | "raspbian" | "linuxmint" | "pop"
+        )
+    })
 }
 
 pub(crate) fn host_page_size() -> Option<usize> {
@@ -1499,7 +1587,7 @@ async fn cuttlefish_preflight(
         return Err(job_error_detail(
             ErrorCode::NotFound,
             "Cuttlefish host tools not found",
-            "install cuttlefish-base/cuttlefish-user or set AADK_LAUNCH_CVD_BIN".into(),
+            "install Cuttlefish host tools or set AADK_LAUNCH_CVD_BIN".into(),
             job_id,
         ));
     }
@@ -1673,7 +1761,7 @@ pub(crate) async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool)
             let detail = job_error_detail(
                 ErrorCode::NotFound,
                 "cuttlefish not installed",
-                "install cuttlefish-base/cuttlefish-user or run Install Cuttlefish".into(),
+                "install Cuttlefish host tools or set AADK_CUTTLEFISH_INSTALL_CMD and run Install Cuttlefish".into(),
                 &job_id,
             );
             let _ = publish_failed(&mut job_client, &job_id, detail).await;
@@ -2189,9 +2277,36 @@ pub(crate) async fn run_cuttlefish_install_job(job_id: String, options: Cuttlefi
     let sudo_prefix = sudo_prefix();
 
     if install_host && (!host_installed || options.force) {
+        let mut used_default = false;
         let install_cmd = if let Some(cmd) = read_env_trimmed("AADK_CUTTLEFISH_INSTALL_CMD") {
             cmd
         } else {
+            if std::env::consts::OS != "linux" {
+                let detail = job_error_detail(
+                    ErrorCode::InvalidArgument,
+                    "cuttlefish install not supported on this host",
+                    format!(
+                        "host_os={}; set AADK_CUTTLEFISH_INSTALL_CMD for a custom installer",
+                        std::env::consts::OS
+                    ),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, detail).await;
+                return;
+            }
+            if !is_debian_like() {
+                let detail = job_error_detail(
+                    ErrorCode::InvalidArgument,
+                    "cuttlefish install not configured for this distro",
+                    format!(
+                        "host_os=linux {}; set AADK_CUTTLEFISH_INSTALL_CMD for a custom installer",
+                        linux_distro_summary()
+                    ),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, detail).await;
+                return;
+            }
             let installer_path = if let Some(path) = find_command("apt-get") {
                 path
             } else if let Some(path) = find_command("apt") {
@@ -2206,7 +2321,6 @@ pub(crate) async fn run_cuttlefish_install_job(job_id: String, options: Cuttlefi
                 let _ = publish_failed(&mut job_client, &job_id, detail).await;
                 return;
             };
-
             let sudo_prefix = match sudo_prefix.as_ref() {
                 Some(prefix) => prefix.as_str(),
                 None => {
@@ -2221,15 +2335,23 @@ pub(crate) async fn run_cuttlefish_install_job(job_id: String, options: Cuttlefi
                     return;
                 }
             };
-
+            used_default = true;
             let installer = installer_path.display();
             let repo_key = "https://us-apt.pkg.dev/doc/repo-signing-key.gpg";
             let repo_line = "deb https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts android-cuttlefish main";
             format!(
-                "{sudo_prefix}{installer} update && {sudo_prefix}{installer} install -y curl ca-certificates unzip tar python3 && {sudo_prefix}curl -fsSL {repo_key} -o /etc/apt/trusted.gpg.d/artifact-registry.asc && {sudo_prefix}chmod a+r /etc/apt/trusted.gpg.d/artifact-registry.asc && {sudo_prefix}sh -lc \"echo '{repo_line}' > /etc/apt/sources.list.d/artifact-registry.list\" && {sudo_prefix}{installer} update && {sudo_prefix}{installer} install -y cuttlefish-base cuttlefish-user"
+                "{sudo_prefix}{installer} update && {sudo_prefix}{installer} install -y curl ca-certificates && {sudo_prefix}curl -fsSL {repo_key} -o /etc/apt/trusted.gpg.d/artifact-registry.asc && {sudo_prefix}chmod a+r /etc/apt/trusted.gpg.d/artifact-registry.asc && {sudo_prefix}sh -lc \"echo '{repo_line}' > /etc/apt/sources.list.d/artifact-registry.list\" && {sudo_prefix}{installer} update && {sudo_prefix}{installer} install -y cuttlefish-base cuttlefish-user"
             )
         };
 
+        if used_default {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "Using Debian/Ubuntu apt install from android-cuttlefish README\n",
+            )
+            .await;
+        }
         let _ = publish_log(
             &mut job_client,
             &job_id,

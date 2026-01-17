@@ -7,9 +7,12 @@ the service crates contain the real workflows. The project is designed around a 
 streams events to clients while long-running jobs execute in other services.
 
 ## Supported host
-- Linux ARM64 (aarch64) only.
-- Other host architectures are not supported; x86_64 is intentionally out of scope because Android Studio already covers it.
-- Toolchain catalog entries and Cuttlefish host tooling are pinned to ARM64 hosts.
+- Linux ARM64 (aarch64) is the only supported host for running the full stack (services/UI/Cuttlefish).
+- x86_64 is intentionally out of scope because Android Studio already covers it.
+- Toolchain catalog includes Linux ARM64 SDK/NDK artifacts plus Windows ARM64 NDK artifacts (r29/r28c/r27d);
+  no darwin SDK/NDK artifacts are published in the custom catalogs.
+- Cuttlefish install uses AADK_CUTTLEFISH_INSTALL_CMD when set; Debian-like hosts fall back to the
+  android-cuttlefish apt repo install command.
 
 ## Maintenance
 Keep this file and the per-service AGENTS.md files in sync with code changes. When Codex changes
@@ -52,9 +55,9 @@ Default addresses (override with env vars):
 - BuildService loads a Gradle model snapshot after project evaluation to validate modules/variants.
 - TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
-- ToolchainService catalog pins linux-aarch64 SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d for the
-  custom providers, with aarch64-linux-musl, aarch64-linux-android, and aarch64_be-linux-musl
-  artifacts where available.
+- ToolchainService catalog pins SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d; Linux ARM64 artifacts use
+  linux-aarch64/aarch64-linux-android/aarch64_be-linux-musl, and Windows ARM64 NDK artifacts are included
+  for r29/r28c/r27d (.7z).
 - ObserveService persists run history and a run output inventory; run records include a summary pointer for output counts and last bundle.
 - RunId is a first-class identifier for multi-service workflows; correlation_id remains a secondary grouping key.
 - JobService StreamRunEvents aggregates run events across jobs using bounded buffering and best-effort timestamp ordering for late discovery.

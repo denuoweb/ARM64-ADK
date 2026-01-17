@@ -164,6 +164,7 @@ pub(crate) fn catalog_version_hosts(
     let mut hosts = entry
         .artifacts
         .iter()
+        .filter(|item| !item.url.trim().is_empty())
         .map(|item| item.host.clone())
         .collect::<Vec<_>>();
     hosts.sort();
