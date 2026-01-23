@@ -9,7 +9,19 @@
         { "key": "minSdk", "value": "24" },
         { "key": "compileSdk", "value": "35" }
       ],
-      "exclude_dirs": [".gradle", "build", ".idea", ".git", "target", "out"],
+      "exclude_dirs": [".gradle", "build", ".idea", ".git", "target", "out", ".aadk"],
+      "exclude_files": ["local.properties", ".DS_Store"]
+    },
+    {
+      "template_id": "tmpl-empty-activity",
+      "name": "Empty Activity",
+      "description": "Empty Jetpack Compose Activity starter project.",
+      "path": "../../../EmptyActivity",
+      "defaults": [
+        { "key": "minSdk", "value": "24" },
+        { "key": "compileSdk", "value": "35" }
+      ],
+      "exclude_dirs": [".gradle", "build", ".idea", ".git", "target", "out", ".aadk"],
       "exclude_files": ["local.properties", ".DS_Store"]
     }
   ]

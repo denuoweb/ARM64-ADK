@@ -22,10 +22,15 @@ Update this file whenever ProjectService behavior changes or when commits touchi
 - Template defaults (minSdk/compileSdk) are resolved from registry defaults, request params, and
   Gradle files; schema errors are returned when required defaults are missing/invalid.
 - templates/registry.json currently includes the Sample Console template (tmpl-sample-console)
-  pointing at SampleConsole/ for the bundled Android sample.
+  and the Empty Activity template (tmpl-empty-activity) pointing at SampleConsole/ and
+  EmptyActivity/ for bundled Android starters. Empty Activity includes the Material Components
+  dependency to provide the Theme.Material3.* XML styles used by its themes, plus a default
+  ic_launcher_foreground drawable so sample code referencing it compiles.
 - create_project scaffolds files from the template directory, streams job progress/logs to
   JobService, and persists metadata in .aadk/project.json plus the recent list; requests can
   attach to an existing job_id and supply correlation_id/run_id for grouped workflows.
+- create_project attempts to write local.properties with sdk.dir from ANDROID_SDK_ROOT/ANDROID_HOME
+  or the installed AADK SDK toolchain state, logging when it skips or overwrites nothing.
 - create_project progress metrics include project/template metadata plus copied/total files and
   resolved minSdk/compileSdk values.
 - open_project reads .aadk/project.json when present, otherwise generates metadata and persists it.

@@ -17,6 +17,7 @@ use aadk_proto::aadk::v1::{
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
     PublishJobEventRequest, ReloadStateRequest, ReloadStateResponse, RunId, SetProjectConfigRequest,
     SetProjectConfigResponse, StartJobRequest, StreamJobEventsRequest, Template, Timestamp,
+    ToolchainKind,
 };
 use aadk_util::{
     expand_user, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic,
@@ -45,6 +46,30 @@ struct State {
 struct StateFile {
     #[serde(default)]
     projects: Vec<ProjectMetadata>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ToolchainStateFile {
+    installed: Vec<ToolchainStateInstalled>,
+    toolchain_sets: Vec<ToolchainStateSet>,
+    active_set_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ToolchainStateInstalled {
+    toolchain_id: String,
+    provider_kind: i32,
+    install_path: String,
+    installed_at_unix_millis: i64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ToolchainStateSet {
+    toolchain_set_id: String,
+    sdk_toolchain_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +173,10 @@ fn metadata_file_path(project_dir: &Path) -> PathBuf {
     project_dir.join(PROJECT_DIR_NAME).join(PROJECT_META_NAME)
 }
 
+fn toolchain_state_path() -> PathBuf {
+    aadk_util::state_file_path("toolchains.json")
+}
+
 fn templates_registry_path() -> PathBuf {
     if let Ok(path) = std::env::var(TEMPLATE_ENV) {
         PathBuf::from(path)
@@ -184,6 +213,85 @@ fn save_state(state: &State) -> io::Result<()> {
         projects: state.recent.clone(),
     };
     write_json_atomic(&state_file_path(), &file)
+}
+
+fn resolve_android_sdk_dir(toolchain_set_id: Option<&str>) -> Option<PathBuf> {
+    for key in ["ANDROID_SDK_ROOT", "ANDROID_HOME"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let path = expand_user(trimmed);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+    }
+
+    let data = fs::read_to_string(toolchain_state_path()).ok()?;
+    let state: ToolchainStateFile = serde_json::from_str(&data).ok()?;
+    let preferred_set = toolchain_set_id
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| state.active_set_id.clone());
+
+    if let Some(set_id) = preferred_set {
+        if let Some(set) = state
+            .toolchain_sets
+            .iter()
+            .find(|item| item.toolchain_set_id == set_id)
+        {
+            if let Some(sdk_id) = set
+                .sdk_toolchain_id
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(found) = state
+                    .installed
+                    .iter()
+                    .find(|item| item.toolchain_id == sdk_id)
+                {
+                    let path = expand_user(found.install_path.trim());
+                    if path.is_dir() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut candidates: Vec<&ToolchainStateInstalled> = state
+        .installed
+        .iter()
+        .filter(|item| item.provider_kind == ToolchainKind::Sdk as i32)
+        .filter(|item| !item.install_path.trim().is_empty())
+        .collect();
+    candidates.sort_by_key(|item| item.installed_at_unix_millis);
+    for item in candidates.into_iter().rev() {
+        let path = expand_user(item.install_path.trim());
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn write_local_properties(project_dir: &Path, sdk_dir: &Path) -> io::Result<bool> {
+    let path = project_dir.join("local.properties");
+    if path.exists() {
+        return Ok(false);
+    }
+    let mut value = sdk_dir.to_string_lossy().to_string();
+    if cfg!(windows) {
+        value = value.replace('\\', "\\\\").replace(':', "\\:");
+    }
+    let payload = format!("sdk.dir={value}\n");
+    fs::write(path, payload)?;
+    Ok(true)
 }
 
 fn upsert_recent(state: &mut State, meta: ProjectMetadata) {
@@ -1157,6 +1265,46 @@ async fn run_create_job(
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Project creation cancelled\n").await;
         return Ok(());
+    }
+
+    match resolve_android_sdk_dir(req.toolchain_set_id.as_deref()) {
+        Some(sdk_dir) => match write_local_properties(&req.path, &sdk_dir) {
+            Ok(true) => {
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    &format!(
+                        "Wrote local.properties with sdk.dir={}\n",
+                        sdk_dir.display()
+                    ),
+                )
+                .await;
+            }
+            Ok(false) => {
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    "local.properties already exists; leaving as-is\n",
+                )
+                .await;
+            }
+            Err(err) => {
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    &format!("Failed to write local.properties: {err}\n"),
+                )
+                .await;
+            }
+        },
+        None => {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "Skipped local.properties: Android SDK not found (set ANDROID_SDK_ROOT or install an SDK toolchain)\n",
+            )
+            .await;
+        }
     }
 
     let mut meta = ProjectMetadata::new(
