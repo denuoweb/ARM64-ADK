@@ -180,6 +180,16 @@ struct LogLine {
     line: String,
 }
 
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 async fn connect_job() -> Result<JobServiceClient<Channel>, Status> {
     let addr = job_addr();
     let endpoint = format!("http://{addr}");
@@ -1331,11 +1341,18 @@ fn spawn_gradle(project_dir: &Path, args: &[String]) -> Result<GradleSpawn, Stat
     Ok(GradleSpawn { child, description })
 }
 
-async fn load_gradle_model(project_dir: &Path) -> Result<GradleModel, Status> {
+async fn load_gradle_model(
+    project_dir: &Path,
+    job_client: &mut JobServiceClient<Channel>,
+    job_id: &str,
+) -> Result<GradleModel, Status> {
     let script_path =
         std::env::temp_dir().join(format!("aadk-gradle-model-{}.gradle", now_millis()));
     fs::write(&script_path, gradle_model_script())
         .map_err(|e| Status::internal(format!("failed to write gradle model script: {e}")))?;
+    let _cleanup = TempFileGuard {
+        path: script_path.clone(),
+    };
 
     let args = vec![
         "-q".to_string(),
@@ -1344,30 +1361,113 @@ async fn load_gradle_model(project_dir: &Path) -> Result<GradleModel, Status> {
         "projects".to_string(),
     ];
     let spawn = spawn_gradle(project_dir, &args)?;
-    let output = spawn
-        .child
-        .wait_with_output()
-        .await
-        .map_err(|e| Status::internal(format!("failed to run gradle model: {e}")))?;
+    let _ = publish_log(
+        job_client,
+        job_id,
+        "Loading Gradle model (first run may download dependencies)\n",
+    )
+    .await;
+    let _ = publish_log(
+        job_client,
+        job_id,
+        &format!("Gradle model command: {}\n", spawn.description),
+    )
+    .await;
 
-    let _ = fs::remove_file(&script_path);
+    let mut child = spawn.child;
+    let stdout = match child.stdout.take() {
+        Some(out) => out,
+        None => {
+            return Err(Status::internal(
+                "failed to capture gradle model stdout",
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(err) => err,
+        None => {
+            return Err(Status::internal(
+                "failed to capture gradle model stderr",
+            ));
+        }
+    };
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let (line_tx, mut line_rx) = mpsc::channel::<LogLine>(LOG_CHANNEL_CAPACITY);
+    tokio::spawn(read_lines(stdout, "stdout", line_tx.clone()));
+    tokio::spawn(read_lines(stderr, "stderr", line_tx));
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    let mut status: Option<Result<std::process::ExitStatus, io::Error>> = None;
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                let _ = publish_log(job_client, job_id, "Gradle model still running...\n").await;
+            }
+            line = line_rx.recv() => {
+                match line {
+                    Some(line) => {
+                        match line.stream {
+                            "stdout" => {
+                                stdout_buf.push_str(&line.line);
+                                stdout_buf.push('\n');
+                            }
+                            "stderr" => {
+                                stderr_buf.push_str(&line.line);
+                                stderr_buf.push('\n');
+                            }
+                            _ => {}
+                        }
+                        let mut text = format!("[model:{}] {}", line.stream, line.line);
+                        if !text.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        let _ = publish_log(job_client, job_id, &text).await;
+                    }
+                    None => {
+                        if status.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            result = child.wait(), if status.is_none() => {
+                status = Some(result);
+            }
+        }
+    }
+
+    let status = match status {
+        Some(Ok(status)) => status,
+        Some(Err(err)) => {
+            return Err(Status::internal(format!(
+                "failed to run gradle model: {err}"
+            )));
+        }
+        None => {
+            return Err(Status::internal(
+                "gradle model did not return an exit status",
+            ));
+        }
+    };
+
+    if !status.success() {
         let mut detail = String::new();
-        if !stdout.trim().is_empty() {
+        if !stdout_buf.trim().is_empty() {
             detail.push_str("stdout:\n");
-            detail.push_str(stdout.trim());
+            detail.push_str(stdout_buf.trim());
             detail.push('\n');
         }
-        if !stderr.trim().is_empty() {
+        if !stderr_buf.trim().is_empty() {
             detail.push_str("stderr:\n");
-            detail.push_str(stderr.trim());
+            detail.push_str(stderr_buf.trim());
             detail.push('\n');
         }
         if detail.trim().is_empty() {
-            detail = format!("exit_code={}", output.status.code().unwrap_or(-1));
+            detail = format!("exit_code={}", status.code().unwrap_or(-1));
         }
         return Err(Status::failed_precondition(format!(
             "gradle model failed: {}",
@@ -1375,11 +1475,10 @@ async fn load_gradle_model(project_dir: &Path) -> Result<GradleModel, Status> {
         )));
     }
 
-    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
+    let mut combined = stdout_buf;
+    if !stderr_buf.trim().is_empty() {
         combined.push('\n');
-        combined.push_str(stderr.trim());
+        combined.push_str(stderr_buf.trim());
     }
 
     let payload = extract_gradle_model_payload(&combined)?;
@@ -2168,7 +2267,7 @@ async fn run_build_job(
         return;
     }
 
-    let gradle_model = match load_gradle_model(&project_path).await {
+    let gradle_model = match load_gradle_model(&project_path, &mut job_client, &job_id).await {
         Ok(model) => model,
         Err(err) => {
             let detail = job_error_detail(

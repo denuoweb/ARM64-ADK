@@ -19,8 +19,8 @@ Update this file whenever BuildService behavior changes or when commits touching
   - Validate project_id and resolve to a path using ProjectService GetProject unless the value already looks like a path.
   - Reject empty/whitespace project_id values before starting the job.
   - Accept module/variant_name/tasks overrides, validate basic formatting, and prefix module tasks as needed.
-  - Load a Gradle model snapshot (init script) to validate module/variant selection and surface
-    compileSdk/minSdk/buildTypes/flavors metadata.
+- Load a Gradle model snapshot (init script) to validate module/variant selection and surface
+  compileSdk/minSdk/buildTypes/flavors metadata.
   - Spawn a Gradle process with wrapper checks, GRADLE_USER_HOME defaults, and computed task lists.
   - Publish job state, progress, and logs to JobService.
 - Progress metrics include project/module/variant/tasks/gradle args plus minSdk/compileSdk and
@@ -58,6 +58,8 @@ Update this file whenever BuildService behavior changes or when commits touching
 ## Implementation notes
 - Gradle arg expansion now borrows BuildRequest args so the request stays available for progress metrics.
 - Gradle model init script now runs after `projectsEvaluated` to avoid root project access errors.
+- Gradle model loading now streams stdout/stderr logs (with a periodic heartbeat) to JobService so
+  long-running configuration/download steps are visible.
 - Gradle wrapper invocation uses a shared predicate for direct execution vs `sh`, and Gradle path normalization only trims leading colons.
 
 ## Prioritized TODO checklist by service
