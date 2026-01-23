@@ -360,6 +360,7 @@ pub(crate) enum AppEvent {
     ProjectSelected {
         project_id: String,
         project_path: String,
+        opened_existing: bool,
     },
     UpdateActiveContext {
         project_id: Option<String>,

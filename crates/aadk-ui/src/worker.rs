@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
+    fs,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -2465,7 +2466,7 @@ pub(crate) async fn handle_command(
                 .ok();
                 return Ok(());
             }
-            if template_id.is_empty() {
+            if template_id.is_empty() || template_id == "none" {
                 ui.send(AppEvent::Log {
                     page: "projects",
                     line: "Select a template before creating the project.\n".into(),
@@ -2533,6 +2534,7 @@ pub(crate) async fn handle_command(
                 ui.send(AppEvent::ProjectSelected {
                     project_id: project_id.clone(),
                     project_path: path.clone(),
+                    opened_existing: false,
                 })
                 .ok();
             }
@@ -2615,6 +2617,7 @@ pub(crate) async fn handle_command(
                     ui.send(AppEvent::ProjectSelected {
                         project_id: id.to_string(),
                         project_path: project.path.clone(),
+                        opened_existing: true,
                     })
                     .ok();
                 }
@@ -2845,12 +2848,30 @@ pub(crate) async fn handle_command(
                 line: "Targets:\n".into(),
             })
             .ok();
+            let active_target = cfg.active_target_id.trim().to_string();
+            let mut has_active = false;
+            let mut preferred_target: Option<String> = None;
+            let mut fallback_target: Option<String> = None;
             for t in resp.targets {
                 let id = t
                     .target_id
                     .as_ref()
                     .map(|i| i.value.clone())
                     .unwrap_or_default();
+                if !active_target.is_empty() && id.eq_ignore_ascii_case(&active_target) {
+                    has_active = true;
+                }
+                if !id.trim().is_empty() {
+                    if fallback_target.is_none() {
+                        fallback_target = Some(id.clone());
+                    }
+                    let state = t.state.trim().to_ascii_lowercase();
+                    if preferred_target.is_none()
+                        && (state == "device" || state == "online")
+                    {
+                        preferred_target = Some(id.clone());
+                    }
+                }
                 ui.send(AppEvent::Log {
                     page: "targets",
                     line: format!(
@@ -2859,6 +2880,21 @@ pub(crate) async fn handle_command(
                     ),
                 })
                 .ok();
+            }
+            if active_target.is_empty() || !has_active {
+                let target_id = preferred_target.or(fallback_target);
+                if let Some(target_id) = target_id {
+                    if !target_id.trim().is_empty() {
+                        ui.send(AppEvent::UpdateActiveContext {
+                            project_id: None,
+                            project_path: None,
+                            toolchain_set_id: None,
+                            target_id: Some(target_id),
+                            run_id: None,
+                        })
+                        .ok();
+                    }
+                }
             }
         }
 
@@ -4464,18 +4500,14 @@ pub(crate) async fn handle_command(
                 return Ok(());
             }
 
-            match std::fs::remove_dir_all(&data_dir) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    ui.send(AppEvent::Log {
-                        page: "settings",
-                        line: format!("Reset failed: {err}\n"),
-                    })
-                    .ok();
-                    ui.send(AppEvent::ResetAllStateComplete { ok: false }).ok();
-                    return Ok(());
-                }
+            if let Err(err) = reset_local_state(&data_dir) {
+                ui.send(AppEvent::Log {
+                    page: "settings",
+                    line: format!("Reset failed: {err}\n"),
+                })
+                .ok();
+                ui.send(AppEvent::ResetAllStateComplete { ok: false }).ok();
+                return Ok(());
             }
 
             if let Some(handle) = worker_state.home_stream.take() {
@@ -4517,6 +4549,67 @@ fn start_home_stream(
         }
     });
     worker_state.home_stream = Some(abort);
+}
+
+fn reset_local_state(data_dir: &Path) -> io::Result<()> {
+    const PRESERVE_DIRS: [&str; 3] = ["toolchains", "downloads", "cuttlefish"];
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if PRESERVE_DIRS.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        if name_str == "state" {
+            clear_state_dir(&path)?;
+            continue;
+        }
+        remove_path(&path)?;
+    }
+
+    Ok(())
+}
+
+fn clear_state_dir(state_dir: &Path) -> io::Result<()> {
+    const PRESERVE_FILES: [&str; 1] = ["toolchains.json"];
+    let entries = match fs::read_dir(state_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if PRESERVE_FILES.contains(&name_str.as_ref()) {
+            continue;
+        }
+        remove_path(&entry.path())?;
+    }
+
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if meta.file_type().is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 async fn stream_job_events_home(
@@ -4654,13 +4747,29 @@ async fn stream_job_events(
     while let Some(item) = stream.next().await {
         match item {
             Ok(evt) => {
-                if page == "console" {
-                    if let Some(JobPayload::Completed(completed)) = evt.payload.as_ref() {
+                if let Some(JobPayload::Completed(completed)) = evt.payload.as_ref() {
+                    if page == "console" {
                         if let Some(apk) = completed.outputs.iter().find(|kv| kv.key == "apk_path")
                         {
                             let _ = ui.send(AppEvent::SetLastBuildApk {
                                 apk_path: apk.value.clone(),
                             });
+                        }
+                    }
+                    if page == "targets" {
+                        if let Some(adb_serial) =
+                            completed.outputs.iter().find(|kv| kv.key == "adb_serial")
+                        {
+                            let trimmed = adb_serial.value.trim();
+                            if !trimmed.is_empty() {
+                                let _ = ui.send(AppEvent::UpdateActiveContext {
+                                    project_id: None,
+                                    project_path: None,
+                                    toolchain_set_id: None,
+                                    target_id: Some(trimmed.to_string()),
+                                    run_id: None,
+                                });
+                            }
                         }
                     }
                 }

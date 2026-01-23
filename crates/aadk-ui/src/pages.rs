@@ -62,6 +62,14 @@ impl Page {
 pub(crate) struct HomePage {
     pub(crate) page: Page,
     pub(crate) cancel_btn: gtk::Button,
+    pub(crate) job_type_entry: gtk::Entry,
+    pub(crate) job_type_combo: gtk::ComboBoxText,
+    pub(crate) params_view: gtk::TextView,
+    pub(crate) project_id_entry: gtk::Entry,
+    pub(crate) target_id_entry: gtk::Entry,
+    pub(crate) toolchain_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) watch_entry: gtk::Entry,
     pub(crate) job_id_label: gtk::Label,
     pub(crate) state_label: gtk::Label,
     pub(crate) progress_label: gtk::Label,
@@ -99,19 +107,58 @@ impl HomePage {
     }
 }
 
+impl JobsHistoryPage {
+    pub(crate) fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.page.clear();
+    }
+}
+
+impl EvidencePage {
+    pub(crate) fn append(&self, s: &str) {
+        self.page.append(s);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.page.clear();
+    }
+}
 #[derive(Clone)]
 pub(crate) struct TargetsPage {
     pub(crate) page: Page,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) cuttlefish_branch_entry: gtk::Entry,
+    pub(crate) cuttlefish_target_entry: gtk::Entry,
     pub(crate) apk_entry: gtk::Entry,
     pub(crate) cuttlefish_build_entry: gtk::Entry,
     pub(crate) target_entry: gtk::Entry,
+    pub(crate) app_id_entry: gtk::Entry,
+    pub(crate) activity_entry: gtk::Entry,
 }
 
 #[derive(Clone)]
 pub(crate) struct ToolchainsPage {
     pub(crate) page: Page,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
     pub(crate) sdk_version_combo: gtk::ComboBoxText,
     pub(crate) ndk_version_combo: gtk::ComboBoxText,
+    pub(crate) toolchain_id_entry: gtk::Entry,
+    pub(crate) update_version_entry: gtk::Entry,
+    pub(crate) verify_update_check: gtk::CheckButton,
+    pub(crate) remove_cached_check: gtk::CheckButton,
+    pub(crate) force_uninstall_check: gtk::CheckButton,
+    pub(crate) dry_run_check: gtk::CheckButton,
+    pub(crate) remove_all_check: gtk::CheckButton,
+    pub(crate) sdk_set_entry: gtk::Entry,
+    pub(crate) ndk_set_entry: gtk::Entry,
+    pub(crate) display_name_entry: gtk::Entry,
     pub(crate) active_set_entry: gtk::Entry,
 }
 
@@ -119,12 +166,30 @@ pub(crate) struct ToolchainsPage {
 pub(crate) struct BuildPage {
     pub(crate) page: Page,
     pub(crate) project_entry: gtk::Entry,
+    pub(crate) module_entry: gtk::Entry,
+    pub(crate) variant_combo: gtk::DropDown,
+    pub(crate) variant_name_entry: gtk::Entry,
+    pub(crate) tasks_entry: gtk::Entry,
+    pub(crate) args_entry: gtk::Entry,
+    pub(crate) clean_check: gtk::CheckButton,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) artifact_modules_entry: gtk::Entry,
+    pub(crate) artifact_variant_entry: gtk::Entry,
+    pub(crate) artifact_types_entry: gtk::Entry,
+    pub(crate) artifact_name_entry: gtk::Entry,
+    pub(crate) artifact_path_entry: gtk::Entry,
 }
 
 #[derive(Clone)]
 pub(crate) struct ProjectsPage {
     pub(crate) page: Page,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
     pub(crate) template_combo: gtk::ComboBoxText,
+    pub(crate) name_entry: gtk::Entry,
     pub(crate) toolchain_set_combo: gtk::ComboBoxText,
     pub(crate) target_combo: gtk::ComboBoxText,
     pub(crate) project_id_entry: gtk::Entry,
@@ -139,6 +204,29 @@ pub(crate) struct WorkflowPage {
     pub(crate) project_path_entry: gtk::Entry,
     pub(crate) toolchain_set_entry: gtk::Entry,
     pub(crate) target_id_entry: gtk::Entry,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) include_history_check: gtk::CheckButton,
+    pub(crate) template_id_entry: gtk::Entry,
+    pub(crate) project_name_entry: gtk::Entry,
+    pub(crate) toolchain_id_entry: gtk::Entry,
+    pub(crate) variant_combo: gtk::DropDown,
+    pub(crate) variant_name_entry: gtk::Entry,
+    pub(crate) module_entry: gtk::Entry,
+    pub(crate) tasks_entry: gtk::Entry,
+    pub(crate) apk_path_entry: gtk::Entry,
+    pub(crate) application_id_entry: gtk::Entry,
+    pub(crate) activity_entry: gtk::Entry,
+    pub(crate) auto_infer_check: gtk::CheckButton,
+    pub(crate) create_check: gtk::CheckButton,
+    pub(crate) open_check: gtk::CheckButton,
+    pub(crate) verify_check: gtk::CheckButton,
+    pub(crate) build_check: gtk::CheckButton,
+    pub(crate) install_check: gtk::CheckButton,
+    pub(crate) launch_check: gtk::CheckButton,
+    pub(crate) support_check: gtk::CheckButton,
+    pub(crate) evidence_check: gtk::CheckButton,
 }
 
 #[derive(Clone)]
@@ -154,6 +242,53 @@ pub(crate) struct SettingsPage {
     usage_check: gtk::CheckButton,
     crash_check: gtk::CheckButton,
     install_label: gtk::Label,
+    pub(crate) exclude_downloads: gtk::CheckButton,
+    pub(crate) exclude_toolchains: gtk::CheckButton,
+    pub(crate) exclude_bundles: gtk::CheckButton,
+    pub(crate) exclude_telemetry: gtk::CheckButton,
+    pub(crate) save_entry: gtk::Entry,
+    pub(crate) open_entry: gtk::Entry,
+}
+
+#[derive(Clone)]
+pub(crate) struct JobsHistoryPage {
+    pub(crate) page: Page,
+    pub(crate) job_types_entry: gtk::Entry,
+    pub(crate) states_entry: gtk::Entry,
+    pub(crate) created_after_entry: gtk::Entry,
+    pub(crate) created_before_entry: gtk::Entry,
+    pub(crate) finished_after_entry: gtk::Entry,
+    pub(crate) finished_before_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) page_size_entry: gtk::Entry,
+    pub(crate) page_token_entry: gtk::Entry,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) kinds_entry: gtk::Entry,
+    pub(crate) after_entry: gtk::Entry,
+    pub(crate) before_entry: gtk::Entry,
+    pub(crate) history_page_size_entry: gtk::Entry,
+    pub(crate) history_page_token_entry: gtk::Entry,
+    pub(crate) output_path_entry: gtk::Entry,
+}
+
+#[derive(Clone)]
+pub(crate) struct EvidencePage {
+    pub(crate) page: Page,
+    pub(crate) use_job_id_check: gtk::CheckButton,
+    pub(crate) job_id_entry: gtk::Entry,
+    pub(crate) correlation_id_entry: gtk::Entry,
+    pub(crate) job_log_output_path_entry: gtk::Entry,
+    pub(crate) run_id_entry: gtk::Entry,
+    pub(crate) output_kind_combo: gtk::ComboBoxText,
+    pub(crate) output_type_entry: gtk::Entry,
+    pub(crate) output_path_entry: gtk::Entry,
+    pub(crate) output_label_entry: gtk::Entry,
+    pub(crate) recent_limit_entry: gtk::Entry,
+    pub(crate) include_history_check: gtk::CheckButton,
+    pub(crate) include_logs_check: gtk::CheckButton,
+    pub(crate) include_config_check: gtk::CheckButton,
+    pub(crate) include_toolchain_check: gtk::CheckButton,
+    pub(crate) include_recent_check: gtk::CheckButton,
 }
 
 impl TargetsPage {
@@ -178,6 +313,10 @@ impl TargetsPage {
             self.cuttlefish_build_entry.set_text(trimmed);
         }
     }
+
+    pub(crate) fn set_application_id(&self, application_id: &str) {
+        self.app_id_entry.set_text(application_id.trim());
+    }
 }
 
 impl ToolchainsPage {
@@ -189,20 +328,25 @@ impl ToolchainsPage {
         self.active_set_entry.set_text(set_id.trim());
     }
 
-    pub(crate) fn set_available_versions(&self, provider_id: &str, versions: &[String]) {
+    pub(crate) fn set_available_versions(
+        &self,
+        provider_id: &str,
+        versions: &[String],
+        preferred: Option<&str>,
+    ) {
         match provider_id {
-            PROVIDER_SDK_ID => self.set_sdk_versions(versions),
-            PROVIDER_NDK_ID => self.set_ndk_versions(versions),
+            PROVIDER_SDK_ID => self.set_sdk_versions(versions, preferred),
+            PROVIDER_NDK_ID => self.set_ndk_versions(versions, preferred),
             _ => {}
         }
     }
 
-    fn set_sdk_versions(&self, versions: &[String]) {
-        populate_combo_versions(&self.sdk_version_combo, versions, SDK_VERSION);
+    fn set_sdk_versions(&self, versions: &[String], preferred: Option<&str>) {
+        populate_combo_versions(&self.sdk_version_combo, versions, SDK_VERSION, preferred);
     }
 
-    fn set_ndk_versions(&self, versions: &[String]) {
-        populate_combo_versions(&self.ndk_version_combo, versions, NDK_VERSION);
+    fn set_ndk_versions(&self, versions: &[String], preferred: Option<&str>) {
+        populate_combo_versions(&self.ndk_version_combo, versions, NDK_VERSION, preferred);
     }
 }
 
@@ -221,35 +365,71 @@ impl ProjectsPage {
         self.page.append(s);
     }
 
-    pub(crate) fn set_templates(&self, templates: &[ProjectTemplateOption]) {
+    pub(crate) fn set_templates(
+        &self,
+        templates: &[ProjectTemplateOption],
+        preferred: Option<&str>,
+    ) {
+        let current = self.template_combo.active_id().map(|id| id.to_string());
         self.template_combo.remove_all();
+        self.template_combo.append(Some("none"), "None");
         for tmpl in templates {
             let label = format!("{} ({})", tmpl.name, tmpl.id);
             self.template_combo.append(Some(tmpl.id.as_str()), &label);
         }
-        if !templates.is_empty() {
-            self.template_combo.set_active(Some(0));
+        if let Some(desired) = current.or_else(|| preferred.map(|value| value.to_string())) {
+            if !desired.trim().is_empty() {
+                self.template_combo.set_active_id(Some(desired.as_str()));
+            }
+        }
+        if self.template_combo.active_id().is_none() {
+            if templates.is_empty() {
+                self.template_combo.set_active(Some(0));
+            } else {
+                self.template_combo.set_active(Some(1));
+            }
         }
     }
 
-    pub(crate) fn set_toolchain_sets(&self, sets: &[ToolchainSetOption]) {
+    pub(crate) fn set_toolchain_sets(&self, sets: &[ToolchainSetOption], preferred: Option<&str>) {
+        let current = self.toolchain_set_combo.active_id().map(|id| id.to_string());
         self.toolchain_set_combo.remove_all();
         self.toolchain_set_combo.append(Some("none"), "None");
         for set in sets {
             self.toolchain_set_combo
                 .append(Some(set.id.as_str()), &set.label);
         }
-        self.toolchain_set_combo.set_active(Some(0));
+        if let Some(desired) = current.or_else(|| preferred.map(|value| value.to_string())) {
+            if !desired.trim().is_empty() {
+                self.toolchain_set_combo
+                    .set_active_id(Some(desired.as_str()));
+            }
+        }
+        if self.toolchain_set_combo.active_id().is_none() {
+            self.toolchain_set_combo.set_active(Some(0));
+        }
     }
 
-    pub(crate) fn set_targets(&self, targets: &[TargetOption]) {
+    pub(crate) fn set_targets(&self, targets: &[TargetOption], preferred: Option<&str>) {
+        let current = self.target_combo.active_id().map(|id| id.to_string());
         self.target_combo.remove_all();
         self.target_combo.append(Some("none"), "None");
         for target in targets {
             self.target_combo
                 .append(Some(target.id.as_str()), &target.label);
         }
-        self.target_combo.set_active(Some(0));
+        if let Some(desired) = current.or_else(|| preferred.map(|value| value.to_string())) {
+            if !desired.trim().is_empty() {
+                self.target_combo.set_active_id(Some(desired.as_str()));
+            }
+        }
+        if self.target_combo.active_id().is_none() {
+            self.target_combo.set_active(Some(0));
+        }
+    }
+
+    pub(crate) fn set_template_none(&self) {
+        self.template_combo.set_active_id(Some("none"));
     }
 
     pub(crate) fn set_active_context(&self, ctx: &ActiveContext) {
@@ -325,7 +505,12 @@ impl SettingsPage {
     }
 }
 
-fn populate_combo_versions(combo: &gtk::ComboBoxText, versions: &[String], fallback: &str) {
+fn populate_combo_versions(
+    combo: &gtk::ComboBoxText,
+    versions: &[String],
+    fallback: &str,
+    preferred: Option<&str>,
+) {
     let current = combo.active_id().map(|id| id.to_string());
     combo.remove_all();
     if versions.is_empty() {
@@ -338,8 +523,9 @@ fn populate_combo_versions(combo: &gtk::ComboBoxText, versions: &[String], fallb
     for version in versions {
         combo.append(Some(version.as_str()), version);
     }
-    if let Some(current) = current {
-        if let Some(index) = versions.iter().position(|v| v == &current) {
+    let desired = current.or_else(|| preferred.map(|value| value.to_string()));
+    if let Some(desired) = desired {
+        if let Some(index) = versions.iter().position(|v| v == &desired) {
             combo.set_active(Some(index as u32));
             return;
         }
@@ -921,6 +1107,14 @@ pub(crate) fn page_home(
     HomePage {
         page,
         cancel_btn,
+        job_type_entry,
+        job_type_combo,
+        params_view,
+        project_id_entry,
+        target_id_entry,
+        toolchain_id_entry,
+        correlation_id_entry,
+        watch_entry,
         job_id_label,
         state_label,
         progress_label,
@@ -1347,13 +1541,36 @@ pub(crate) fn page_workflow(
         project_path_entry,
         toolchain_set_entry,
         target_id_entry,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
+        include_history_check,
+        template_id_entry,
+        project_name_entry,
+        toolchain_id_entry,
+        variant_combo,
+        variant_name_entry,
+        module_entry,
+        tasks_entry,
+        apk_path_entry,
+        application_id_entry,
+        activity_entry,
+        auto_infer_check,
+        create_check,
+        open_check,
+        verify_check,
+        build_check,
+        install_check,
+        launch_check,
+        support_check,
+        evidence_check,
     }
 }
 
 pub(crate) fn page_jobs_history(
     cfg: Arc<std::sync::Mutex<AppConfig>>,
     cmd_tx: mpsc::Sender<UiCommand>,
-) -> Page {
+) -> JobsHistoryPage {
     let page = make_page(
         "Job History - JobService query and exports",
         "Overview: Query JobService for jobs and event history with filters, and export logs to JSON for sharing or troubleshooting.",
@@ -1610,11 +1827,29 @@ pub(crate) fn page_jobs_history(
             .ok();
     });
 
-    page
+    JobsHistoryPage {
+        page,
+        job_types_entry,
+        states_entry,
+        created_after_entry,
+        created_before_entry,
+        finished_after_entry,
+        finished_before_entry,
+        correlation_id_entry,
+        page_size_entry,
+        page_token_entry,
+        job_id_entry,
+        kinds_entry,
+        after_entry,
+        before_entry,
+        history_page_size_entry,
+        history_page_token_entry,
+        output_path_entry,
+    }
 }
 
-const PROVIDER_SDK_ID: &str = "provider-android-sdk-custom";
-const PROVIDER_NDK_ID: &str = "provider-android-ndk-custom";
+pub(crate) const PROVIDER_SDK_ID: &str = "provider-android-sdk-custom";
+pub(crate) const PROVIDER_NDK_ID: &str = "provider-android-ndk-custom";
 const SDK_VERSION: &str = "36.0.0";
 const NDK_VERSION: &str = "r29";
 
@@ -2226,8 +2461,21 @@ pub(crate) fn page_toolchains(
     }
     ToolchainsPage {
         page,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
         sdk_version_combo,
         ndk_version_combo,
+        toolchain_id_entry,
+        update_version_entry,
+        verify_update_check,
+        remove_cached_check,
+        force_uninstall_check,
+        dry_run_check,
+        remove_all_check,
+        sdk_set_entry,
+        ndk_set_entry,
+        display_name_entry,
         active_set_entry,
     }
 }
@@ -2543,7 +2791,11 @@ pub(crate) fn page_projects(
 
     ProjectsPage {
         page,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
         template_combo,
+        name_entry,
         toolchain_set_combo,
         target_combo: default_target_combo,
         project_id_entry,
@@ -2684,7 +2936,7 @@ pub(crate) fn page_targets(
         .build();
     let apk_browse = gtk::Button::with_label("Browse...");
     let app_id_entry = gtk::Entry::builder()
-        .text("com.example.sampleconsole")
+        .text("")
         .hexpand(true)
         .build();
     let activity_entry = gtk::Entry::builder()
@@ -3069,9 +3321,16 @@ pub(crate) fn page_targets(
 
     TargetsPage {
         page,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
+        cuttlefish_branch_entry,
+        cuttlefish_target_entry,
         apk_entry,
         cuttlefish_build_entry: cuttlefish_build_entry.clone(),
         target_entry,
+        app_id_entry,
+        activity_entry,
     }
 }
 
@@ -3411,13 +3670,27 @@ pub(crate) fn page_console(
     BuildPage {
         page,
         project_entry,
+        module_entry,
+        variant_combo,
+        variant_name_entry,
+        tasks_entry,
+        args_entry,
+        clean_check,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
+        artifact_modules_entry,
+        artifact_variant_entry,
+        artifact_types_entry,
+        artifact_name_entry,
+        artifact_path_entry,
     }
 }
 
 pub(crate) fn page_evidence(
     cfg: Arc<std::sync::Mutex<AppConfig>>,
     cmd_tx: mpsc::Sender<UiCommand>,
-) -> Page {
+) -> EvidencePage {
     let page = make_page(
         "Evidence - ObserveService runs and bundles",
         "Overview: List runs and outputs, group jobs by run, stream run-level events, and export support/evidence bundles or job logs.",
@@ -3465,20 +3738,20 @@ pub(crate) fn page_evidence(
         .placeholder_text("correlation id")
         .hexpand(true)
         .build();
-    let output_path_entry = gtk::Entry::builder()
+    let job_log_output_path_entry = gtk::Entry::builder()
         .placeholder_text("job log export path (optional)")
         .hexpand(true)
         .build();
     set_tooltip(&use_job_id_check, "What: Reuse an existing job id instead of creating a new job. Why: attach this export to an existing job stream. How: enable it and fill Job id below.");
     set_tooltip(&job_id_entry, "What: Existing job id to attach. Why: stream results into a known job. How: paste from Job Control or Job History.");
     set_tooltip(&correlation_id_entry, "What: Correlation id to group work into a run. Why: filter run dashboards and evidence exports. How: set a stable string and reuse it.");
-    set_tooltip(&output_path_entry, "What: Optional output path for job log exports. Why: save logs to a specific file. How: leave blank to use the default export path.");
+    set_tooltip(&job_log_output_path_entry, "What: Optional output path for job log exports. Why: save logs to a specific file. How: leave blank to use the default export path.");
     job_grid.attach(&use_job_id_check, 0, 0, 1, 1);
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Log export path")), 0, 2, 1, 1);
-    job_grid.attach(&output_path_entry, 1, 2, 1, 1);
+    job_grid.attach(&job_log_output_path_entry, 1, 2, 1, 1);
     page.container
         .insert_child_after(&job_grid, Some(&secondary_row));
 
@@ -3500,7 +3773,7 @@ pub(crate) fn page_evidence(
         .placeholder_text("output type (support_bundle, apk, ...)")
         .hexpand(true)
         .build();
-    let output_path_entry = gtk::Entry::builder()
+    let output_path_filter_entry = gtk::Entry::builder()
         .placeholder_text("output path contains")
         .hexpand(true)
         .build();
@@ -3524,7 +3797,7 @@ pub(crate) fn page_evidence(
     set_tooltip(&output_kind_combo, "What: Output kind filter. Why: narrow to bundles or artifacts. How: pick Any/Bundles/Artifacts.");
     set_tooltip(&output_type_entry, "What: Output type filter. Why: match bundle types or artifact kinds. How: enter support_bundle, evidence_bundle, apk, aab, etc.");
     set_tooltip(
-        &output_path_entry,
+        &output_path_filter_entry,
         "What: Output path substring. Why: narrow to specific files. How: enter part of a path.",
     );
     set_tooltip(&output_label_entry, "What: Output label substring. Why: narrow to specific outputs. How: enter part of a label.");
@@ -3577,7 +3850,7 @@ pub(crate) fn page_evidence(
     form.attach(&label_output_type, 0, 5, 1, 1);
     form.attach(&output_type_entry, 1, 5, 1, 1);
     form.attach(&label_output_path, 0, 6, 1, 1);
-    form.attach(&output_path_entry, 1, 6, 1, 1);
+    form.attach(&output_path_filter_entry, 1, 6, 1, 1);
     form.attach(&label_output_label, 0, 7, 1, 1);
     form.attach(&output_label_entry, 1, 7, 1, 1);
 
@@ -3659,7 +3932,7 @@ pub(crate) fn page_evidence(
     let run_id_entry_outputs = run_id_entry.clone();
     let output_kind_combo_outputs = output_kind_combo.clone();
     let output_type_entry_outputs = output_type_entry.clone();
-    let output_path_entry_outputs = output_path_entry.clone();
+    let output_path_entry_outputs = output_path_filter_entry.clone();
     let output_label_entry_outputs = output_label_entry.clone();
     list_outputs.connect_clicked(move |_| {
         let cfg = cfg_outputs.lock().unwrap().clone();
@@ -3771,7 +4044,7 @@ pub(crate) fn page_evidence(
     let cfg_export_jobs = cfg.clone();
     let cmd_tx_export_jobs = cmd_tx.clone();
     let job_id_entry_export = job_id_entry.clone();
-    let output_path_entry_export = output_path_entry.clone();
+    let output_path_entry_export = job_log_output_path_entry.clone();
     export_job_logs.connect_clicked(move |_| {
         let job_id = job_id_entry_export.text().to_string();
         {
@@ -3794,7 +4067,24 @@ pub(crate) fn page_evidence(
             .ok();
     });
 
-    page
+    EvidencePage {
+        page,
+        use_job_id_check,
+        job_id_entry,
+        correlation_id_entry,
+        job_log_output_path_entry,
+        run_id_entry,
+        output_kind_combo,
+        output_type_entry,
+        output_path_entry: output_path_filter_entry,
+        output_label_entry,
+        recent_limit_entry,
+        include_history_check: include_history,
+        include_logs_check: include_logs,
+        include_config_check: include_config,
+        include_toolchain_check: include_toolchain,
+        include_recent_check: include_recent,
+    }
 }
 
 pub(crate) fn page_settings(
@@ -4005,7 +4295,6 @@ pub(crate) fn page_settings(
 
     let cfg_state_save = cfg.clone();
     let cmd_tx_state_save = cmd_tx.clone();
-    let save_entry_state = save_entry.clone();
     let exclude_downloads_save = exclude_downloads.clone();
     let exclude_toolchains_save = exclude_toolchains.clone();
     let exclude_bundles_save = exclude_bundles.clone();
@@ -4035,13 +4324,14 @@ pub(crate) fn page_settings(
                 .and_then(|name| name.to_str())
                 .unwrap_or("aadk-state.zip")
                 .to_string();
+            let queue_state_save_cb = queue_state_save_dialog.clone();
             select_zip_save_dialog(
                 &parent_save,
                 &save_entry_dialog,
                 "Save AADK State Archive",
                 Some(default_name),
                 Some(Box::new(move |path| {
-                    queue_state_save_dialog(path);
+                    queue_state_save_cb(path);
                 })),
             );
             return;
@@ -4092,12 +4382,13 @@ pub(crate) fn page_settings(
     open_btn.connect_clicked(move |_| {
         let path = open_entry_dialog.text().to_string();
         if path.trim().is_empty() {
+            let queue_state_open_cb = queue_state_open_dialog.clone();
             select_zip_open_dialog(
                 &parent_open,
                 &open_entry_dialog,
                 "Open AADK State Archive",
                 Some(Box::new(move |path| {
-                    queue_state_open_dialog(path);
+                    queue_state_open_cb(path);
                 })),
             );
             return;
@@ -4256,6 +4547,12 @@ pub(crate) fn page_settings(
         usage_check,
         crash_check,
         install_label,
+        exclude_downloads,
+        exclude_toolchains,
+        exclude_bundles,
+        exclude_telemetry,
+        save_entry,
+        open_entry,
     }
 }
 

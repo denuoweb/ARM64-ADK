@@ -10,11 +10,11 @@ Update this file whenever UI behavior changes or when commits touching this crat
 
 ## Key implementation details
 - Entry point and GTK wiring live in `crates/aadk-ui/src/main.rs`, with modules split into
-  `config.rs`, `commands.rs`, `models.rs`, `pages.rs`, `ui_events.rs`, `utils.rs`, and `worker.rs`.
+  `config.rs`, `commands.rs`, `models.rs`, `pages.rs`, `ui_events.rs`, `ui_state.rs`, `utils.rs`, and `worker.rs`.
 - AppConfig holds service addresses and pulls defaults from env:
   AADK_JOB_ADDR, AADK_TOOLCHAIN_ADDR, AADK_PROJECT_ADDR, AADK_BUILD_ADDR,
   AADK_TARGETS_ADDR, AADK_OBSERVE_ADDR, AADK_WORKFLOW_ADDR.
-- AppConfig persists to `~/.local/share/aadk/state/ui-config.json` with last job selections and telemetry opt-in.
+- AppConfig persists to `~/.local/share/aadk/state/ui-config.json` with service endpoints, active context, last job selections, and telemetry opt-in.
 - Job log export helpers (default paths + history fetch) and shared data-dir utilities come from `aadk-util`.
 - UiCommand/AppEvent live in `commands.rs`; a background worker in `worker.rs` executes commands and
   emits AppEvent logs to update the UI via the bounded queue in `ui_events.rs`.
@@ -48,8 +48,11 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Log text views apply a ring buffer to cap memory by line/character counts.
 - The UI tracks an active context (project/toolchain set/target/run) persisted in ui-config, surfaces
   it in the header, and applies it to Workflow/Projects/Targets/Build fields.
+- Per-tab UI state (inputs + log buffers) persists to `~/.local/share/aadk/state/ui-state.json`;
+  reset-all-state clears it alongside cached UI fields while preserving installed toolchains/downloads
+  and Cuttlefish data (keeps `state/toolchains.json`).
 - Workflow run responses, toolchain active set updates, and target default updates sync the active context.
-- The header "New project" action runs reset-all-state (clearing ~/.local/share/aadk, cached UI fields, and logs) and then opens the project folder picker; "Open project" opens the folder picker and auto-opens existing projects.
+- The header "New project" action runs reset-all-state (clearing local state/logs while preserving `toolchains`, `downloads`, `cuttlefish`, and `state/toolchains.json`) and then opens the project folder picker; "Open project" opens the folder picker and auto-opens existing projects.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
@@ -74,8 +77,13 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Open State reloads all services via ReloadState RPCs and refreshes the UI config from disk.
 - Reset-all-state (triggered by the header New project flow) clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
 - Project open/create and target install actions now prompt for a folder/APK when the path is blank, and project folder picks auto-open existing projects when metadata is present.
+- Opening existing projects resets the Projects template selection to None; Targets defaults no longer force the SampleConsole application id and attempt to infer it from app Gradle or manifest when unset.
 - Projects page removed an unused project-id setter to keep builds warning-free.
+- Targets list auto-fills the active target id when missing, and Cuttlefish start completion updates it from adb_serial.
+- State archive Save/Open dialogs clone their queue callbacks per click so GTK can reuse the button handlers.
+- Project templates auto-load on app startup and whenever the Projects tab becomes visible.
 - UI sources are kept rustfmt-formatted to align with workspace style.
+- UI log persistence now updates `ui-state.json` per AppEvent log line instead of scraping text buffers on close.
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)
