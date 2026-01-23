@@ -33,7 +33,7 @@ completed items or move them into the implementation notes.
 - crates/aadk-telemetry: Opt-in telemetry spooler (usage events + crash reports)
 - crates/aadk-proto: Rust gRPC codegen for proto/aadk/v1
 - proto/aadk/v1/*.proto: gRPC contracts
-- scripts/dev/run-all.sh: local dev runner for all services
+- scripts/dev/run-all.sh: local dev runner for all services (auto-exports ANDROID_SDK_ROOT/ANDROID_HOME and AADK_ADB_PATH when an SDK is detected)
 - scripts/release/build.sh: release build + packaging helper
 - docs/release.md: release build steps
 - SampleConsole: Minimal Compose sample app (Sample Console) bundled with AADK
@@ -55,8 +55,10 @@ Default addresses (override with env vars):
 - Progress payloads include job-specific metrics for build/project/toolchain/target/observe workflows.
 - BuildService resolves project paths via ProjectService GetProject for ids; direct paths are accepted.
 - BuildService loads a Gradle model snapshot after project evaluation to validate modules/variants.
-- TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, WebRTC defaults, env-control URLs).
+- TargetService shells out to adb and optionally Cuttlefish tooling (KVM/GPU preflight, headless WebRTC fallback, images-dir fallback logging, env-control URLs).
 - ToolchainService downloads SDK/NDK archives, verifies sha256, persists state under ~/.local/share/aadk.
+- ToolchainService normalizes SDK cmdline-tools layout by creating cmdline-tools/latest links when
+  archives ship a flat cmdline-tools/bin + lib layout.
 - ToolchainService catalog pins SDK 36.0.0/35.0.2 and NDK r29/r28c/r27d/r26d; Linux ARM64 artifacts use
   linux-aarch64/aarch64-linux-android/aarch64_be-linux-musl, and Windows ARM64 NDK artifacts are included
   for r29/r28c/r27d (.7z).
@@ -70,6 +72,7 @@ Default addresses (override with env vars):
 ## Shared data and locations
 - Job state: ~/.local/share/aadk/state/jobs.json
 - UI config: ~/.local/share/aadk/state/ui-config.json
+- UI state: ~/.local/share/aadk/state/ui-state.json
 - CLI config: ~/.local/share/aadk/state/cli-config.json
 - Project state: ~/.local/share/aadk/state/projects.json
 - Build state: ~/.local/share/aadk/state/builds.json
