@@ -33,10 +33,10 @@ Update this file whenever TargetService behavior changes or when commits touchin
   target health/ABI/SDK details plus Cuttlefish env/artifact details.
 - InstallApk, Launch, StopApp, and Cuttlefish job RPCs accept optional job_id for existing jobs
   plus correlation_id and run_id for grouping related workflows.
-- Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable).
+- Cuttlefish start preflight checks host tools, images, and KVM availability/access (configurable) and logs images-dir fallback/missing hints.
 - Defaults align with aosp-android-latest-release and aosp_cf_*_only_phone-userdebug targets; 16K hosts use main-16k-with-phones with aosp_cf_arm64/aosp_cf_x86_64.
 - GPU mode can be set via AADK_CUTTLEFISH_GPU_MODE and is appended to launch arguments when starting Cuttlefish.
-- Start adds --start_webrtc based on show_full_ui unless already provided in AADK_CUTTLEFISH_START_ARGS.
+- Start adds --start_webrtc based on show_full_ui or headless display detection unless already provided in AADK_CUTTLEFISH_START_ARGS.
 - Cuttlefish details and job outputs include WebRTC and environment control URLs.
 - ReloadState reloads persisted targets/defaults from ~/.local/share/aadk/state/targets.json.
 - Target sources are kept rustfmt-formatted to align with workspace style.
@@ -50,6 +50,7 @@ Update this file whenever TargetService behavior changes or when commits touchin
 - AADK_JOB_ADDR sets the JobService address.
 - AADK_ADB_PATH or ANDROID_SDK_ROOT/ANDROID_HOME can override adb lookup.
 - AADK_TELEMETRY and AADK_TELEMETRY_CRASH enable opt-in usage/crash reporting (local spool).
+- scripts/dev/run-all.sh auto-exports AADK_ADB_PATH when ANDROID_SDK_ROOT is detected.
 
 ## Telemetry
 - Emits service.start (service=targets) when opt-in telemetry is enabled.

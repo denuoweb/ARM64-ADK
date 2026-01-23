@@ -150,10 +150,19 @@ if [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/platform-tools" ]; 
   fi
 fi
 
+if [ -z "${AADK_ADB_PATH:-}" ] && [ -n "${ANDROID_SDK_ROOT:-}" ]; then
+  if [ -x "$ANDROID_SDK_ROOT/platform-tools/adb" ]; then
+    export AADK_ADB_PATH="$ANDROID_SDK_ROOT/platform-tools/adb"
+  elif [ -x "$ANDROID_SDK_ROOT/platform-tools/adb.exe" ]; then
+    export AADK_ADB_PATH="$ANDROID_SDK_ROOT/platform-tools/adb.exe"
+  fi
+fi
+
 echo "Environment:"
 echo "  ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
 echo "  ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT:-<unset>}"
 echo "  JAVA_HOME=${JAVA_HOME:-<unset>}"
+echo "  AADK_ADB_PATH=${AADK_ADB_PATH:-<unset>}"
 echo
 
 if [ -z "${ANDROID_SDK_ROOT:-}" ]; then

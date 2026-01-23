@@ -61,6 +61,18 @@ fn cuttlefish_kvm_check_enabled() -> bool {
     }
 }
 
+fn local_display_available() -> bool {
+    let wayland = std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let x11 = std::env::var("DISPLAY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    wayland || x11
+}
+
 fn cuttlefish_connect_enabled() -> bool {
     match std::env::var("AADK_CUTTLEFISH_CONNECT") {
         Ok(val) => !(val == "0" || val.eq_ignore_ascii_case("false")),
@@ -358,6 +370,25 @@ fn cuttlefish_images_ready(images_dir: &Path) -> bool {
     images_dir.join("system.img").exists()
         || images_dir.join("super.img").exists()
         || images_dir.join("boot.img").exists()
+}
+
+fn resolve_cuttlefish_images_dir(page_size: Option<usize>) -> (PathBuf, Option<PathBuf>) {
+    let configured = cuttlefish_images_dir(page_size);
+    if cuttlefish_images_ready(&configured) {
+        return (configured, None);
+    }
+    if let Some(size) = page_size {
+        let suffix = page_size_label(size).to_lowercase();
+        let nested = configured.join(&suffix);
+        if nested != configured && cuttlefish_images_ready(&nested) {
+            return (nested, Some(configured));
+        }
+    }
+    let default_dir = cuttlefish_home_dir(page_size);
+    if default_dir != configured && cuttlefish_images_ready(&default_dir) {
+        return (default_dir, Some(configured));
+    }
+    (configured, None)
 }
 
 fn read_env_trimmed(key: &str) -> Option<String> {
@@ -1499,14 +1530,39 @@ async fn cuttlefish_preflight(
 ) -> Result<CuttlefishRuntime, ErrorDetail> {
     let page_size = host_page_size();
     let home_dir = cuttlefish_home_dir(page_size);
-    let images_dir = cuttlefish_images_dir(page_size);
+    let (images_dir, images_fallback) = resolve_cuttlefish_images_dir(page_size);
     let host_dir = cuttlefish_host_dir(page_size);
+    let images_ready = cuttlefish_images_ready(&images_dir);
+
+    if require_images {
+        if let Some(original) = images_fallback.as_ref() {
+            let _ = publish_log(
+                job_client,
+                job_id,
+                &format!(
+                    "Cuttlefish images dir fallback: {} -> {}\n",
+                    original.display(),
+                    images_dir.display()
+                ),
+            )
+            .await;
+        }
+    }
 
     if let Some(size) = page_size {
         let _ = publish_log(job_client, job_id, &format!("Host page size: {size}\n")).await;
         if require_images && size > 4096 {
             if cuttlefish_page_size_check_enabled() {
-                if !cuttlefish_images_ready(&images_dir) {
+                if !images_ready {
+                    let _ = publish_log(
+                        job_client,
+                        job_id,
+                        &format!(
+                            "Cuttlefish images missing under {} (expected boot.img/super.img/system.img)\n",
+                            images_dir.display()
+                        ),
+                    )
+                    .await;
                     return Err(job_error_detail(
                         ErrorCode::Unavailable,
                         "missing 16K Cuttlefish images",
@@ -1571,7 +1627,16 @@ async fn cuttlefish_preflight(
         }
     }
 
-    if require_images && !cuttlefish_images_ready(&images_dir) {
+    if require_images && !images_ready {
+        let _ = publish_log(
+            job_client,
+            job_id,
+            &format!(
+                "Cuttlefish images missing under {} (expected boot.img/super.img/system.img)\n",
+                images_dir.display()
+            ),
+        )
+        .await;
         return Err(job_error_detail(
             ErrorCode::NotFound,
             "Cuttlefish images not found",
@@ -1621,11 +1686,12 @@ fn cuttlefish_start_command(
         }
     }
     if !args_has_flag(&extra_args, "--start_webrtc") {
+        let start_webrtc = show_full_ui || !local_display_available();
         if !extra_args.is_empty() {
             extra_args.push(' ');
         }
         extra_args.push_str("--start_webrtc=");
-        extra_args.push_str(if show_full_ui { "true" } else { "false" });
+        extra_args.push_str(if start_webrtc { "true" } else { "false" });
     }
     let include_usage_stats = !extra_args.contains("report_anonymous_usage_stats");
     if std::env::consts::ARCH == "aarch64" && !extra_args.contains("enable_host_bluetooth") {
@@ -1806,6 +1872,18 @@ pub(crate) async fn run_cuttlefish_start_job(job_id: String, show_full_ui: bool)
             return;
         }
     };
+
+    if !show_full_ui {
+        let start_args = read_env_trimmed("AADK_CUTTLEFISH_START_ARGS").unwrap_or_default();
+        if !args_has_flag(&start_args, "--start_webrtc") && !local_display_available() {
+            let _ = publish_log(
+                &mut job_client,
+                &job_id,
+                "No local display detected; forcing --start_webrtc=true (override with AADK_CUTTLEFISH_START_ARGS=--start_webrtc=false)\n",
+            )
+            .await;
+        }
+    }
 
     if cancel_requested(&cancel_rx) {
         let _ = publish_log(&mut job_client, &job_id, "Cuttlefish start cancelled\n").await;
