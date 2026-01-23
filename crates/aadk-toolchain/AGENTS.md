@@ -35,6 +35,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - Available versions can also be sourced from fixture archives via AADK_TOOLCHAIN_FIXTURES_DIR.
 - Toolchains are installed under ~/.local/share/aadk/toolchains and cached in
   ~/.local/share/aadk/downloads; state is persisted in ~/.local/share/aadk/state/toolchains.json.
+- SDK installs normalize cmdline-tools layout by adding cmdline-tools/latest links when archives
+  ship a flat cmdline-tools/bin + lib layout.
 - Install/Update/Verify job progress metrics include provider/version/host/verify settings plus artifact URLs/paths and install roots.
 - verify_toolchain checks install path, provenance contents, catalog consistency, artifact size,
   optional Ed25519 signatures (over SHA256 digest), transparency log entries when configured, and
@@ -49,6 +51,8 @@ Update this file whenever ToolchainService behavior changes or when commits touc
 - Toolchain sets are persisted in ~/.local/share/aadk/state/toolchains.json along with the active
   toolchain set id.
 - ReloadState reloads persisted toolchain installs and set metadata from disk.
+- State load now scans ~/.local/share/aadk/toolchains for provenance files and rehydrates installed
+  toolchains when state is missing, so existing installs survive reset-all-state.
 
 ## Data flow and dependencies
 - Uses JobService for install/verify jobs and publishes logs/progress events.

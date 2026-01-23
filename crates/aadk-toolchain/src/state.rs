@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -10,6 +11,10 @@ use aadk_proto::aadk::v1::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
+
+use crate::catalog::Catalog;
+use crate::hashing::short_hash;
+use crate::provenance::read_provenance;
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -200,60 +205,68 @@ pub(crate) fn expand_user(path: &str) -> PathBuf {
     aadk_util::expand_user(path)
 }
 
-pub(crate) fn load_state() -> State {
+pub(crate) fn load_state(catalog: &Catalog) -> State {
     let path = state_file_path();
-    let data = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return State::default(),
+    let parsed = match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<PersistedState>(&bytes) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                warn!("Failed to parse toolchain state {}: {}", path.display(), e);
+                None
+            }
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => {
             warn!("Failed to read toolchain state {}: {}", path.display(), e);
-            return State::default();
+            None
         }
     };
 
-    let parsed: PersistedState = match serde_json::from_slice(&data) {
-        Ok(state) => state,
-        Err(e) => {
-            warn!("Failed to parse toolchain state {}: {}", path.display(), e);
-            return State::default();
-        }
-    };
-
-    let installed = parsed
-        .installed
-        .into_iter()
-        .map(PersistedToolchain::into_installed)
-        .collect();
-    let toolchain_sets = parsed
-        .toolchain_sets
-        .into_iter()
-        .filter_map(|set| {
-            if set.toolchain_set_id.trim().is_empty() {
-                warn!("Skipping toolchain set with empty id in persisted state");
-                None
-            } else {
-                Some(set.into_proto())
+    let mut state = if let Some(parsed) = parsed {
+        let installed = parsed
+            .installed
+            .into_iter()
+            .map(PersistedToolchain::into_installed)
+            .collect();
+        let toolchain_sets = parsed
+            .toolchain_sets
+            .into_iter()
+            .filter_map(|set| {
+                if set.toolchain_set_id.trim().is_empty() {
+                    warn!("Skipping toolchain set with empty id in persisted state");
+                    None
+                } else {
+                    Some(set.into_proto())
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut active_set_id = parsed.active_set_id.filter(|id| !id.trim().is_empty());
+        if let Some(active_id) = active_set_id.as_ref() {
+            let exists = toolchain_sets.iter().any(|set| {
+                set.toolchain_set_id
+                    .as_ref()
+                    .map(|id| id.value.as_str())
+                    == Some(active_id.as_str())
+            });
+            if !exists {
+                warn!(
+                    "Active toolchain set id '{}' missing from persisted state; clearing",
+                    active_id
+                );
+                active_set_id = None;
             }
-        })
-        .collect::<Vec<_>>();
-    let mut active_set_id = parsed.active_set_id.filter(|id| !id.trim().is_empty());
-    if let Some(active_id) = active_set_id.as_ref() {
-        let exists = toolchain_sets.iter().any(|set| {
-            set.toolchain_set_id.as_ref().map(|id| id.value.as_str()) == Some(active_id.as_str())
-        });
-        if !exists {
-            warn!(
-                "Active toolchain set id '{}' missing from persisted state; clearing",
-                active_id
-            );
-            active_set_id = None;
         }
-    }
-    State {
-        active_set_id,
-        toolchain_sets,
-        installed,
-    }
+        State {
+            active_set_id,
+            toolchain_sets,
+            installed,
+        }
+    } else {
+        State::default()
+    };
+
+    merge_installed_from_disk(&mut state, catalog);
+    state
 }
 
 pub(crate) fn save_state_best_effort(state: &State) {
@@ -380,4 +393,204 @@ fn save_state(state: &State) -> io::Result<()> {
     fs::write(&tmp, payload)?;
     fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+fn merge_installed_from_disk(state: &mut State, catalog: &Catalog) {
+    let discovered = discover_installed_toolchains(catalog);
+    if discovered.is_empty() {
+        return;
+    }
+    let mut existing_paths: HashSet<String> = state
+        .installed
+        .iter()
+        .map(|item| item.install_path.clone())
+        .collect();
+    for item in discovered {
+        if existing_paths.contains(&item.install_path) {
+            continue;
+        }
+        existing_paths.insert(item.install_path.clone());
+        state.installed.push(item);
+    }
+}
+
+fn discover_installed_toolchains(catalog: &Catalog) -> Vec<InstalledToolchain> {
+    let install_root = default_install_root();
+    let mut installed = Vec::new();
+    let provider_dirs = match fs::read_dir(&install_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return installed,
+        Err(err) => {
+            warn!(
+                "Failed to read toolchain install root {}: {}",
+                install_root.display(),
+                err
+            );
+            return installed;
+        }
+    };
+
+    for provider_entry in provider_dirs {
+        let entry = match provider_entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warn!("Failed to read toolchain provider entry: {}", err);
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                warn!("Failed to read toolchain provider entry type: {}", err);
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let provider_name = entry.file_name().to_string_lossy().to_string();
+        let versions = match fs::read_dir(entry.path()) {
+            Ok(entries) => entries,
+            Err(err) => {
+                warn!(
+                    "Failed to read toolchain provider dir {}: {}",
+                    entry.path().display(),
+                    err
+                );
+                continue;
+            }
+        };
+
+        for version_entry in versions {
+            let entry = match version_entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn!("Failed to read toolchain version entry: {}", err);
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    warn!("Failed to read toolchain version entry type: {}", err);
+                    continue;
+                }
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let dir_name_os = entry.file_name();
+            let dir_name = dir_name_os.to_string_lossy();
+            if dir_name.starts_with('.') {
+                continue;
+            }
+            if let Some(item) =
+                installed_from_disk(&entry.path(), catalog, Some(&provider_name))
+            {
+                installed.push(item);
+            }
+        }
+    }
+
+    installed
+}
+
+pub(crate) fn installed_from_disk(
+    install_path: &Path,
+    catalog: &Catalog,
+    provider_hint: Option<&str>,
+) -> Option<InstalledToolchain> {
+    let prov_path = install_path.join("provenance.txt");
+    let provenance = match read_provenance(&prov_path) {
+        Ok(prov) => prov,
+        Err(_) => return None,
+    };
+
+    let provider_id = provenance.provider_id.trim();
+    let mut provider_name = provenance.provider_name.trim();
+    if provider_name.is_empty() {
+        if let Some(hint) = provider_hint {
+            provider_name = hint.trim();
+        }
+    }
+    if provider_name.is_empty() {
+        provider_name = install_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+    }
+
+    let mut version = provenance.version.trim();
+    if version.is_empty() {
+        version = install_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+    }
+
+    if provider_name.is_empty() || version.is_empty() {
+        warn!(
+            "Skipping toolchain at {}: missing provider or version",
+            install_path.display()
+        );
+        return None;
+    }
+
+    let catalog_provider = if !provider_id.is_empty() {
+        catalog
+            .providers
+            .iter()
+            .find(|item| item.provider_id == provider_id)
+    } else {
+        catalog
+            .providers
+            .iter()
+            .find(|item| item.name == provider_name)
+    };
+    let provider = catalog_provider.map(crate::catalog::provider_from_catalog).unwrap_or_else(
+        || ToolchainProvider {
+            provider_id: if provider_id.is_empty() {
+                None
+            } else {
+                Some(Id {
+                    value: provider_id.to_string(),
+                })
+            },
+            name: provider_name.to_string(),
+            kind: guess_provider_kind(provider_id, provider_name) as i32,
+            description: "".into(),
+        },
+    );
+
+    let install_path_str = install_path.to_string_lossy().to_string();
+    Some(InstalledToolchain {
+        toolchain_id: Some(Id {
+            value: format!("tc-{}", short_hash(&install_path_str)),
+        }),
+        provider: Some(provider),
+        version: Some(ToolchainVersion {
+            version: version.to_string(),
+            channel: "".into(),
+            notes: "".into(),
+        }),
+        install_path: install_path_str,
+        verified: false,
+        installed_at: Some(Timestamp {
+            unix_millis: provenance.installed_at_unix_millis,
+        }),
+        source_url: provenance.source_url,
+        sha256: provenance.sha256,
+    })
+}
+
+fn guess_provider_kind(provider_id: &str, provider_name: &str) -> ToolchainKind {
+    let combined = format!("{} {}", provider_id, provider_name).to_ascii_lowercase();
+    if combined.contains("ndk") {
+        ToolchainKind::Ndk
+    } else if combined.contains("sdk") {
+        ToolchainKind::Sdk
+    } else {
+        ToolchainKind::Unspecified
+    }
 }

@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -38,10 +39,10 @@ use crate::jobs::{
 };
 use crate::provenance::{read_provenance, write_provenance, Provenance};
 use crate::state::{
-    default_install_root, expand_user, install_root_for_entry, installed_toolchain_matches,
-    load_state, normalize_id, provider_id_from_installed, replace_toolchain_in_sets,
-    save_state_best_effort, scrub_toolchain_from_sets, toolchain_referenced_by_sets,
-    toolchain_set_id, version_from_installed, State,
+    default_install_root, expand_user, install_root_for_entry, installed_from_disk,
+    installed_toolchain_matches, load_state, normalize_id, provider_id_from_installed,
+    replace_toolchain_in_sets, save_state_best_effort, scrub_toolchain_from_sets,
+    toolchain_referenced_by_sets, toolchain_set_id, version_from_installed, State,
 };
 use crate::verify::{
     normalize_signature_value, signature_record_from_catalog, signature_record_from_provenance,
@@ -60,12 +61,77 @@ pub(crate) struct Svc {
 
 impl Default for Svc {
     fn default() -> Self {
-        let state = load_state();
+        let catalog = load_catalog();
+        let state = load_state(&catalog);
         Self {
             state: Arc::new(Mutex::new(state)),
-            catalog: Arc::new(load_catalog()),
+            catalog: Arc::new(catalog),
         }
     }
+}
+
+#[cfg(unix)]
+fn symlink_path(src: &Path, dest: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(src, dest)
+}
+
+#[cfg(windows)]
+fn symlink_path(src: &Path, dest: &Path) -> io::Result<()> {
+    if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dest)
+    } else {
+        std::os::windows::fs::symlink_file(src, dest)
+    }
+}
+
+fn link_if_missing(src: &Path, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        return Ok(());
+    }
+    symlink_path(src, dest)
+        .map_err(|err| format!("failed to link {} -> {}: {err}", dest.display(), src.display()))
+}
+
+fn ensure_cmdline_tools_latest(root: &Path) -> Result<(), String> {
+    let cmdline_root = root.join("cmdline-tools");
+    if !cmdline_root.is_dir() {
+        return Ok(());
+    }
+    let bin = cmdline_root.join("bin");
+    let sdkmanager = if cfg!(windows) {
+        bin.join("sdkmanager.bat")
+    } else {
+        bin.join("sdkmanager")
+    };
+    if !sdkmanager.exists() {
+        return Ok(());
+    }
+
+    let latest = cmdline_root.join("latest");
+    let latest_sdkmanager = if cfg!(windows) {
+        latest.join("bin").join("sdkmanager.bat")
+    } else {
+        latest.join("bin").join("sdkmanager")
+    };
+    if latest_sdkmanager.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&latest)
+        .map_err(|err| format!("failed to create cmdline-tools/latest: {err}"))?;
+
+    link_if_missing(&bin, &latest.join("bin"))?;
+    let lib = cmdline_root.join("lib");
+    if lib.is_dir() {
+        link_if_missing(&lib, &latest.join("lib"))?;
+    }
+    for file in ["source.properties", "NOTICE.txt"] {
+        let src = cmdline_root.join(file);
+        if src.is_file() {
+            link_if_missing(&src, &latest.join(file))?;
+        }
+    }
+
+    Ok(())
 }
 
 impl Svc {
@@ -211,8 +277,72 @@ impl Svc {
         } else {
             expand_user(&install_root)
         };
+        let provider_dir = install_root.join(&provider.name);
+        let final_dir = provider_dir.join(&version);
         let provider_kind =
             ToolchainKind::try_from(provider.kind).unwrap_or(ToolchainKind::Unspecified);
+
+        if final_dir.exists() {
+            if let Some(existing) =
+                installed_from_disk(&final_dir, self.catalog.as_ref(), Some(&provider.name))
+            {
+                let mut st = self.state.lock().await;
+                let already_tracked = st
+                    .installed
+                    .iter()
+                    .any(|item| item.install_path == existing.install_path);
+                if !already_tracked {
+                    st.installed.push(existing.clone());
+                    save_state_best_effort(&st);
+                }
+                drop(st);
+
+                let _ = publish_log(
+                    &mut job_client,
+                    &job_id,
+                    "Toolchain already installed; skipping download\n",
+                )
+                .await;
+                let _ = publish_completed(
+                    &mut job_client,
+                    &job_id,
+                    "Toolchain already installed",
+                    vec![
+                        KeyValue {
+                            key: "toolchain_id".into(),
+                            value: existing
+                                .toolchain_id
+                                .as_ref()
+                                .map(|id| id.value.clone())
+                                .unwrap_or_default(),
+                        },
+                        KeyValue {
+                            key: "provider".into(),
+                            value: provider.name.clone(),
+                        },
+                        KeyValue {
+                            key: "version".into(),
+                            value: version.clone(),
+                        },
+                        KeyValue {
+                            key: "install_path".into(),
+                            value: existing.install_path.clone(),
+                        },
+                    ],
+                )
+                .await;
+                return Ok(());
+            } else {
+                let err_detail = job_error_detail(
+                    ErrorCode::ToolchainInstallFailed,
+                    "install path already exists without provenance",
+                    final_dir.to_string_lossy().to_string(),
+                    &job_id,
+                );
+                let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
+                return Ok(());
+            }
+        }
 
         let _ = publish_progress(&mut job_client, &job_id, 10, "resolve artifact", {
             let mut metrics = toolchain_base_metrics(
@@ -469,6 +599,16 @@ impl Svc {
             );
             let _ = publish_failed(&mut job_client, &job_id, err_detail).await;
             return Ok(());
+        }
+
+        if provider_kind == ToolchainKind::Sdk {
+            if let Err(err) = ensure_cmdline_tools_latest(&final_dir) {
+                warn!(
+                    "Failed to normalize cmdline-tools layout at {}: {}",
+                    final_dir.display(),
+                    err
+                );
+            }
         }
 
         let toolchain_id = format!("tc-{}", Uuid::new_v4());
@@ -2437,7 +2577,7 @@ impl ToolchainService for Svc {
         &self,
         _request: Request<ReloadStateRequest>,
     ) -> Result<Response<ReloadStateResponse>, Status> {
-        let state = load_state();
+        let state = load_state(self.catalog.as_ref());
         let installed = state.installed.len();
         let sets = state.toolchain_sets.len();
         let mut st = self.state.lock().await;
