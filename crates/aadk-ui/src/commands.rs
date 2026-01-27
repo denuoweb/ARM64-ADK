@@ -200,6 +200,7 @@ pub(crate) enum UiCommand {
     TargetsLaunchApp {
         cfg: AppConfig,
         target_id: String,
+        apk_path: String,
         application_id: String,
         activity: String,
         job_id: Option<String>,

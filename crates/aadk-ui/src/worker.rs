@@ -40,7 +40,7 @@ use crate::commands::{AppEvent, UiCommand};
 use crate::config::{write_json_atomic, AppConfig};
 use crate::models::{ProjectTemplateOption, TargetOption, ToolchainSetOption};
 use crate::ui_events::UiEventSender;
-use crate::utils::parse_list_tokens;
+use crate::utils::{infer_application_id_from_apk_path, parse_list_tokens};
 
 pub(crate) struct AppState {
     pub(crate) current_job_id: Option<String>,
@@ -3298,13 +3298,15 @@ pub(crate) async fn handle_command(
         UiCommand::TargetsLaunchApp {
             cfg,
             target_id,
+            apk_path,
             application_id,
             activity,
             job_id,
             correlation_id,
         } => {
             let target_id = target_id.trim().to_string();
-            let application_id = application_id.trim().to_string();
+            let apk_path = apk_path.trim().to_string();
+            let mut application_id = application_id.trim().to_string();
             let activity = activity.trim().to_string();
             if target_id.is_empty() {
                 ui.send(AppEvent::Log {
@@ -3315,9 +3317,21 @@ pub(crate) async fn handle_command(
                 return Ok(());
             }
             if application_id.is_empty() {
+                if let Some(inferred) = infer_application_id_from_apk_path(&apk_path) {
+                    application_id = inferred;
+                    ui.send(AppEvent::Log {
+                        page: "targets",
+                        line: format!(
+                            "Inferred application id from APK: {application_id}\n"
+                        ),
+                    })
+                    .ok();
+                }
+            }
+            if application_id.is_empty() {
                 ui.send(AppEvent::Log {
                     page: "targets",
-                    line: "Launch requires an application id.\n".into(),
+                    line: "Launch requires an application id (provide one or select an APK from a project).\n".into(),
                 })
                 .ok();
                 return Ok(());

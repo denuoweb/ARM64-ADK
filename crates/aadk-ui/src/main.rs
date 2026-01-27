@@ -27,7 +27,7 @@ use pages::{
     JobsHistoryPage, Page, ProjectsPage, SettingsPage, TargetsPage, ToolchainsPage, WorkflowPage,
 };
 use ui_state::UiState;
-use crate::utils::infer_application_id_from_project;
+use crate::utils::{infer_application_id_from_apk_path, infer_application_id_from_project};
 use ui_events::{UiEventQueue, DEFAULT_EVENT_QUEUE_SIZE};
 use worker::{handle_command, AppState};
 
@@ -973,6 +973,28 @@ fn build_ui(app: &gtk::Application) {
                     }
                     AppEvent::SetLastBuildApk { apk_path } => {
                         targets_for_events.set_apk_path(&apk_path);
+                        workflow_for_events.set_apk_path(&apk_path);
+                        let current_app_id = targets_for_events.app_id_entry.text().to_string();
+                        if current_app_id.trim().is_empty() {
+                            if let Some(inferred) =
+                                infer_application_id_from_apk_path(apk_path.as_str())
+                            {
+                                targets_for_events.set_application_id(&inferred);
+                                let mut state = ui_state_for_events.lock().unwrap();
+                                state.targets.application_id = inferred;
+                            }
+                        }
+                        let workflow_app_id =
+                            workflow_for_events.application_id_entry.text().to_string();
+                        if workflow_app_id.trim().is_empty() {
+                            if let Some(inferred) =
+                                infer_application_id_from_apk_path(apk_path.as_str())
+                            {
+                                workflow_for_events.set_application_id(&inferred);
+                                let mut state = ui_state_for_events.lock().unwrap();
+                                state.workflow.application_id = inferred;
+                            }
+                        }
                     }
                     AppEvent::SetCuttlefishBuildId { build_id } => {
                         targets_for_events.set_cuttlefish_build_id(&build_id);

@@ -14,7 +14,9 @@ use tokio::sync::mpsc;
 use crate::commands::UiCommand;
 use crate::config::AppConfig;
 use crate::models::{ActiveContext, ProjectTemplateOption, TargetOption, ToolchainSetOption};
-use crate::utils::parse_list_tokens;
+use crate::utils::{
+    infer_application_id_from_apk_path, infer_application_id_from_project, parse_list_tokens,
+};
 
 #[derive(Clone)]
 pub(crate) struct Page {
@@ -474,10 +476,27 @@ impl WorkflowPage {
     pub(crate) fn set_context(&self, ctx: &ActiveContext) {
         self.run_id_entry.set_text(ctx.run_id.trim());
         self.project_id_entry.set_text(ctx.project_id.trim());
-        self.project_path_entry.set_text(ctx.project_path.trim());
+        let project_path = ctx.project_path.trim();
+        self.project_path_entry.set_text(project_path);
         self.toolchain_set_entry
             .set_text(ctx.toolchain_set_id.trim());
         self.target_id_entry.set_text(ctx.target_id.trim());
+        if self.application_id_entry.text().trim().is_empty() && !project_path.is_empty() {
+            if let Some(app_id) = infer_application_id_from_project(project_path) {
+                self.application_id_entry.set_text(&app_id);
+            }
+        }
+    }
+
+    pub(crate) fn set_apk_path(&self, path: &str) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            self.apk_path_entry.set_text(trimmed);
+        }
+    }
+
+    pub(crate) fn set_application_id(&self, application_id: &str) {
+        self.application_id_entry.set_text(application_id.trim());
     }
 }
 
@@ -1267,6 +1286,7 @@ pub(crate) fn page_workflow(
         .placeholder_text("apk path for install")
         .hexpand(true)
         .build();
+    let apk_browse = gtk::Button::with_label("Browse...");
     let application_id_entry = gtk::Entry::builder()
         .placeholder_text("application id (com.example.app)")
         .hexpand(true)
@@ -1284,6 +1304,7 @@ pub(crate) fn page_workflow(
     );
     set_tooltip(&tasks_entry, "What: Explicit Gradle tasks. Why: override default tasks. How: enter space or comma separated tasks.");
     set_tooltip(&apk_path_entry, "What: APK path for install step. Why: targets.install needs an APK. How: paste a path or leave empty to skip install.");
+    set_tooltip(&apk_browse, "What: Pick an APK file. Why: avoid typing the APK path. How: click and choose an .apk file.");
     set_tooltip(&application_id_entry, "What: Application id for launch. Why: targets.launch uses it to start the app. How: enter com.example.app.");
     set_tooltip(&activity_entry, "What: Optional activity for launch. Why: open a specific activity. How: enter the full activity class or leave blank.");
 
@@ -1296,7 +1317,10 @@ pub(crate) fn page_workflow(
     build_grid.attach(&gtk::Label::new(Some("Tasks")), 0, 3, 1, 1);
     build_grid.attach(&tasks_entry, 1, 3, 1, 1);
     build_grid.attach(&gtk::Label::new(Some("APK path")), 0, 4, 1, 1);
-    build_grid.attach(&apk_path_entry, 1, 4, 1, 1);
+    let apk_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    apk_row.append(&apk_path_entry);
+    apk_row.append(&apk_browse);
+    build_grid.attach(&apk_row, 1, 4, 1, 1);
     build_grid.attach(&gtk::Label::new(Some("Application id")), 0, 5, 1, 1);
     build_grid.attach(&application_id_entry, 1, 5, 1, 1);
     build_grid.attach(&gtk::Label::new(Some("Activity")), 0, 6, 1, 1);
@@ -1404,6 +1428,27 @@ pub(crate) fn page_workflow(
         dialog.show();
     });
 
+    let parent_window_apk = parent.clone();
+    let apk_entry_browse = apk_path_entry.clone();
+    let app_id_entry_browse = application_id_entry.clone();
+    let install_check_browse = install_check.clone();
+    apk_browse.connect_clicked(move |_| {
+        let app_id_entry = app_id_entry_browse.clone();
+        let install_check = install_check_browse.clone();
+        select_apk_dialog(
+            &parent_window_apk,
+            &apk_entry_browse,
+            Some(Box::new(move |path| {
+                if app_id_entry.text().trim().is_empty() {
+                    if let Some(app_id) = infer_application_id_from_apk_path(&path) {
+                        app_id_entry.set_text(&app_id);
+                    }
+                }
+                install_check.set_active(true);
+            })),
+        );
+    });
+
     let cfg_run = cfg.clone();
     let cmd_tx_run = cmd_tx.clone();
     let run_id_entry_run = run_id_entry.clone();
@@ -1473,7 +1518,13 @@ pub(crate) fn page_workflow(
         let module = module_entry_run.text().to_string();
         let tasks = parse_list_tokens(&tasks_entry_run.text());
         let apk_path = apk_path_entry_run.text().to_string();
-        let application_id = application_id_entry_run.text().to_string();
+        let mut application_id = application_id_entry_run.text().to_string();
+        if application_id.trim().is_empty() {
+            if let Some(app_id) = infer_application_id_from_apk_path(&apk_path) {
+                application_id_entry_run.set_text(&app_id);
+                application_id = app_id;
+            }
+        }
         let activity = activity_entry_run.text().to_string();
         let options = if auto_infer_run.is_active() {
             None
@@ -3254,22 +3305,41 @@ pub(crate) fn page_targets(
 
     let parent_window_browse = parent.clone();
     let apk_entry_browse = apk_entry.clone();
+    let app_id_entry_browse = app_id_entry.clone();
     apk_browse.connect_clicked(move |_| {
-        select_apk_dialog(&parent_window_browse, &apk_entry_browse, None);
+        let app_id_entry = app_id_entry_browse.clone();
+        select_apk_dialog(
+            &parent_window_browse,
+            &apk_entry_browse,
+            Some(Box::new(move |path| {
+                if app_id_entry.text().trim().is_empty() {
+                    if let Some(app_id) = infer_application_id_from_apk_path(&path) {
+                        app_id_entry.set_text(&app_id);
+                    }
+                }
+            })),
+        );
     });
 
     let parent_window_install = parent.clone();
     let apk_entry_install = apk_entry.clone();
+    let app_id_entry_install = app_id_entry.clone();
     install_apk.connect_clicked(move |_| {
         let apk_path = apk_entry_install.text().to_string();
         if apk_path.trim().is_empty() {
             let queue_install_apk = queue_install_apk.clone();
             let parent_window = parent_window_install.clone();
             let apk_entry_dialog = apk_entry_install.clone();
+            let app_id_entry = app_id_entry_install.clone();
             select_apk_dialog(
                 &parent_window,
                 &apk_entry_dialog,
                 Some(Box::new(move |path| {
+                    if app_id_entry.text().trim().is_empty() {
+                        if let Some(app_id) = infer_application_id_from_apk_path(&path) {
+                            app_id_entry.set_text(&app_id);
+                        }
+                    }
                     queue_install_apk(path);
                 })),
             );
@@ -3281,6 +3351,7 @@ pub(crate) fn page_targets(
     let cfg_launch = cfg.clone();
     let cmd_tx_launch = cmd_tx.clone();
     let target_entry_launch = target_entry.clone();
+    let apk_entry_launch = apk_entry.clone();
     let app_id_entry_launch = app_id_entry.clone();
     let activity_entry_launch = activity_entry.clone();
     let use_job_id_launch = use_job_id_check.clone();
@@ -3311,6 +3382,7 @@ pub(crate) fn page_targets(
             .try_send(UiCommand::TargetsLaunchApp {
                 cfg,
                 target_id: target_entry_launch.text().to_string(),
+                apk_path: apk_entry_launch.text().to_string(),
                 application_id: app_id_entry_launch.text().to_string(),
                 activity: activity_entry_launch.text().to_string(),
                 job_id,

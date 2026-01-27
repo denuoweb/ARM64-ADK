@@ -47,6 +47,29 @@ pub(crate) fn infer_application_id_from_project(project_path: &str) -> Option<St
     None
 }
 
+pub(crate) fn infer_application_id_from_apk_path(apk_path: &str) -> Option<String> {
+    let trimmed = apk_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    let current = if path.is_dir() { Some(path) } else { path.parent() }?;
+
+    for ancestor in current.ancestors() {
+        if ancestor.join("app").join("build.gradle.kts").is_file()
+            || ancestor.join("app").join("build.gradle").is_file()
+        {
+            if let Some(root) = ancestor.to_str() {
+                if let Some(value) = infer_application_id_from_project(root) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn parse_gradle_value(contents: &str, key: &str) -> Option<String> {
     for line in contents.lines() {
         let trimmed = line.trim();

@@ -80,6 +80,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Opening existing projects resets the Projects template selection to None; Targets defaults no longer force the SampleConsole application id and attempt to infer it from app Gradle or manifest when unset.
 - Projects page removed an unused project-id setter to keep builds warning-free.
 - Targets list auto-fills the active target id when missing, and Cuttlefish start completion updates it from adb_serial.
+- Targets launch can infer the application id from an APK path rooted in a project when the field is empty, and APK selection/build output can auto-fill the app id (Targets and Workflow pages; Workflow includes an APK browse button and auto-enables Install APK when a path is chosen).
 - State archive Save/Open dialogs clone their queue callbacks per click so GTK can reuse the button handlers.
 - Project templates auto-load on app startup and whenever the Projects tab becomes visible.
 - UI sources are kept rustfmt-formatted to align with workspace style.
