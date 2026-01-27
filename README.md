@@ -1,3 +1,5 @@
+[![AADK UI demo](docs/ARM64.gif)](docs/ARM64.mp4)
+
 # AADK Full Scaffold
 
 GUI-first, multi-service gRPC scaffold for an Android DevKit style workflow. The GTK UI and CLI
