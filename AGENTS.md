@@ -35,6 +35,7 @@ completed items or move them into the implementation notes.
 - proto/aadk/v1/*.proto: gRPC contracts
 - scripts/dev/run-all.sh: local dev runner for all services (auto-exports ANDROID_SDK_ROOT/ANDROID_HOME and AADK_ADB_PATH when an SDK is detected)
 - scripts/release/build.sh: release build + packaging helper
+- scripts/release/aadk-start.sh: installed launcher (services + UI, logs to ~/.local/share/aadk/logs)
 - docs/release.md: release build steps
 - SampleConsole: Minimal Compose sample app (Sample Console) bundled with AADK
 - CS492_Assignment1_RosenauJ/CS492A1RosenauJ: Course assignment sample app
