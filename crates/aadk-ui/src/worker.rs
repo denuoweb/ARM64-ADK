@@ -41,18 +41,10 @@ use crate::models::{ProjectTemplateOption, TargetOption, ToolchainSetOption};
 use crate::ui_events::UiEventSender;
 use crate::utils::{infer_application_id_from_apk_path, parse_list_tokens};
 
+#[derive(Default)]
 pub(crate) struct AppState {
     pub(crate) current_job_id: Option<String>,
     home_stream: Option<tokio::task::AbortHandle>,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            current_job_id: None,
-            home_stream: None,
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -4446,7 +4438,10 @@ pub(crate) async fn handle_command(
                         })
                         .ok();
                     }
-                    ui.send(AppEvent::ConfigReloaded { cfg: new_cfg }).ok();
+                    ui.send(AppEvent::ConfigReloaded {
+                        cfg: Box::new(new_cfg),
+                    })
+                    .ok();
                 }
                 Err(err) => {
                     ui.send(AppEvent::Log {

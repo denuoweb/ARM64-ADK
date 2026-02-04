@@ -374,7 +374,7 @@ pub(crate) enum AppEvent {
         ok: bool,
     },
     ConfigReloaded {
-        cfg: AppConfig,
+        cfg: Box<AppConfig>,
     },
 }
 

@@ -470,7 +470,6 @@ impl ProjectsPage {
     ) {
         select_project_path(parent, &self.path_entry, cfg, cmd_tx);
     }
-
 }
 
 impl WorkflowPage {

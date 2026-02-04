@@ -22,6 +22,7 @@ Update this file whenever telemetry schema or behavior changes.
 ## Crash reports
 - Stored in `~/.local/share/aadk/telemetry/<app>/crashes/crash-<timestamp>-<pid>.json`.
 - Includes message, location (file:line), and a backtrace snapshot.
+- Crash reports overwrite any existing file with the same name to avoid trailing bytes.
 
 ## Environment / config
 - AADK_TELEMETRY=1 enables usage events.

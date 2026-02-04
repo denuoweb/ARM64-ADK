@@ -87,6 +87,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Project templates auto-load on app startup and whenever the Projects tab becomes visible.
 - UI sources are kept rustfmt-formatted to align with workspace style.
 - UI log persistence now updates `ui-state.json` per AppEvent log line instead of scraping text buffers on close.
+- `AppEvent::ConfigReloaded` now boxes `AppConfig`, and `UiState`/`BuildState`/`SettingsState`/`AppState` derive `Default`; rustfmt import/whitespace cleanup applied (no behavior change).
 
 ## Prioritized TODO checklist by service
 (Clients list includes UI and CLI items; some references below point to crates/aadk-cli.)

@@ -355,14 +355,12 @@ pub fn save_state_archive_to(
         };
         !should_exclude_rel(rel, opts)
     }) {
-        let entry = entry.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let entry = entry.map_err(io::Error::other)?;
         let path = entry.path();
         if path == base_dir {
             continue;
         }
-        let rel = path
-            .strip_prefix(&base_dir)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let rel = path.strip_prefix(&base_dir).map_err(io::Error::other)?;
         if should_exclude_rel(rel, opts) {
             continue;
         }
@@ -372,20 +370,18 @@ pub fn save_state_archive_to(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if entry.file_type().is_dir() {
             zip.add_directory(format!("{rel_str}/"), options)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                .map_err(io::Error::other)?;
             dir_count += 1;
             continue;
         }
         let mut file = fs::File::open(path)?;
-        zip.start_file(rel_str, options)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        zip.start_file(rel_str, options).map_err(io::Error::other)?;
         let copied = io::copy(&mut file, &mut zip)?;
         file_count += 1;
         total_bytes += copied;
     }
 
-    zip.finish()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    zip.finish().map_err(io::Error::other)?;
 
     Ok(StateArchiveResult {
         output_path: output_path.to_path_buf(),
@@ -405,29 +401,23 @@ pub fn open_state_archive(path: &Path, opts: &StateArchiveOptions) -> io::Result
 
     let base_dir = data_dir();
     if !is_safe_data_dir(&base_dir) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "refusing to open state into unexpected path: {}",
-                base_dir.display()
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "refusing to open state into unexpected path: {}",
+            base_dir.display()
+        )));
     }
 
     let temp_dir = std::env::temp_dir().join(format!("aadk-state-import-{}", now_millis()));
     fs::create_dir_all(&temp_dir)?;
 
     let file = fs::File::open(path)?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(io::Error::other)?;
 
     let mut restored_files = 0;
     let mut restored_dirs = 0;
 
     for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let mut entry = archive.by_index(i).map_err(io::Error::other)?;
         let rel = match safe_archive_path(entry.name()) {
             Some(rel) => rel,
             None => continue,
@@ -500,6 +490,7 @@ fn with_state_ops_lock<T>(lock_path: &Path, op: impl FnOnce() -> io::Result<T>) 
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)?;
     lock_file.lock_exclusive()?;
     let result = op();

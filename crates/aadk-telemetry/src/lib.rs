@@ -264,7 +264,12 @@ fn write_crash_report(app_name: &str, report: &CrashReport) {
         std::process::id()
     );
     let path = dir.join(filename);
-    if let Ok(file) = OpenOptions::new().create(true).write(true).open(&path) {
+    if let Ok(file) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+    {
         let _ = serde_json::to_writer_pretty(file, report);
     }
 }

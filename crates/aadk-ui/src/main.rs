@@ -19,8 +19,8 @@ use gtk4 as gtk;
 use tokio::sync::mpsc;
 
 use crate::utils::{infer_application_id_from_apk_path, infer_application_id_from_project};
-use aadk_util::state_export_path;
 use aadk_telemetry as telemetry;
+use aadk_util::state_export_path;
 use commands::{AppEvent, UiCommand};
 use config::AppConfig;
 use models::ActiveContext;
@@ -204,6 +204,7 @@ fn apply_dropdown_selection(dropdown: &gtk::DropDown, selected: u32) {
     dropdown.set_selected(value);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_ui_state(
     state: &UiState,
     home: &HomePage,
@@ -510,6 +511,7 @@ fn apply_ui_state(
     settings.open_entry.set_text(&state.settings.open_path);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_ui_state(
     state: &mut UiState,
     home: &HomePage,
@@ -1423,6 +1425,7 @@ fn build_ui(app: &gtk::Application) {
                         }
                     }
                     AppEvent::ConfigReloaded { cfg } => {
+                        let cfg = (*cfg).clone();
                         {
                             let mut cfg_guard = cfg_for_events.lock().unwrap();
                             *cfg_guard = cfg.clone();

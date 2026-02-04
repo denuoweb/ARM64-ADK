@@ -7,7 +7,7 @@ use crate::config::data_dir;
 const UI_STATE_FILE: &str = "ui-state.json";
 const LOG_MAX_CHARS: usize = 200_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UiState {
     pub(crate) home: HomeState,
@@ -121,7 +121,7 @@ pub(crate) struct TargetsState {
     pub(crate) activity: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct BuildState {
     pub(crate) log: String,
@@ -185,7 +185,7 @@ pub(crate) struct EvidenceState {
     pub(crate) include_recent: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SettingsState {
     pub(crate) log: String,
@@ -195,22 +195,6 @@ pub(crate) struct SettingsState {
     pub(crate) exclude_telemetry: bool,
     pub(crate) save_path: String,
     pub(crate) open_path: String,
-}
-
-impl Default for UiState {
-    fn default() -> Self {
-        Self {
-            home: HomeState::default(),
-            workflow: WorkflowState::default(),
-            toolchains: ToolchainsState::default(),
-            projects: ProjectsState::default(),
-            targets: TargetsState::default(),
-            build: BuildState::default(),
-            jobs: JobsHistoryState::default(),
-            evidence: EvidenceState::default(),
-            settings: SettingsState::default(),
-        }
-    }
 }
 
 impl Default for HomeState {
@@ -328,29 +312,6 @@ impl Default for TargetsState {
     }
 }
 
-impl Default for BuildState {
-    fn default() -> Self {
-        Self {
-            log: String::new(),
-            project_ref: String::new(),
-            module: String::new(),
-            variant_index: 0,
-            variant_name: String::new(),
-            tasks: String::new(),
-            gradle_args: String::new(),
-            clean_first: false,
-            use_job_id: false,
-            job_id: String::new(),
-            correlation_id: String::new(),
-            artifact_modules: String::new(),
-            artifact_variant: String::new(),
-            artifact_types: String::new(),
-            artifact_name: String::new(),
-            artifact_path: String::new(),
-        }
-    }
-}
-
 impl Default for JobsHistoryState {
     fn default() -> Self {
         Self {
@@ -398,25 +359,7 @@ impl Default for EvidenceState {
     }
 }
 
-impl Default for SettingsState {
-    fn default() -> Self {
-        Self {
-            log: String::new(),
-            exclude_downloads: false,
-            exclude_toolchains: false,
-            exclude_bundles: false,
-            exclude_telemetry: false,
-            save_path: String::new(),
-            open_path: String::new(),
-        }
-    }
-}
-
 impl UiState {
-    pub(crate) fn load() -> Self {
-        Self::load_with_status().0
-    }
-
     pub(crate) fn load_with_status() -> (Self, bool) {
         let path = ui_state_path();
         match fs::read_to_string(&path) {
