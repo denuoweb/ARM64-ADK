@@ -6,8 +6,8 @@ use aadk_proto::aadk::v1::{
 };
 use aadk_telemetry as telemetry;
 use aadk_util::{data_dir, state_export_path};
-use gtk::glib::ControlFlow;
 use gtk::gio::prelude::FileExt;
+use gtk::glib::ControlFlow;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use tokio::sync::mpsc;
@@ -395,7 +395,10 @@ impl ProjectsPage {
     }
 
     pub(crate) fn set_toolchain_sets(&self, sets: &[ToolchainSetOption], preferred: Option<&str>) {
-        let current = self.toolchain_set_combo.active_id().map(|id| id.to_string());
+        let current = self
+            .toolchain_set_combo
+            .active_id()
+            .map(|id| id.to_string());
         self.toolchain_set_combo.remove_all();
         self.toolchain_set_combo.append(Some("none"), "None");
         for set in sets {
@@ -467,6 +470,7 @@ impl ProjectsPage {
     ) {
         select_project_path(parent, &self.path_entry, cfg, cmd_tx);
     }
+
 }
 
 impl WorkflowPage {
@@ -610,10 +614,7 @@ fn is_aadk_project_dir(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    Path::new(path)
-        .join(".aadk")
-        .join("project.json")
-        .is_file()
+    Path::new(path).join(".aadk").join("project.json").is_file()
 }
 
 fn queue_project_open(
@@ -766,7 +767,7 @@ fn select_zip_dialog(
     dialog.show();
 }
 
-fn select_zip_open_dialog(
+pub(crate) fn select_zip_open_dialog(
     parent: &gtk::ApplicationWindow,
     path_entry: &gtk::Entry,
     title: &str,
@@ -783,7 +784,7 @@ fn select_zip_open_dialog(
     );
 }
 
-fn select_zip_save_dialog(
+pub(crate) fn select_zip_save_dialog(
     parent: &gtk::ApplicationWindow,
     path_entry: &gtk::Entry,
     title: &str,
@@ -801,12 +802,32 @@ fn select_zip_save_dialog(
     );
 }
 
+const SECTION_SPACING: i32 = 12;
+const ROW_SPACING: i32 = 8;
+const COL_SPACING: i32 = 8;
+const INTRO_SPACING: i32 = 4;
+const PAGE_MARGIN: i32 = 12;
+
+fn section_frame<W: gtk::prelude::IsA<gtk::Widget>>(title: &str, child: &W) -> gtk::Frame {
+    let frame = gtk::Frame::builder().label(title).build();
+    frame.set_hexpand(true);
+    frame.set_child(Some(child));
+    frame
+}
+
+fn make_sections_container(page: &Page) -> gtk::Box {
+    let sections = gtk::Box::new(gtk::Orientation::Vertical, SECTION_SPACING);
+    page.container
+        .insert_child_after(&sections, Some(&page.intro));
+    sections
+}
+
 fn make_page(title: &str, description: &str, connections: &str) -> Page {
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    container.set_margin_top(12);
-    container.set_margin_bottom(12);
-    container.set_margin_start(12);
-    container.set_margin_end(12);
+    let container = gtk::Box::new(gtk::Orientation::Vertical, SECTION_SPACING);
+    container.set_margin_top(PAGE_MARGIN);
+    container.set_margin_bottom(PAGE_MARGIN);
+    container.set_margin_start(PAGE_MARGIN);
+    container.set_margin_end(PAGE_MARGIN);
 
     let header = gtk::Label::builder()
         .label(title)
@@ -828,7 +849,7 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
         .css_classes(vec!["dim-label"])
         .build();
 
-    let intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let intro = gtk::Box::new(gtk::Orientation::Vertical, INTRO_SPACING);
     intro.append(&header);
     intro.append(&description_label);
     intro.append(&connections_label);
@@ -918,11 +939,11 @@ pub(crate) fn page_home(
         "Overview: Start and watch jobs across the system. Use this page to kick off any JobService job with parameters, project/target/toolchain ids, and an optional correlation id.",
         "Connections: Jobs started here appear in Job History. Use Projects, Toolchains, Targets, and Build to gather ids and inputs; use Evidence to export run bundles; Settings controls service addresses.",
     );
-    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let sections = make_sections_container(&page);
 
-    let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+    let job_details_grid = gtk::Grid::builder()
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let job_type_label = gtk::Label::builder().label("Job type").xalign(0.0).build();
@@ -988,21 +1009,26 @@ pub(crate) fn page_home(
         .build();
     set_tooltip(&correlation_id_entry, "What: Correlation id to group multiple jobs into a run. Why: ObserveService uses it to derive run_id for evidence bundles. How: set a stable string and reuse it across related jobs.");
 
-    form.attach(&job_type_label, 0, 0, 1, 1);
-    form.attach(&job_type_entry, 1, 0, 1, 1);
-    form.attach(&job_type_combo, 2, 0, 1, 1);
-    form.attach(&params_label, 0, 1, 1, 1);
-    form.attach(&params_scroller, 1, 1, 2, 1);
-    form.attach(&project_id_label, 0, 2, 1, 1);
-    form.attach(&project_id_entry, 1, 2, 2, 1);
-    form.attach(&target_id_label, 0, 3, 1, 1);
-    form.attach(&target_id_entry, 1, 3, 2, 1);
-    form.attach(&toolchain_id_label, 0, 4, 1, 1);
-    form.attach(&toolchain_id_entry, 1, 4, 2, 1);
-    form.attach(&correlation_id_label, 0, 5, 1, 1);
-    form.attach(&correlation_id_entry, 1, 5, 2, 1);
+    job_details_grid.attach(&job_type_label, 0, 0, 1, 1);
+    job_details_grid.attach(&job_type_entry, 1, 0, 1, 1);
+    job_details_grid.attach(&job_type_combo, 2, 0, 1, 1);
+    job_details_grid.attach(&params_label, 0, 1, 1, 1);
+    job_details_grid.attach(&params_scroller, 1, 1, 2, 1);
 
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let context_grid = gtk::Grid::builder()
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
+        .build();
+    context_grid.attach(&project_id_label, 0, 0, 1, 1);
+    context_grid.attach(&project_id_entry, 1, 0, 1, 1);
+    context_grid.attach(&target_id_label, 0, 1, 1, 1);
+    context_grid.attach(&target_id_entry, 1, 1, 1, 1);
+    context_grid.attach(&toolchain_id_label, 0, 2, 1, 1);
+    context_grid.attach(&toolchain_id_entry, 1, 2, 1, 1);
+    context_grid.attach(&correlation_id_label, 0, 3, 1, 1);
+    context_grid.attach(&correlation_id_entry, 1, 3, 1, 1);
+
+    let actions_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let start_btn = gtk::Button::with_label("Start job");
     let cancel_btn = gtk::Button::with_label("Cancel current");
     let watch_label = gtk::Label::builder().label("Watch job").xalign(0.0).build();
@@ -1016,16 +1042,15 @@ pub(crate) fn page_home(
     set_tooltip(&watch_entry, "What: Job id to watch. Why: stream logs and status for an existing job. How: paste a job id from Job History or other tabs.");
     set_tooltip(&watch_btn, "What: Start streaming events for the job id. Why: see live progress without starting a new job. How: enter a job id and click.");
 
-    buttons.append(&start_btn);
-    buttons.append(&cancel_btn);
-    buttons.append(&watch_label);
-    buttons.append(&watch_entry);
-    buttons.append(&watch_btn);
+    actions_row.append(&start_btn);
+    actions_row.append(&cancel_btn);
+    actions_row.append(&watch_label);
+    actions_row.append(&watch_entry);
+    actions_row.append(&watch_btn);
 
-    let status_frame = gtk::Frame::builder().label("Status").build();
     let status_grid = gtk::Grid::builder()
         .row_spacing(4)
-        .column_spacing(8)
+        .column_spacing(COL_SPACING)
         .build();
     let job_id_label = gtk::Label::builder().label("job_id: -").xalign(0.0).build();
     let state_label = gtk::Label::builder().label("state: -").xalign(0.0).build();
@@ -1039,14 +1064,14 @@ pub(crate) fn page_home(
     status_grid.attach(&state_label, 0, 1, 1, 1);
     status_grid.attach(&progress_label, 0, 2, 1, 1);
     status_grid.attach(&result_label, 0, 3, 1, 1);
-    status_frame.set_child(Some(&status_grid));
-
-    controls.append(&form);
-    controls.append(&buttons);
-    controls.append(&status_frame);
-
-    page.container
-        .insert_child_after(&controls, Some(&page.intro));
+    let job_details_frame = section_frame("Job details", &job_details_grid);
+    let context_frame = section_frame("Context / IDs", &context_grid);
+    let actions_frame = section_frame("Actions", &actions_row);
+    let status_frame = section_frame("Status", &status_grid);
+    sections.append(&job_details_frame);
+    sections.append(&context_frame);
+    sections.append(&actions_frame);
+    sections.append(&status_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1178,13 +1203,11 @@ pub(crate) fn page_workflow(
         "Overview: Run workflow.pipeline with explicit step inputs and watch run-level events as the pipeline fans out across services.",
         "Connections: WorkflowService creates a pipeline job and delegates to Project/Toolchain/Build/Targets/Observe. Run streams come from JobService. Settings controls the WorkflowService address.",
     );
+    let sections = make_sections_container(&page);
 
-    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
-
-    let identity_frame = gtk::Frame::builder().label("Run identity").build();
     let identity_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let run_id_entry = gtk::Entry::builder()
@@ -1217,13 +1240,12 @@ pub(crate) fn page_workflow(
     identity_grid.attach(&job_id_entry, 1, 2, 1, 1);
     identity_grid.attach(&include_history_check, 1, 3, 1, 1);
 
-    identity_frame.set_child(Some(&identity_grid));
-    controls.append(&identity_frame);
+    let identity_frame = section_frame("Run identity", &identity_grid);
+    sections.append(&identity_frame);
 
-    let project_frame = gtk::Frame::builder().label("Project + Toolchain").build();
     let project_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let template_id_entry = gtk::Entry::builder()
@@ -1271,7 +1293,7 @@ pub(crate) fn page_workflow(
     project_grid.attach(&gtk::Label::new(Some("Template id")), 0, 0, 1, 1);
     project_grid.attach(&template_id_entry, 1, 0, 1, 1);
     project_grid.attach(&gtk::Label::new(Some("Project path")), 0, 1, 1, 1);
-    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     path_row.append(&project_path_entry);
     path_row.append(&project_browse);
     project_grid.attach(&path_row, 1, 1, 1, 1);
@@ -1286,13 +1308,12 @@ pub(crate) fn page_workflow(
     project_grid.attach(&gtk::Label::new(Some("Target id")), 0, 6, 1, 1);
     project_grid.attach(&target_id_entry, 1, 6, 1, 1);
 
-    project_frame.set_child(Some(&project_grid));
-    controls.append(&project_frame);
+    let project_frame = section_frame("Project + Toolchain", &project_grid);
+    sections.append(&project_frame);
 
-    let build_frame = gtk::Frame::builder().label("Build + Launch").build();
     let build_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let variant_combo = gtk::DropDown::from_strings(&["debug", "release"]);
@@ -1344,7 +1365,7 @@ pub(crate) fn page_workflow(
     build_grid.attach(&gtk::Label::new(Some("Tasks")), 0, 3, 1, 1);
     build_grid.attach(&tasks_entry, 1, 3, 1, 1);
     build_grid.attach(&gtk::Label::new(Some("APK path")), 0, 4, 1, 1);
-    let apk_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let apk_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     apk_row.append(&apk_path_entry);
     apk_row.append(&apk_browse);
     build_grid.attach(&apk_row, 1, 4, 1, 1);
@@ -1353,11 +1374,10 @@ pub(crate) fn page_workflow(
     build_grid.attach(&gtk::Label::new(Some("Activity")), 0, 6, 1, 1);
     build_grid.attach(&activity_entry, 1, 6, 1, 1);
 
-    build_frame.set_child(Some(&build_grid));
-    controls.append(&build_frame);
+    let build_frame = section_frame("Build + Launch", &build_grid);
+    sections.append(&build_frame);
 
-    let steps_frame = gtk::Frame::builder().label("Pipeline steps").build();
-    let steps_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let steps_box = gtk::Box::new(gtk::Orientation::Vertical, ROW_SPACING);
     let auto_infer_check = gtk::CheckButton::with_label("Auto-infer steps from inputs");
     auto_infer_check.set_active(true);
     set_tooltip(&auto_infer_check, "What: Let the pipeline infer which steps to run. Why: reduces manual toggles. How: leave enabled to infer steps from the filled inputs.");
@@ -1383,34 +1403,32 @@ pub(crate) fn page_workflow(
     set_tooltip(&support_check, "What: Run observe.support_bundle. Why: export a support bundle after the run. How: enable to capture logs and config.");
     set_tooltip(&evidence_check, "What: Run observe.evidence_bundle. Why: export a run-specific evidence bundle. How: enable and set Run id.");
 
-    let step_row_a = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    step_row_a.append(&create_check);
-    step_row_a.append(&open_check);
-    step_row_a.append(&verify_check);
-    step_row_a.append(&build_check);
-    let step_row_b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    step_row_b.append(&install_check);
-    step_row_b.append(&launch_check);
-    step_row_b.append(&support_check);
-    step_row_b.append(&evidence_check);
-
     steps_box.append(&auto_infer_check);
-    steps_box.append(&step_row_a);
-    steps_box.append(&step_row_b);
-    steps_frame.set_child(Some(&steps_box));
-    controls.append(&steps_frame);
+    let steps_grid = gtk::Grid::builder()
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
+        .build();
+    steps_grid.attach(&create_check, 0, 0, 1, 1);
+    steps_grid.attach(&open_check, 1, 0, 1, 1);
+    steps_grid.attach(&verify_check, 2, 0, 1, 1);
+    steps_grid.attach(&build_check, 3, 0, 1, 1);
+    steps_grid.attach(&install_check, 0, 1, 1, 1);
+    steps_grid.attach(&launch_check, 1, 1, 1, 1);
+    steps_grid.attach(&support_check, 2, 1, 1, 1);
+    steps_grid.attach(&evidence_check, 3, 1, 1, 1);
+    steps_box.append(&steps_grid);
+    let steps_frame = section_frame("Pipeline steps", &steps_box);
+    sections.append(&steps_frame);
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let run_btn = gtk::Button::with_label("Run pipeline");
     let stream_btn = gtk::Button::with_label("Stream run events");
     set_tooltip(&run_btn, "What: Start the workflow pipeline. Why: orchestrate multi-service steps in order. How: fill inputs and click.");
     set_tooltip(&stream_btn, "What: Stream run-level events. Why: watch pipeline progress across jobs. How: enter run id or correlation id and click.");
     action_row.append(&run_btn);
     action_row.append(&stream_btn);
-    controls.append(&action_row);
-
-    page.container
-        .insert_child_after(&controls, Some(&page.intro));
+    let action_frame = section_frame("Actions", &action_row);
+    sections.append(&action_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1654,12 +1672,12 @@ pub(crate) fn page_jobs_history(
         "Overview: Query JobService for jobs and event history with filters, and export logs to JSON for sharing or troubleshooting.",
         "Connections: Job Control, Workflow, Toolchains, Projects, Targets, Build, and Evidence create jobs that show up here. Use job ids and correlation ids from this tab when watching jobs or exporting Evidence. Settings changes the JobService endpoint.",
     );
-    let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let sections = make_sections_container(&page);
 
     let list_frame = gtk::Frame::builder().label("List jobs").build();
     let list_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let job_types_entry = gtk::Entry::builder()
@@ -1735,8 +1753,8 @@ pub(crate) fn page_jobs_history(
 
     let history_frame = gtk::Frame::builder().label("Job history").build();
     let history_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let job_id_entry = gtk::Entry::builder()
         .placeholder_text("job id")
@@ -1795,11 +1813,8 @@ pub(crate) fn page_jobs_history(
 
     history_frame.set_child(Some(&history_grid));
 
-    controls.append(&list_frame);
-    controls.append(&history_frame);
-
-    page.container
-        .insert_child_after(&controls, Some(&page.intro));
+    sections.append(&list_frame);
+    sections.append(&history_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -1940,11 +1955,11 @@ pub(crate) fn page_toolchains(
         "Overview: Discover providers, list available versions, install or verify SDK/NDK toolchains, and manage toolchain sets.",
         "Connections: Projects can point at toolchain sets; Build runs use installed toolchains; Toolchain jobs stream in Job Control and Job History; Evidence bundles can include toolchain provenance; Settings controls ToolchainService address.",
     );
-    let actions = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let sections = make_sections_container(&page);
 
     let job_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let use_job_id_check = gtk::CheckButton::with_label("Use job id");
     let job_id_entry = gtk::Entry::builder()
@@ -1963,7 +1978,7 @@ pub(crate) fn page_toolchains(
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
 
-    let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row1 = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let list = gtk::Button::with_label("List providers");
     let list_sdk = gtk::Button::with_label("List available SDKs");
     let list_ndk = gtk::Button::with_label("List available NDKs");
@@ -1978,8 +1993,8 @@ pub(crate) fn page_toolchains(
     row1.append(&list_sets);
 
     let version_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let sdk_version_combo = gtk::ComboBoxText::new();
     sdk_version_combo.set_hexpand(true);
@@ -2004,7 +2019,7 @@ pub(crate) fn page_toolchains(
     version_grid.attach(&label_ndk_version, 0, 1, 1, 1);
     version_grid.attach(&ndk_version_combo, 1, 1, 1, 1);
 
-    let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row2 = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let install_sdk = gtk::Button::with_label("Install SDK");
     let install_ndk = gtk::Button::with_label("Install NDK");
     let list_installed = gtk::Button::with_label("List installed");
@@ -2019,8 +2034,8 @@ pub(crate) fn page_toolchains(
     row2.append(&verify_installed);
 
     let maintenance_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let toolchain_id_entry = gtk::Entry::builder()
         .placeholder_text("Toolchain id")
@@ -2069,18 +2084,18 @@ pub(crate) fn page_toolchains(
     maintenance_grid.attach(&label_update_version, 0, 1, 1, 1);
     maintenance_grid.attach(&update_version_entry, 1, 1, 1, 1);
 
-    let maintenance_options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let maintenance_options = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     maintenance_options.append(&verify_update_check);
     maintenance_options.append(&remove_cached_check);
     maintenance_options.append(&force_uninstall_check);
     maintenance_grid.attach(&maintenance_options, 1, 2, 1, 1);
 
-    let maintenance_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let maintenance_actions = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     maintenance_actions.append(&update_btn);
     maintenance_actions.append(&uninstall_btn);
     maintenance_grid.attach(&maintenance_actions, 1, 3, 1, 1);
 
-    let cache_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let cache_actions = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     cache_actions.append(&cleanup_btn);
     cache_actions.append(&dry_run_check);
     cache_actions.append(&remove_all_check);
@@ -2088,8 +2103,8 @@ pub(crate) fn page_toolchains(
     maintenance_grid.attach(&cache_actions, 1, 4, 1, 1);
 
     let set_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let sdk_set_entry = gtk::Entry::builder()
         .placeholder_text("SDK toolchain id")
@@ -2137,26 +2152,31 @@ pub(crate) fn page_toolchains(
     set_grid.attach(&ndk_set_entry, 1, 1, 1, 1);
     set_grid.attach(&label_display, 0, 2, 1, 1);
     set_grid.attach(&display_name_entry, 1, 2, 1, 1);
-    let set_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let set_actions = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     set_actions.append(&create_set_btn);
     set_actions.append(&create_set_latest_btn);
     set_grid.attach(&set_actions, 1, 3, 1, 1);
 
     set_grid.attach(&label_active, 0, 4, 1, 1);
-    let active_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let active_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     active_row.append(&active_set_entry);
     active_row.append(&set_active_btn);
     active_row.append(&get_active_btn);
     set_grid.attach(&active_row, 1, 4, 1, 1);
 
-    actions.append(&job_grid);
-    actions.append(&row1);
-    actions.append(&version_grid);
-    actions.append(&row2);
-    actions.append(&maintenance_grid);
-    actions.append(&set_grid);
-    page.container
-        .insert_child_after(&actions, Some(&page.intro));
+    let job_frame = section_frame("Job attachment", &job_grid);
+    let discovery_frame = section_frame("Discovery", &row1);
+    let versions_box = gtk::Box::new(gtk::Orientation::Vertical, ROW_SPACING);
+    versions_box.append(&version_grid);
+    versions_box.append(&row2);
+    let versions_frame = section_frame("Versions + Install", &versions_box);
+    let maintenance_frame = section_frame("Maintenance", &maintenance_grid);
+    let set_frame = section_frame("Toolchain sets", &set_grid);
+    sections.append(&job_frame);
+    sections.append(&discovery_frame);
+    sections.append(&versions_frame);
+    sections.append(&maintenance_frame);
+    sections.append(&set_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -2568,7 +2588,9 @@ pub(crate) fn page_projects(
         "Overview: Create or open projects from templates, list recent workspaces, and set per-project defaults like toolchain sets and default targets.",
         "Connections: Build runs reference these projects by id or path; Targets can use default target ids set here; Toolchains supply toolchain sets; jobs appear in Job Control and Job History; Settings controls ProjectService address.",
     );
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let sections = make_sections_container(&page);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let refresh_templates = gtk::Button::with_label("Refresh templates");
     let refresh_defaults = gtk::Button::with_label("Refresh defaults");
     let list_recent = gtk::Button::with_label("List recent");
@@ -2581,11 +2603,12 @@ pub(crate) fn page_projects(
     row.append(&refresh_defaults);
     row.append(&list_recent);
     row.append(&create_btn);
-    page.container.insert_child_after(&row, Some(&page.intro));
+    let actions_frame = section_frame("Quick actions", &row);
+    sections.append(&actions_frame);
 
     let job_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let use_job_id_check = gtk::CheckButton::with_label("Use job id");
     let job_id_entry = gtk::Entry::builder()
@@ -2603,11 +2626,12 @@ pub(crate) fn page_projects(
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
-    page.container.insert_child_after(&job_grid, Some(&row));
+    let job_frame = section_frame("Job attachment", &job_grid);
+    sections.append(&job_frame);
 
     let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let template_combo = gtk::ComboBoxText::new();
@@ -2635,16 +2659,17 @@ pub(crate) fn page_projects(
     form.attach(&label_name, 0, 1, 1, 1);
     form.attach(&name_entry, 1, 1, 1, 1);
     form.attach(&label_path, 0, 2, 1, 1);
-    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     path_row.append(&path_entry);
     path_row.append(&browse_btn);
     form.attach(&path_row, 1, 2, 1, 1);
 
-    page.container.insert_child_after(&form, Some(&job_grid));
+    let create_frame = section_frame("Create / Open", &form);
+    sections.append(&create_frame);
 
     let config_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let project_id_entry = gtk::Entry::builder()
         .placeholder_text("Project id")
@@ -2685,12 +2710,13 @@ pub(crate) fn page_projects(
     config_grid.attach(&toolchain_set_combo, 1, 1, 1, 1);
     config_grid.attach(&label_target, 0, 2, 1, 1);
     config_grid.attach(&default_target_combo, 1, 2, 1, 1);
-    let config_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let config_actions = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     config_actions.append(&config_btn);
     config_actions.append(&use_defaults_btn);
     config_grid.attach(&config_actions, 1, 3, 1, 1);
 
-    page.container.insert_child_after(&config_grid, Some(&form));
+    let config_frame = section_frame("Project defaults", &config_grid);
+    sections.append(&config_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -2891,18 +2917,21 @@ pub(crate) fn page_targets(
         "Overview: Manage ADB targets and Cuttlefish instances, install APKs, and launch apps via TargetService.",
         "Connections: Build runs produce APKs used here; Projects can set a default target; target jobs stream in Job Control and Job History; Evidence exports can capture target run context; Settings controls TargetService address.",
     );
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let sections = make_sections_container(&page);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let list = gtk::Button::with_label("List targets");
     let stream = gtk::Button::with_label("Stream logcat (sample)");
     set_tooltip(&list, "What: List registered targets. Why: discover target ids and status. How: click to query TargetService.");
     set_tooltip(&stream, "What: Stream sample logcat output. Why: verify log streaming from a target. How: click to start a sample stream (uses target-sample-pixel).");
     row.append(&list);
     row.append(&stream);
-    page.container.insert_child_after(&row, Some(&page.intro));
+    let quick_actions_frame = section_frame("Quick actions", &row);
+    sections.append(&quick_actions_frame);
 
     let job_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let use_job_id_check = gtk::CheckButton::with_label("Use job id");
     let job_id_entry = gtk::Entry::builder()
@@ -2920,7 +2949,8 @@ pub(crate) fn page_targets(
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
-    page.container.insert_child_after(&job_grid, Some(&row));
+    let job_frame = section_frame("Job attachment", &job_grid);
+    sections.append(&job_frame);
 
     let status = gtk::Button::with_label("Status");
     let web_ui = gtk::Button::with_label("Web UI");
@@ -2940,8 +2970,8 @@ pub(crate) fn page_targets(
     set_tooltip(&stop, "What: Stop the Cuttlefish instance. Why: shut down a running virtual device. How: set optional job/correlation ids and click.");
 
     let cuttlefish_buttons = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .column_homogeneous(true)
         .build();
     let cuttlefish_header = gtk::Label::builder()
@@ -2966,8 +2996,8 @@ pub(crate) fn page_targets(
     let default_build_id = std::env::var("AADK_CUTTLEFISH_BUILD_ID").unwrap_or_default();
 
     let cuttlefish_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let cuttlefish_branch_entry = gtk::Entry::builder()
         .placeholder_text("Cuttlefish branch (optional)")
@@ -2999,9 +3029,15 @@ pub(crate) fn page_targets(
     cuttlefish_grid.attach(&label_build_id, 0, 2, 1, 1);
     cuttlefish_grid.attach(&cuttlefish_build_entry, 1, 2, 1, 1);
 
+    let cuttlefish_box = gtk::Box::new(gtk::Orientation::Vertical, ROW_SPACING);
+    cuttlefish_box.append(&cuttlefish_buttons);
+    cuttlefish_box.append(&cuttlefish_grid);
+    let cuttlefish_frame = section_frame("Cuttlefish", &cuttlefish_box);
+    sections.append(&cuttlefish_frame);
+
     let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let target_entry = gtk::Entry::builder()
@@ -3013,10 +3049,7 @@ pub(crate) fn page_targets(
         .hexpand(true)
         .build();
     let apk_browse = gtk::Button::with_label("Browse...");
-    let app_id_entry = gtk::Entry::builder()
-        .text("")
-        .hexpand(true)
-        .build();
+    let app_id_entry = gtk::Entry::builder().text("").hexpand(true).build();
     let activity_entry = gtk::Entry::builder()
         .text(".MainActivity")
         .hexpand(true)
@@ -3038,7 +3071,7 @@ pub(crate) fn page_targets(
     form.attach(&label_target, 0, 0, 1, 1);
     form.attach(&target_entry, 1, 0, 1, 1);
     form.attach(&label_apk, 0, 1, 1, 1);
-    let apk_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let apk_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     apk_row.append(&apk_entry);
     apk_row.append(&apk_browse);
     form.attach(&apk_row, 1, 1, 1, 1);
@@ -3047,7 +3080,7 @@ pub(crate) fn page_targets(
     form.attach(&label_activity, 0, 3, 1, 1);
     form.attach(&activity_entry, 1, 3, 1, 1);
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let install_apk = gtk::Button::with_label("Install APK");
     let launch_app = gtk::Button::with_label("Launch app");
     set_tooltip(&install_apk, "What: Install APK on the target. Why: deploy build output for testing. How: set Target id and APK path or leave blank to pick an APK.");
@@ -3056,21 +3089,18 @@ pub(crate) fn page_targets(
     action_row.append(&launch_app);
     form.attach(&action_row, 1, 4, 1, 1);
 
-    let default_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let default_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     let set_default_btn = gtk::Button::with_label("Set default");
     let get_default_btn = gtk::Button::with_label("Get default");
     set_tooltip(&set_default_btn, "What: Set the default target. Why: other pages use it when no target id is specified. How: enter Target id and click.");
     set_tooltip(&get_default_btn, "What: Get the current default target. Why: confirm which target is used by default. How: click to query TargetService.");
     default_row.append(&set_default_btn);
     default_row.append(&get_default_btn);
-    form.attach(&default_row, 1, 5, 1, 1);
 
-    page.container
-        .insert_child_after(&cuttlefish_buttons, Some(&job_grid));
-    page.container
-        .insert_child_after(&cuttlefish_grid, Some(&cuttlefish_buttons));
-    page.container
-        .insert_child_after(&form, Some(&cuttlefish_grid));
+    let apk_frame = section_frame("APK install / launch", &form);
+    let default_frame = section_frame("Default target", &default_row);
+    sections.append(&apk_frame);
+    sections.append(&default_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -3443,10 +3473,11 @@ pub(crate) fn page_console(
         "Overview: Run Gradle builds with module/variant/task overrides and list artifacts from the build output.",
         "Connections: Projects provide ids/paths; Toolchains provide SDK/NDK; Targets use APKs produced here; build jobs stream in Job Control and Job History; Evidence exports run bundles; Settings controls BuildService address.",
     );
+    let sections = make_sections_container(&page);
 
     let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let project_entry = gtk::Entry::builder()
@@ -3501,7 +3532,7 @@ pub(crate) fn page_console(
         .build();
 
     form.attach(&label_project, 0, 0, 1, 1);
-    let project_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let project_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     project_row.append(&project_entry);
     project_row.append(&project_browse);
     form.attach(&project_row, 1, 0, 1, 1);
@@ -3521,19 +3552,22 @@ pub(crate) fn page_console(
     form.attach(&label_args, 0, 5, 1, 1);
     form.attach(&args_entry, 1, 5, 1, 1);
 
-    let options_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let inputs_frame = section_frame("Build inputs", &form);
+    sections.append(&inputs_frame);
+
+    let options_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     options_row.append(&clean_check);
-    form.attach(&options_row, 1, 6, 1, 1);
+    let options_frame = section_frame("Build options", &options_row);
+    sections.append(&options_frame);
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     action_row.append(&run);
-    form.attach(&action_row, 1, 7, 1, 1);
-
-    page.container.insert_child_after(&form, Some(&page.intro));
+    let action_frame = section_frame("Actions", &action_row);
+    sections.append(&action_frame);
 
     let job_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let use_job_id_check = gtk::CheckButton::with_label("Use job id");
     let job_id_entry = gtk::Entry::builder()
@@ -3551,7 +3585,8 @@ pub(crate) fn page_console(
     job_grid.attach(&job_id_entry, 1, 0, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Correlation id")), 0, 1, 1, 1);
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
-    page.container.insert_child_after(&job_grid, Some(&form));
+    let job_frame = section_frame("Job attachment", &job_grid);
+    sections.append(&job_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -3569,8 +3604,8 @@ pub(crate) fn page_console(
         .build();
 
     let artifact_form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let artifact_modules_entry = gtk::Entry::builder()
@@ -3625,14 +3660,14 @@ pub(crate) fn page_console(
     artifact_form.attach(&label_artifact_path, 0, 4, 1, 1);
     artifact_form.attach(&artifact_path_entry, 1, 4, 1, 1);
 
-    let list_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let list_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     list_row.append(&list_artifacts);
     artifact_form.attach(&list_row, 1, 5, 1, 1);
-
-    page.container
-        .insert_child_after(&artifacts_label, Some(&job_grid));
-    page.container
-        .insert_child_after(&artifact_form, Some(&artifacts_label));
+    let artifacts_box = gtk::Box::new(gtk::Orientation::Vertical, ROW_SPACING);
+    artifacts_box.append(&artifacts_label);
+    artifacts_box.append(&artifact_form);
+    let artifacts_frame = section_frame("Artifacts", &artifacts_box);
+    sections.append(&artifacts_frame);
 
     let parent_window = parent.clone();
     let project_entry_browse = project_entry.clone();
@@ -3795,20 +3830,14 @@ pub(crate) fn page_evidence(
         "Overview: List runs and outputs, group jobs by run, stream run-level events, and export support/evidence bundles or job logs.",
         "Connections: Jobs started in Job Control, Workflow, Build, Toolchains, Projects, and Targets populate runs here. Use job ids or correlation ids from Job History. Settings controls ObserveService address.",
     );
-    let primary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let sections = make_sections_container(&page);
+
     let list_runs = gtk::Button::with_label("List runs");
     let export_support = gtk::Button::with_label("Export support bundle");
     let export_evidence = gtk::Button::with_label("Export evidence bundle");
     set_tooltip(&list_runs, "What: List runs from ObserveService. Why: discover run ids for evidence exports. How: click to query.");
     set_tooltip(&export_support, "What: Export a support bundle. Why: capture logs and config for troubleshooting. How: set options and click.");
     set_tooltip(&export_evidence, "What: Export an evidence bundle for a run. Why: capture run artifacts for audit or sharing. How: enter run id and click.");
-    primary_row.append(&list_runs);
-    primary_row.append(&export_support);
-    primary_row.append(&export_evidence);
-    page.container
-        .insert_child_after(&primary_row, Some(&page.intro));
-
-    let secondary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let list_jobs = gtk::Button::with_label("List jobs for run");
     let stream_run = gtk::Button::with_label("Stream run events");
     let list_outputs = gtk::Button::with_label("List outputs");
@@ -3817,16 +3846,23 @@ pub(crate) fn page_evidence(
     set_tooltip(&stream_run, "What: Stream run-level events. Why: watch pipeline progress across jobs. How: enter run id or correlation id and click.");
     set_tooltip(&list_outputs, "What: List outputs (bundles/artifacts) for a run. Why: discover bundle paths and build artifacts tied to the run. How: set filters and click.");
     set_tooltip(&export_job_logs, "What: Export job logs to JSON. Why: share job details alongside run bundles. How: enter a job id and optional path, then click.");
-    secondary_row.append(&list_jobs);
-    secondary_row.append(&stream_run);
-    secondary_row.append(&list_outputs);
-    secondary_row.append(&export_job_logs);
-    page.container
-        .insert_child_after(&secondary_row, Some(&primary_row));
+    let dashboards_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
+    dashboards_row.append(&list_runs);
+    dashboards_row.append(&list_jobs);
+    dashboards_row.append(&stream_run);
+    let dashboards_frame = section_frame("Run dashboards", &dashboards_row);
+    sections.append(&dashboards_frame);
+
+    let exports_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
+    exports_row.append(&export_support);
+    exports_row.append(&export_evidence);
+    exports_row.append(&export_job_logs);
+    let exports_frame = section_frame("Exports", &exports_row);
+    sections.append(&exports_frame);
 
     let job_grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
     let use_job_id_check = gtk::CheckButton::with_label("Use job id");
     let job_id_entry = gtk::Entry::builder()
@@ -3851,12 +3887,12 @@ pub(crate) fn page_evidence(
     job_grid.attach(&correlation_id_entry, 1, 1, 1, 1);
     job_grid.attach(&gtk::Label::new(Some("Log export path")), 0, 2, 1, 1);
     job_grid.attach(&job_log_output_path_entry, 1, 2, 1, 1);
-    page.container
-        .insert_child_after(&job_grid, Some(&secondary_row));
+    let job_frame = section_frame("Job attachment", &job_grid);
+    sections.append(&job_frame);
 
     let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let run_id_entry = gtk::Entry::builder()
@@ -3938,7 +3974,7 @@ pub(crate) fn page_evidence(
     form.attach(&recent_limit_entry, 1, 1, 1, 1);
     form.attach(&include_history, 1, 2, 1, 1);
 
-    let checkbox_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let checkbox_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     checkbox_row.append(&include_logs);
     checkbox_row.append(&include_config);
     checkbox_row.append(&include_toolchain);
@@ -3952,8 +3988,13 @@ pub(crate) fn page_evidence(
     form.attach(&output_path_filter_entry, 1, 6, 1, 1);
     form.attach(&label_output_label, 0, 7, 1, 1);
     form.attach(&output_label_entry, 1, 7, 1, 1);
-
-    page.container.insert_child_after(&form, Some(&job_grid));
+    let filters_box = gtk::Box::new(gtk::Orientation::Vertical, ROW_SPACING);
+    filters_box.append(&form);
+    let outputs_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
+    outputs_row.append(&list_outputs);
+    filters_box.append(&outputs_row);
+    let filters_frame = section_frame("Run / Output filters", &filters_box);
+    sections.append(&filters_frame);
 
     {
         let cfg = cfg.lock().unwrap().clone();
@@ -4196,10 +4237,11 @@ pub(crate) fn page_settings(
         "Overview: Edit the host:port addresses the UI uses to connect to each service.",
         "Connections: Every other tab depends on these addresses; if a page cannot connect, update it here.",
     );
+    let sections = make_sections_container(&page);
 
     let form = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(8)
+        .row_spacing(ROW_SPACING)
+        .column_spacing(COL_SPACING)
         .build();
 
     let add_row = |row: i32,
@@ -4322,7 +4364,8 @@ pub(crate) fn page_settings(
         }),
     );
 
-    page.container.insert_child_after(&form, Some(&page.intro));
+    let endpoints_frame = section_frame("Service endpoints", &form);
+    sections.append(&endpoints_frame);
 
     let state_frame = gtk::Frame::builder().label("State archives").build();
     let state_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -4359,9 +4402,12 @@ pub(crate) fn page_settings(
     let save_browse = gtk::Button::with_label("Browse...");
     let save_btn = gtk::Button::with_label("Save state");
     set_tooltip(&save_entry, "What: Output zip path. Why: choose where to store the archive. How: type a path or use Browse.");
-    set_tooltip(&save_browse, "What: Pick an output zip path. Why: avoid typos. How: choose a file location.");
+    set_tooltip(
+        &save_browse,
+        "What: Pick an output zip path. Why: avoid typos. How: choose a file location.",
+    );
     set_tooltip(&save_btn, "What: Save the local state to a zip archive. Why: snapshot current AADK state. How: choose exclusions and click.");
-    let save_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let save_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     save_row.append(&save_entry);
     save_row.append(&save_browse);
     save_row.append(&save_btn);
@@ -4379,9 +4425,12 @@ pub(crate) fn page_settings(
     let open_browse = gtk::Button::with_label("Browse...");
     let open_btn = gtk::Button::with_label("Open state");
     set_tooltip(&open_entry, "What: Zip archive path to open. Why: restore a saved state. How: type a path or use Browse.");
-    set_tooltip(&open_browse, "What: Pick a zip archive. Why: avoid typos. How: choose the archive to open.");
+    set_tooltip(
+        &open_browse,
+        "What: Pick a zip archive. Why: avoid typos. How: choose the archive to open.",
+    );
     set_tooltip(&open_btn, "What: Open an archive and reload services. Why: restore a previous AADK state. How: choose exclusions and click.");
-    let open_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let open_row = gtk::Box::new(gtk::Orientation::Horizontal, ROW_SPACING);
     open_row.append(&open_entry);
     open_row.append(&open_browse);
     open_row.append(&open_btn);
@@ -4516,8 +4565,7 @@ pub(crate) fn page_settings(
     });
 
     state_frame.set_child(Some(&state_box));
-    page.container
-        .insert_child_after(&state_frame, Some(&form));
+    sections.append(&state_frame);
 
     let telemetry_frame = gtk::Frame::builder().label("Telemetry (opt-in)").build();
     let telemetry_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -4631,8 +4679,7 @@ pub(crate) fn page_settings(
     telemetry_box.append(&open_telemetry);
     telemetry_box.append(&open_crashes);
     telemetry_frame.set_child(Some(&telemetry_box));
-    page.container
-        .insert_child_after(&telemetry_frame, Some(&state_frame));
+    sections.append(&telemetry_frame);
 
     SettingsPage {
         page,

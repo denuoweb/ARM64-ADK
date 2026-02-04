@@ -24,6 +24,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Core flow actions log connection/RPC failures to the page output so bad inputs and service errors are visible.
 - The main window default size is clamped to 90% of the primary monitor so it stays on-screen.
 - Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
+- Page layouts now use consistent section frames and spacing via helpers in `pages.rs` to improve scanability.
 - Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
 - Settings includes opt-in telemetry toggles for usage and crash reporting (env overrides: AADK_TELEMETRY/AADK_TELEMETRY_CRASH).
 - Settings includes local state archive Save/Open/Reload controls with archive exclusions and zip path selection.
@@ -52,7 +53,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
   reset-all-state clears it alongside cached UI fields while preserving installed toolchains/downloads
   and Cuttlefish data (keeps `state/toolchains.json`).
 - Workflow run responses, toolchain active set updates, and target default updates sync the active context.
-- The header "New project" action runs reset-all-state (clearing local state/logs while preserving `toolchains`, `downloads`, `cuttlefish`, and `state/toolchains.json`) and then opens the project folder picker; "Open project" opens the folder picker and auto-opens existing projects.
+- The header actions include New project (reset-all-state clears local state/logs while preserving `toolchains`, `downloads`, `cuttlefish`, and `state/toolchains.json`, then opens the project folder picker) plus Save/Open state shortcuts that open the zip picker immediately and apply Settings exclusions.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.

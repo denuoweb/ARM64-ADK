@@ -2,8 +2,8 @@ mod commands;
 mod config;
 mod models;
 mod pages;
-mod ui_state;
 mod ui_events;
+mod ui_state;
 mod utils;
 mod worker;
 
@@ -17,18 +17,20 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use tokio::sync::mpsc;
 
+use crate::utils::{infer_application_id_from_apk_path, infer_application_id_from_project};
+use aadk_util::state_export_path;
 use aadk_telemetry as telemetry;
 use commands::{AppEvent, UiCommand};
 use config::AppConfig;
 use models::ActiveContext;
 use pages::{
     page_console, page_evidence, page_home, page_jobs_history, page_projects, page_settings,
-    page_targets, page_toolchains, page_workflow, BuildPage, EvidencePage, HomePage,
-    JobsHistoryPage, Page, ProjectsPage, SettingsPage, TargetsPage, ToolchainsPage, WorkflowPage,
+    page_targets, page_toolchains, page_workflow, select_zip_open_dialog, select_zip_save_dialog,
+    BuildPage, EvidencePage, HomePage, JobsHistoryPage, Page, ProjectsPage, SettingsPage,
+    TargetsPage, ToolchainsPage, WorkflowPage,
 };
-use ui_state::UiState;
-use crate::utils::{infer_application_id_from_apk_path, infer_application_id_from_project};
 use ui_events::{UiEventQueue, DEFAULT_EVENT_QUEUE_SIZE};
+use ui_state::UiState;
 use worker::{handle_command, AppState};
 
 fn main() {
@@ -157,9 +159,7 @@ fn apply_projects_context_if_empty(projects: &ProjectsPage, ctx: &ActiveContext)
         .active_id()
         .map(|id| id.to_string())
         .unwrap_or_default();
-    if (current_target.is_empty() || current_target == "none")
-        && !ctx.target_id.trim().is_empty()
-    {
+    if (current_target.is_empty() || current_target == "none") && !ctx.target_id.trim().is_empty() {
         projects
             .target_combo
             .set_active_id(Some(ctx.target_id.trim()));
@@ -224,27 +224,47 @@ fn apply_ui_state(
     home.params_view.buffer().set_text(&state.home.job_params);
     home.project_id_entry.set_text(&state.home.project_id);
     home.target_id_entry.set_text(&state.home.target_id);
-    home.toolchain_id_entry.set_text(&state.home.toolchain_set_id);
-    home.correlation_id_entry.set_text(&state.home.correlation_id);
+    home.toolchain_id_entry
+        .set_text(&state.home.toolchain_set_id);
+    home.correlation_id_entry
+        .set_text(&state.home.correlation_id);
     home.watch_entry.set_text(&state.home.watch_job_id);
 
     set_page_text(&workflow.page, &state.workflow.log);
     workflow.run_id_entry.set_text(&state.workflow.run_id);
-    workflow.project_id_entry.set_text(&state.workflow.project_id);
-    workflow.project_path_entry.set_text(&state.workflow.project_path);
-    workflow.toolchain_set_entry.set_text(&state.workflow.toolchain_set_id);
+    workflow
+        .project_id_entry
+        .set_text(&state.workflow.project_id);
+    workflow
+        .project_path_entry
+        .set_text(&state.workflow.project_path);
+    workflow
+        .toolchain_set_entry
+        .set_text(&state.workflow.toolchain_set_id);
     workflow.target_id_entry.set_text(&state.workflow.target_id);
-    workflow.use_job_id_check.set_active(state.workflow.use_job_id);
+    workflow
+        .use_job_id_check
+        .set_active(state.workflow.use_job_id);
     workflow.job_id_entry.set_text(&state.workflow.job_id);
-    workflow.correlation_id_entry.set_text(&state.workflow.correlation_id);
+    workflow
+        .correlation_id_entry
+        .set_text(&state.workflow.correlation_id);
     workflow
         .include_history_check
         .set_active(state.workflow.include_history);
-    workflow.template_id_entry.set_text(&state.workflow.template_id);
-    workflow.project_name_entry.set_text(&state.workflow.project_name);
-    workflow.toolchain_id_entry.set_text(&state.workflow.toolchain_id);
+    workflow
+        .template_id_entry
+        .set_text(&state.workflow.template_id);
+    workflow
+        .project_name_entry
+        .set_text(&state.workflow.project_name);
+    workflow
+        .toolchain_id_entry
+        .set_text(&state.workflow.toolchain_id);
     apply_dropdown_selection(&workflow.variant_combo, state.workflow.build_variant_index);
-    workflow.variant_name_entry.set_text(&state.workflow.variant_name);
+    workflow
+        .variant_name_entry
+        .set_text(&state.workflow.variant_name);
     workflow.module_entry.set_text(&state.workflow.module);
     workflow.tasks_entry.set_text(&state.workflow.tasks);
     workflow.apk_path_entry.set_text(&state.workflow.apk_path);
@@ -259,9 +279,13 @@ fn apply_ui_state(
     workflow.open_check.set_active(state.workflow.step_open);
     workflow.verify_check.set_active(state.workflow.step_verify);
     workflow.build_check.set_active(state.workflow.step_build);
-    workflow.install_check.set_active(state.workflow.step_install);
+    workflow
+        .install_check
+        .set_active(state.workflow.step_install);
     workflow.launch_check.set_active(state.workflow.step_launch);
-    workflow.support_check.set_active(state.workflow.step_support);
+    workflow
+        .support_check
+        .set_active(state.workflow.step_support);
     workflow
         .evidence_check
         .set_active(state.workflow.step_evidence);
@@ -299,12 +323,18 @@ fn apply_ui_state(
     toolchains
         .force_uninstall_check
         .set_active(state.toolchains.force_uninstall);
-    toolchains.dry_run_check.set_active(state.toolchains.dry_run);
+    toolchains
+        .dry_run_check
+        .set_active(state.toolchains.dry_run);
     toolchains
         .remove_all_check
         .set_active(state.toolchains.remove_all);
-    toolchains.sdk_set_entry.set_text(&state.toolchains.sdk_set_id);
-    toolchains.ndk_set_entry.set_text(&state.toolchains.ndk_set_id);
+    toolchains
+        .sdk_set_entry
+        .set_text(&state.toolchains.sdk_set_id);
+    toolchains
+        .ndk_set_entry
+        .set_text(&state.toolchains.ndk_set_id);
     toolchains
         .display_name_entry
         .set_text(&state.toolchains.display_name);
@@ -327,7 +357,9 @@ fn apply_ui_state(
     }
     projects.name_entry.set_text(&state.projects.name);
     projects.path_entry.set_text(&state.projects.path);
-    projects.project_id_entry.set_text(&state.projects.project_id);
+    projects
+        .project_id_entry
+        .set_text(&state.projects.project_id);
     if !state.projects.toolchain_set_id.trim().is_empty() {
         projects
             .toolchain_set_combo
@@ -358,9 +390,7 @@ fn apply_ui_state(
         .set_text(&state.targets.cuttlefish_build_id);
     targets.target_entry.set_text(&state.targets.target_id);
     targets.apk_entry.set_text(&state.targets.apk_path);
-    targets
-        .app_id_entry
-        .set_text(&state.targets.application_id);
+    targets.app_id_entry.set_text(&state.targets.application_id);
     targets.activity_entry.set_text(&state.targets.activity);
 
     set_page_text(&build.page, &state.build.log);
@@ -396,10 +426,14 @@ fn apply_ui_state(
     jobs.job_types_entry.set_text(&state.jobs.job_types);
     jobs.states_entry.set_text(&state.jobs.states);
     jobs.created_after_entry.set_text(&state.jobs.created_after);
-    jobs.created_before_entry.set_text(&state.jobs.created_before);
-    jobs.finished_after_entry.set_text(&state.jobs.finished_after);
-    jobs.finished_before_entry.set_text(&state.jobs.finished_before);
-    jobs.correlation_id_entry.set_text(&state.jobs.correlation_id);
+    jobs.created_before_entry
+        .set_text(&state.jobs.created_before);
+    jobs.finished_after_entry
+        .set_text(&state.jobs.finished_after);
+    jobs.finished_before_entry
+        .set_text(&state.jobs.finished_before);
+    jobs.correlation_id_entry
+        .set_text(&state.jobs.correlation_id);
     jobs.page_size_entry.set_text(&state.jobs.page_size);
     jobs.page_token_entry.set_text(&state.jobs.page_token);
     jobs.job_id_entry.set_text(&state.jobs.job_id);
@@ -772,14 +806,23 @@ fn build_ui(app: &gtk::Application) {
 
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let new_project_btn = gtk::Button::with_label("New project");
-    let open_project_btn = gtk::Button::with_label("Open project");
+    let save_state_btn = gtk::Button::with_label("Save state");
+    let open_state_btn = gtk::Button::with_label("Open state");
     set_tooltip(
         &new_project_btn,
         "What: Start a new project. Why: reset local state and pick a workspace. How: confirm reset, then choose a project folder.",
     );
-    set_tooltip(&open_project_btn, "What: Open an existing project. Why: set the active project context. How: choose a project folder.");
+    set_tooltip(
+        &save_state_btn,
+        "What: Save the local state to a zip archive. Why: snapshot current AADK state. How: choose a file location (exclusions from Settings apply).",
+    );
+    set_tooltip(
+        &open_state_btn,
+        "What: Open a state archive and reload services. Why: restore a previous AADK state. How: choose a zip archive (exclusions from Settings apply).",
+    );
     action_row.append(&new_project_btn);
-    action_row.append(&open_project_btn);
+    action_row.append(&save_state_btn);
+    action_row.append(&open_state_btn);
 
     context_grid.attach(&project_label, 0, 0, 1, 1);
     context_grid.attach(&toolchain_label, 1, 0, 1, 1);
@@ -846,14 +889,82 @@ fn build_ui(app: &gtk::Application) {
         dialog.show();
     });
 
-    let stack_for_open = stack.clone();
-    let window_open = window.clone();
-    let cfg_open = cfg.clone();
-    let cmd_tx_open = cmd_tx.clone();
-    let projects_open = projects.clone();
-    open_project_btn.connect_clicked(move |_| {
-        stack_for_open.set_visible_child_name("projects");
-        projects_open.prompt_project_path(&window_open, &cfg_open, &cmd_tx_open);
+    let cfg_state_save = cfg.clone();
+    let cmd_tx_state_save = cmd_tx.clone();
+    let exclude_downloads_save = settings.exclude_downloads.clone();
+    let exclude_toolchains_save = settings.exclude_toolchains.clone();
+    let exclude_bundles_save = settings.exclude_bundles.clone();
+    let exclude_telemetry_save = settings.exclude_telemetry.clone();
+    let save_entry_state = settings.save_entry.clone();
+    let window_state_save = window.clone();
+    save_state_btn.connect_clicked(move |_| {
+        let cfg_state_save = cfg_state_save.clone();
+        let cmd_tx_state_save = cmd_tx_state_save.clone();
+        let exclude_downloads_save = exclude_downloads_save.clone();
+        let exclude_toolchains_save = exclude_toolchains_save.clone();
+        let exclude_bundles_save = exclude_bundles_save.clone();
+        let exclude_telemetry_save = exclude_telemetry_save.clone();
+        let save_entry_dialog = save_entry_state.clone();
+        let default_name = state_export_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("aadk-state.zip")
+            .to_string();
+        select_zip_save_dialog(
+            &window_state_save,
+            &save_entry_dialog,
+            "Save AADK State Archive",
+            Some(default_name),
+            Some(Box::new(move |path| {
+                let cfg = cfg_state_save.lock().unwrap().clone();
+                cmd_tx_state_save
+                    .try_send(UiCommand::StateSave {
+                        cfg,
+                        output_path: path,
+                        exclude_downloads: exclude_downloads_save.is_active(),
+                        exclude_toolchains: exclude_toolchains_save.is_active(),
+                        exclude_bundles: exclude_bundles_save.is_active(),
+                        exclude_telemetry: exclude_telemetry_save.is_active(),
+                    })
+                    .ok();
+            })),
+        );
+    });
+
+    let cfg_state_open = cfg.clone();
+    let cmd_tx_state_open = cmd_tx.clone();
+    let exclude_downloads_open = settings.exclude_downloads.clone();
+    let exclude_toolchains_open = settings.exclude_toolchains.clone();
+    let exclude_bundles_open = settings.exclude_bundles.clone();
+    let exclude_telemetry_open = settings.exclude_telemetry.clone();
+    let open_entry_state = settings.open_entry.clone();
+    let window_state_open = window.clone();
+    open_state_btn.connect_clicked(move |_| {
+        let cfg_state_open = cfg_state_open.clone();
+        let cmd_tx_state_open = cmd_tx_state_open.clone();
+        let exclude_downloads_open = exclude_downloads_open.clone();
+        let exclude_toolchains_open = exclude_toolchains_open.clone();
+        let exclude_bundles_open = exclude_bundles_open.clone();
+        let exclude_telemetry_open = exclude_telemetry_open.clone();
+        let open_entry_dialog = open_entry_state.clone();
+        select_zip_open_dialog(
+            &window_state_open,
+            &open_entry_dialog,
+            "Open AADK State Archive",
+            Some(Box::new(move |path| {
+                let cfg = cfg_state_open.lock().unwrap().clone();
+                cmd_tx_state_open
+                    .try_send(UiCommand::StateOpen {
+                        cfg,
+                        archive_path: path,
+                        exclude_downloads: exclude_downloads_open.is_active(),
+                        exclude_toolchains: exclude_toolchains_open.is_active(),
+                        exclude_bundles: exclude_bundles_open.is_active(),
+                        exclude_telemetry: exclude_telemetry_open.is_active(),
+                    })
+                    .ok();
+            })),
+        );
     });
 
     {
@@ -1006,8 +1117,12 @@ fn build_ui(app: &gtk::Application) {
                         let preferred = {
                             let state = ui_state_for_events.lock().unwrap();
                             match provider_id.as_str() {
-                                pages::PROVIDER_SDK_ID => Some(state.toolchains.sdk_version.clone()),
-                                pages::PROVIDER_NDK_ID => Some(state.toolchains.ndk_version.clone()),
+                                pages::PROVIDER_SDK_ID => {
+                                    Some(state.toolchains.sdk_version.clone())
+                                }
+                                pages::PROVIDER_NDK_ID => {
+                                    Some(state.toolchains.ndk_version.clone())
+                                }
                                 _ => None,
                             }
                         };
@@ -1246,11 +1361,15 @@ fn build_ui(app: &gtk::Application) {
                             should_prompt
                         };
                         if should_prompt {
-                            projects_for_events.prompt_project_path(
-                                &window_for_events,
-                                &cfg_for_events,
-                                &cmd_tx_for_events,
-                            );
+                            let projects_prompt = projects_for_events.clone();
+                            let window_prompt = window_for_events.clone();
+                            let cfg_prompt = cfg_for_events.clone();
+                            let cmd_tx_prompt = cmd_tx_for_events.clone();
+                            glib::idle_add_local(move || {
+                                projects_prompt
+                                    .prompt_project_path(&window_prompt, &cfg_prompt, &cmd_tx_prompt);
+                                glib::ControlFlow::Break
+                            });
                         }
                     }
                     AppEvent::ConfigReloaded { cfg } => {
