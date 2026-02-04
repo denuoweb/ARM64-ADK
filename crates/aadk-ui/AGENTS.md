@@ -26,7 +26,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Each page is wrapped in a scroller so tall control layouts remain usable on smaller screens.
 - Page layouts now use consistent section frames and spacing via helpers in `pages.rs` to improve scanability.
 - Job stream output for service pages prints summary lines for state/progress/completion and decodes log chunks to text instead of raw payload bytes.
-- Settings includes opt-in telemetry toggles for usage and crash reporting (env overrides: AADK_TELEMETRY/AADK_TELEMETRY_CRASH).
+- Settings includes opt-in telemetry toggles for writing local usage/crash reports (env overrides: AADK_TELEMETRY/AADK_TELEMETRY_CRASH).
 - Settings includes local state archive Save/Open/Reload controls with archive exclusions and zip path selection.
 - Home job streams run on cancellable worker tasks; new watch requests abort the previous stream and progress updates are throttled.
 - Workflow page runs workflow.pipeline with explicit inputs, optional step overrides, and run-level StreamRunEvents output.

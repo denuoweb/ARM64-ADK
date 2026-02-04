@@ -4573,8 +4573,8 @@ pub(crate) fn page_settings(
 
     let telemetry_frame = gtk::Frame::builder().label("Telemetry (opt-in)").build();
     let telemetry_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let usage_check = gtk::CheckButton::with_label("Send usage analytics");
-    let crash_check = gtk::CheckButton::with_label("Send crash reports");
+    let usage_check = gtk::CheckButton::with_label("Write usage analytics");
+    let crash_check = gtk::CheckButton::with_label("Write crash reports");
     let install_label = gtk::Label::builder().xalign(0.0).build();
     let telemetry_dir = data_dir().join("telemetry").join("aadk-ui");
     let telemetry_events = telemetry_dir.join("events.jsonl");
@@ -4585,11 +4585,11 @@ pub(crate) fn page_settings(
     let open_crashes = gtk::Button::with_label("Open crash reports folder");
     set_tooltip(
         &usage_check,
-        "What: Send anonymous usage event counts. Why: helps prioritize fixes. How: opt in to enable.",
+        "What: Write anonymous usage event counts to the local telemetry log. Why: helps prioritize fixes. How: opt in to enable.",
     );
     set_tooltip(
         &crash_check,
-        "What: Send crash summaries on next launch. Why: helps debug stability issues. How: opt in to enable.",
+        "What: Write crash summaries to the local telemetry folder. Why: helps debug stability issues. How: opt in to enable.",
     );
     set_tooltip(
         &open_telemetry,
