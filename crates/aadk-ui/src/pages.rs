@@ -1,4 +1,4 @@
-use std::{path::Path, rc::Rc, sync::Arc};
+use std::{cell::Cell, path::Path, rc::Rc, sync::Arc};
 
 use aadk_proto::aadk::v1::{
     ArtifactFilter, ArtifactType, BuildVariant, KeyValue, RunOutputKind, ToolchainKind,
@@ -6,6 +6,7 @@ use aadk_proto::aadk::v1::{
 };
 use aadk_telemetry as telemetry;
 use aadk_util::{data_dir, state_export_path};
+use gtk::glib::ControlFlow;
 use gtk::gio::prelude::FileExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -20,7 +21,7 @@ use crate::utils::{
 
 #[derive(Clone)]
 pub(crate) struct Page {
-    pub(crate) root: gtk::ScrolledWindow,
+    pub(crate) root: gtk::Box,
     pub(crate) container: gtk::Box,
     pub(crate) intro: gtk::Box,
     pub(crate) buffer: gtk::TextBuffer,
@@ -834,7 +835,9 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
 
     let log_scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 
     let textview = gtk::TextView::builder()
@@ -847,15 +850,39 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
     log_scroller.set_child(Some(&textview));
 
     container.append(&intro);
-    container.append(&log_scroller);
 
-    let root = gtk::ScrolledWindow::builder()
+    let content_scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Always)
         .build();
-    root.set_child(Some(&container));
+    content_scroller.set_child(Some(&container));
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_hexpand(true);
+    root.set_vexpand(true);
+    root.append(&content_scroller);
+    root.append(&log_scroller);
+
+    let log_scroller_for_size = log_scroller.clone();
+    let last_height = Cell::new(0);
+    root.add_tick_callback(move |root, _| {
+        let height = root.allocation().height();
+        if height <= 0 {
+            return ControlFlow::Continue;
+        }
+        if last_height.get() == height {
+            return ControlFlow::Continue;
+        }
+        last_height.set(height);
+        let target = ((height as f64) * 0.25).round() as i32;
+        let target = target.max(1);
+        if log_scroller_for_size.height_request() != target {
+            log_scroller_for_size.set_height_request(target);
+        }
+        ControlFlow::Continue
+    });
 
     Page {
         root,
