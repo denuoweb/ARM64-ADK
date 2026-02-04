@@ -46,14 +46,15 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Toolchains/Projects/Targets/Build/Evidence pages include a "Use job id" toggle plus
   correlation id entry to attach work to existing jobs and grouped workflows; the UI derives run_id
   from correlation_id for run-aware services.
-- Log text views apply a ring buffer to cap memory by line/character counts.
+- Log text views apply a ring buffer to cap memory by line/character counts; each tab shows a separator
+  bar between the main controls and the console output.
 - The UI tracks an active context (project/toolchain set/target/run) persisted in ui-config, surfaces
-  it in the header, and applies it to Workflow/Projects/Targets/Build fields.
+  it above the sidebar tab list, and applies it to Workflow/Projects/Targets/Build fields.
 - Per-tab UI state (inputs + log buffers) persists to `~/.local/share/aadk/state/ui-state.json`;
   reset-all-state clears it alongside cached UI fields while preserving installed toolchains/downloads
   and Cuttlefish data (keeps `state/toolchains.json`).
 - Workflow run responses, toolchain active set updates, and target default updates sync the active context.
-- The header actions include New project (reset-all-state clears local state/logs while preserving `toolchains`, `downloads`, `cuttlefish`, and `state/toolchains.json`, then opens the project folder picker) plus Save/Open state shortcuts that open the zip picker immediately and apply Settings exclusions.
+- The header actions include compact New project (reset-all-state clears local state/logs while preserving `toolchains`, `downloads`, `cuttlefish`, and `state/toolchains.json`, then opens the project folder picker; if the reset reports failure, the UI still clears active context and prompts for a project folder while warning in Projects/Settings) plus Save/Open state shortcuts that sit above the tab list and open the zip picker immediately with Settings exclusions.
 
 ## Service coverage
 - Job Control: start arbitrary jobs (including workflow.pipeline) with params/ids + optional correlation id, watch job streams, live status panel.
@@ -76,7 +77,7 @@ Update this file whenever UI behavior changes or when commits touching this crat
 - Settings shows telemetry log/crash locations and provides buttons to open the folders.
 - State archive operations block if the latest job is queued/running and serialize via a FIFO queue under ~/.local/share/aadk/state-ops.
 - Open State reloads all services via ReloadState RPCs and refreshes the UI config from disk.
-- Reset-all-state (triggered by the header New project flow) clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`.
+- Reset-all-state (triggered by the header New project flow) clears the Evidence log buffer via `Page::clear` since Evidence is a bare `Page`; the new project flow now warns and continues to the folder picker if the reset fails.
 - Project open/create and target install actions now prompt for a folder/APK when the path is blank, and project folder picks auto-open existing projects when metadata is present.
 - Opening existing projects resets the Projects template selection to None; Targets defaults no longer force the SampleConsole application id and attempt to infer it from app Gradle or manifest when unset.
 - Projects page removed an unused project-id setter to keep builds warning-free.

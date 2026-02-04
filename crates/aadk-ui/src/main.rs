@@ -13,6 +13,7 @@ use glib::prelude::*;
 use gtk::gdk;
 use gtk::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk::gio::prelude::ListModelExt;
+use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use tokio::sync::mpsc;
@@ -759,9 +760,13 @@ fn build_ui(app: &gtk::Application) {
         });
     });
 
-    // Layout: context header + sidebar + stack
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    // Layout: context + actions + sidebar + stack
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let sidebar_width = 220;
+    let left_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    left_column.set_width_request(sidebar_width);
+    left_column.set_hexpand(false);
+    left_column.set_vexpand(true);
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::SlideLeftRight)
@@ -771,21 +776,19 @@ fn build_ui(app: &gtk::Application) {
 
     let sidebar = gtk::StackSidebar::builder()
         .stack(&stack)
-        .width_request(220)
+        .width_request(sidebar_width)
         .build();
-
-    body.append(&sidebar);
-    body.append(&stack);
+    sidebar.set_vexpand(true);
 
     let context_frame = gtk::Frame::builder().label("Active context").build();
     context_frame.set_margin_top(8);
-    context_frame.set_margin_bottom(8);
-    context_frame.set_margin_start(12);
-    context_frame.set_margin_end(12);
+    context_frame.set_margin_bottom(6);
+    context_frame.set_margin_start(8);
+    context_frame.set_margin_end(8);
 
     let context_grid = gtk::Grid::builder()
         .row_spacing(4)
-        .column_spacing(16)
+        .column_spacing(0)
         .build();
     let project_label = gtk::Label::builder()
         .label("Project: -")
@@ -797,6 +800,10 @@ fn build_ui(app: &gtk::Application) {
         .build();
     let target_label = gtk::Label::builder().label("Target: -").xalign(0.0).build();
     let run_label = gtk::Label::builder().label("Run: -").xalign(0.0).build();
+    for label in [&project_label, &toolchain_label, &target_label, &run_label] {
+        label.set_ellipsize(EllipsizeMode::End);
+        label.set_max_width_chars(28);
+    }
     let context_bar = ContextBar {
         project_label: project_label.clone(),
         toolchain_label: toolchain_label.clone(),
@@ -804,10 +811,17 @@ fn build_ui(app: &gtk::Application) {
         run_label: run_label.clone(),
     };
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let action_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    action_row.set_margin_start(8);
+    action_row.set_margin_end(8);
+    action_row.set_margin_bottom(8);
     let new_project_btn = gtk::Button::with_label("New project");
     let save_state_btn = gtk::Button::with_label("Save state");
     let open_state_btn = gtk::Button::with_label("Open state");
+    for btn in [&new_project_btn, &save_state_btn, &open_state_btn] {
+        btn.set_halign(gtk::Align::Start);
+        btn.add_css_class("flat");
+    }
     set_tooltip(
         &new_project_btn,
         "What: Start a new project. Why: reset local state and pick a workspace. How: confirm reset, then choose a project folder.",
@@ -825,15 +839,18 @@ fn build_ui(app: &gtk::Application) {
     action_row.append(&open_state_btn);
 
     context_grid.attach(&project_label, 0, 0, 1, 1);
-    context_grid.attach(&toolchain_label, 1, 0, 1, 1);
-    context_grid.attach(&target_label, 0, 1, 1, 1);
-    context_grid.attach(&run_label, 1, 1, 1, 1);
-    context_grid.attach(&action_row, 2, 0, 1, 2);
+    context_grid.attach(&toolchain_label, 0, 1, 1, 1);
+    context_grid.attach(&target_label, 0, 2, 1, 1);
+    context_grid.attach(&run_label, 0, 3, 1, 1);
 
     context_frame.set_child(Some(&context_grid));
 
-    root.append(&context_frame);
-    root.append(&body);
+    left_column.append(&context_frame);
+    left_column.append(&action_row);
+    left_column.append(&sidebar);
+
+    root.append(&left_column);
+    root.append(&stack);
 
     // Pages
     let home = page_home(cfg.clone(), cmd_tx.clone());
@@ -874,14 +891,41 @@ fn build_ui(app: &gtk::Application) {
         let cmd_tx_confirm = cmd_tx_reset.clone();
         let cfg_confirm = cfg_reset.clone();
         let pending_confirm = pending_project_prompt_reset.clone();
+        let window_confirm = window_reset.clone();
         dialog.connect_response(move |dialog, response| {
             if response == gtk::ResponseType::Accept {
                 let cfg = cfg_confirm.lock().unwrap().clone();
                 if cmd_tx_confirm
-                    .try_send(UiCommand::ResetAllState { cfg })
+                    .try_send(UiCommand::ResetAllState { cfg: cfg.clone() })
                     .is_ok()
                 {
                     *pending_confirm.lock().unwrap() = true;
+                } else {
+                    *pending_confirm.lock().unwrap() = true;
+                    let cmd_tx_async = cmd_tx_confirm.clone();
+                    let pending_async = pending_confirm.clone();
+                    let window_async = window_confirm.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        if cmd_tx_async
+                            .send(UiCommand::ResetAllState { cfg })
+                            .await
+                            .is_err()
+                        {
+                            *pending_async.lock().unwrap() = false;
+                            let error_dialog = gtk::MessageDialog::builder()
+                                .transient_for(&window_async)
+                                .modal(true)
+                                .message_type(gtk::MessageType::Error)
+                                .text("Failed to queue reset request")
+                                .secondary_text(
+                                    "The UI command queue is unavailable. Try restarting the AADK UI.",
+                                )
+                                .build();
+                            error_dialog.add_button("OK", gtk::ResponseType::Close);
+                            error_dialog.connect_response(|dialog, _| dialog.close());
+                            error_dialog.show();
+                        }
+                    });
                 }
             }
             dialog.close();
@@ -1301,7 +1345,14 @@ fn build_ui(app: &gtk::Application) {
                         );
                     }
                     AppEvent::ResetAllStateComplete { ok } => {
-                        if ok {
+                        let was_pending = {
+                            let mut pending = pending_project_prompt_for_events.lock().unwrap();
+                            let was_pending = *pending;
+                            *pending = false;
+                            was_pending
+                        };
+                        let should_clear = ok || was_pending;
+                        if should_clear {
                             let ctx = {
                                 let mut cfg = cfg_for_events.lock().unwrap();
                                 cfg.clear_cached_state();
@@ -1354,13 +1405,12 @@ fn build_ui(app: &gtk::Application) {
                                 eprintln!("Failed to clear UI state file: {err}");
                             }
                         }
-                        let should_prompt = {
-                            let mut pending = pending_project_prompt_for_events.lock().unwrap();
-                            let should_prompt = *pending && ok;
-                            *pending = false;
-                            should_prompt
-                        };
-                        if should_prompt {
+                        if !ok && was_pending {
+                            let warning = "Reset did not complete; continuing to select a project folder. Check Settings for reset errors.\n";
+                            projects_for_events.append(warning);
+                            settings_for_events.append(warning);
+                        }
+                        if was_pending {
                             let projects_prompt = projects_for_events.clone();
                             let window_prompt = window_for_events.clone();
                             let cfg_prompt = cfg_for_events.clone();

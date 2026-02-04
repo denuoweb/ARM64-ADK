@@ -884,6 +884,10 @@ fn make_page(title: &str, description: &str, connections: &str) -> Page {
     root.set_hexpand(true);
     root.set_vexpand(true);
     root.append(&content_scroller);
+    let log_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    log_separator.set_margin_top(6);
+    log_separator.set_margin_bottom(6);
+    root.append(&log_separator);
     root.append(&log_scroller);
 
     let log_scroller_for_size = log_scroller.clone();
