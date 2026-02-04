@@ -1,0 +1,11 @@
+Package: aadk
+Version: @VERSION@
+Section: devel
+Priority: optional
+Architecture: @ARCH@
+Maintainer: AADK Team <aadk@example.com>
+Depends: bash, libgtk-4-1
+Recommends: openjdk-17-jre
+Description: AADK Android DevKit scaffold
+ AADK provides a GTK UI plus gRPC services for toolchain,
+ project, build, targets, workflows, and job monitoring.

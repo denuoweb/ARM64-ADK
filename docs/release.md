@@ -35,3 +35,28 @@ Override the version:
 ```bash
 VERSION=0.1.0 scripts/release/build.sh
 ```
+
+## Debian package (.deb)
+Requires `dpkg-deb` (from `dpkg-dev`) on a Debian-like ARM64 host (e.g. Raspberry Pi OS 64-bit).
+
+```bash
+VERSION=0.1.0 scripts/release/build-deb.sh
+```
+
+Artifacts:
+- `dist/aadk_${VERSION}_arm64.deb`
+- `dist/aadk_${VERSION}_arm64.deb.sha256`
+
+Install:
+```bash
+sudo apt install ./dist/aadk_${VERSION}_arm64.deb
+```
+
+Menu entry:
+- Appears under `Programming` as `AADK`.
+- Runs `aadk` (services + GTK UI). Logs go to `~/.local/share/aadk/logs`.
+
+Uninstall:
+```bash
+sudo apt remove aadk
+```

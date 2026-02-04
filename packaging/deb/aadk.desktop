@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=AADK
+Comment=Android DevKit workflow
+Exec=aadk
+TryExec=/usr/bin/aadk
+Icon=aadk
+Terminal=false
+Type=Application
+Categories=Development;Programming;
+StartupNotify=true
+Keywords=android;devkit;grpc;
