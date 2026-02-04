@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -88,8 +87,13 @@ fn link_if_missing(src: &Path, dest: &Path) -> Result<(), String> {
     if dest.exists() {
         return Ok(());
     }
-    symlink_path(src, dest)
-        .map_err(|err| format!("failed to link {} -> {}: {err}", dest.display(), src.display()))
+    symlink_path(src, dest).map_err(|err| {
+        format!(
+            "failed to link {} -> {}: {err}",
+            dest.display(),
+            src.display()
+        )
+    })
 }
 
 fn ensure_cmdline_tools_latest(root: &Path) -> Result<(), String> {

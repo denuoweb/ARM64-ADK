@@ -1378,17 +1378,13 @@ async fn load_gradle_model(
     let stdout = match child.stdout.take() {
         Some(out) => out,
         None => {
-            return Err(Status::internal(
-                "failed to capture gradle model stdout",
-            ));
+            return Err(Status::internal("failed to capture gradle model stdout"));
         }
     };
     let stderr = match child.stderr.take() {
         Some(err) => err,
         None => {
-            return Err(Status::internal(
-                "failed to capture gradle model stderr",
-            ));
+            return Err(Status::internal("failed to capture gradle model stderr"));
         }
     };
 

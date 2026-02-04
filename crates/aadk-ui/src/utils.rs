@@ -53,7 +53,11 @@ pub(crate) fn infer_application_id_from_apk_path(apk_path: &str) -> Option<Strin
         return None;
     }
     let path = Path::new(trimmed);
-    let current = if path.is_dir() { Some(path) } else { path.parent() }?;
+    let current = if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+    }?;
 
     for ancestor in current.ancestors() {
         if ancestor.join("app").join("build.gradle.kts").is_file()

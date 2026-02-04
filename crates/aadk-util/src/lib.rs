@@ -250,12 +250,7 @@ impl StateOpGuard {
         let lock_path = ops_dir.join(STATE_OP_LOCK_FILE);
         let queue_path = ops_dir.join(STATE_OP_QUEUE_FILE);
         let active_path = ops_dir.join(STATE_OP_ACTIVE_FILE);
-        let token = format!(
-            "{}:{}:{}",
-            label.trim(),
-            std::process::id(),
-            now_millis()
-        );
+        let token = format!("{}:{}:{}", label.trim(), std::process::id(), now_millis());
 
         with_state_ops_lock(&lock_path, || {
             let mut queue = read_state_ops_queue(&queue_path)?;
@@ -463,7 +458,10 @@ pub fn open_state_archive(path: &Path, opts: &StateArchiveOptions) -> io::Result
         for entry in fs::read_dir(&base_dir)? {
             let entry = entry?;
             let name = entry.file_name();
-            if preserved_dirs.iter().any(|dir| dir == name.to_string_lossy().as_ref()) {
+            if preserved_dirs
+                .iter()
+                .any(|dir| dir == name.to_string_lossy().as_ref())
+            {
                 continue;
             }
             let path = entry.path();

@@ -243,9 +243,7 @@ pub(crate) fn load_state(catalog: &Catalog) -> State {
         let mut active_set_id = parsed.active_set_id.filter(|id| !id.trim().is_empty());
         if let Some(active_id) = active_set_id.as_ref() {
             let exists = toolchain_sets.iter().any(|set| {
-                set.toolchain_set_id
-                    .as_ref()
-                    .map(|id| id.value.as_str())
+                set.toolchain_set_id.as_ref().map(|id| id.value.as_str())
                     == Some(active_id.as_str())
             });
             if !exists {
@@ -484,9 +482,7 @@ fn discover_installed_toolchains(catalog: &Catalog) -> Vec<InstalledToolchain> {
             if dir_name.starts_with('.') {
                 continue;
             }
-            if let Some(item) =
-                installed_from_disk(&entry.path(), catalog, Some(&provider_name))
-            {
+            if let Some(item) = installed_from_disk(&entry.path(), catalog, Some(&provider_name)) {
                 installed.push(item);
             }
         }
@@ -548,8 +544,9 @@ pub(crate) fn installed_from_disk(
             .iter()
             .find(|item| item.name == provider_name)
     };
-    let provider = catalog_provider.map(crate::catalog::provider_from_catalog).unwrap_or_else(
-        || ToolchainProvider {
+    let provider = catalog_provider
+        .map(crate::catalog::provider_from_catalog)
+        .unwrap_or_else(|| ToolchainProvider {
             provider_id: if provider_id.is_empty() {
                 None
             } else {
@@ -560,8 +557,7 @@ pub(crate) fn installed_from_disk(
             name: provider_name.to_string(),
             kind: guess_provider_kind(provider_id, provider_name) as i32,
             description: "".into(),
-        },
-    );
+        });
 
     let install_path_str = install_path.to_string_lossy().to_string();
     Some(InstalledToolchain {

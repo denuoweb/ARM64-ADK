@@ -1,7 +1,4 @@
-use std::{
-    fs, io,
-    path::PathBuf,
-};
+use std::{fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -491,7 +488,5 @@ fn trim_log(text: &str) -> String {
     if char_count <= LOG_MAX_CHARS {
         return text.to_string();
     }
-    text.chars()
-        .skip(char_count - LOG_MAX_CHARS)
-        .collect()
+    text.chars().skip(char_count - LOG_MAX_CHARS).collect()
 }

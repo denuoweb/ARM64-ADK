@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -559,10 +558,12 @@ async fn latest_active_job(addr: &str) -> Result<Option<Job>, Box<dyn std::error
         })
         .await?
         .into_inner();
-    let latest = resp
-        .jobs
-        .into_iter()
-        .max_by_key(|job| job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or(0));
+    let latest = resp.jobs.into_iter().max_by_key(|job| {
+        job.created_at
+            .as_ref()
+            .map(|ts| ts.unix_millis)
+            .unwrap_or(0)
+    });
     Ok(latest)
 }
 
@@ -683,7 +684,10 @@ async fn reload_workflow_state(
     Ok(resp)
 }
 
-async fn reload_all_state(cfg: &AppConfig, ui: &UiEventSender) -> Result<(), Box<dyn std::error::Error>> {
+async fn reload_all_state(
+    cfg: &AppConfig,
+    ui: &UiEventSender,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut errors = Vec::new();
 
     match reload_job_state(&cfg.job_addr).await {
@@ -2866,9 +2870,7 @@ pub(crate) async fn handle_command(
                         fallback_target = Some(id.clone());
                     }
                     let state = t.state.trim().to_ascii_lowercase();
-                    if preferred_target.is_none()
-                        && (state == "device" || state == "online")
-                    {
+                    if preferred_target.is_none() && (state == "device" || state == "online") {
                         preferred_target = Some(id.clone());
                     }
                 }
@@ -3321,9 +3323,7 @@ pub(crate) async fn handle_command(
                     application_id = inferred;
                     ui.send(AppEvent::Log {
                         page: "targets",
-                        line: format!(
-                            "Inferred application id from APK: {application_id}\n"
-                        ),
+                        line: format!("Inferred application id from APK: {application_id}\n"),
                     })
                     .ok();
                 }
@@ -4272,10 +4272,7 @@ pub(crate) async fn handle_command(
                 Ok(Some(job)) => {
                     ui.send(AppEvent::Log {
                         page: "settings",
-                        line: format!(
-                            "State operation blocked: {}\n",
-                            format_active_job(&job)
-                        ),
+                        line: format!("State operation blocked: {}\n", format_active_job(&job)),
                     })
                     .ok();
                     return Ok(());
@@ -4322,10 +4319,7 @@ pub(crate) async fn handle_command(
                 Ok(result) => {
                     ui.send(AppEvent::Log {
                         page: "settings",
-                        line: format!(
-                            "Saved archive: {}\n",
-                            result.output_path.display()
-                        ),
+                        line: format!("Saved archive: {}\n", result.output_path.display()),
                     })
                     .ok();
                     ui.send(AppEvent::Log {
@@ -4377,10 +4371,7 @@ pub(crate) async fn handle_command(
                 Ok(Some(job)) => {
                     ui.send(AppEvent::Log {
                         page: "settings",
-                        line: format!(
-                            "State operation blocked: {}\n",
-                            format_active_job(&job)
-                        ),
+                        line: format!("State operation blocked: {}\n", format_active_job(&job)),
                     })
                     .ok();
                     return Ok(());
@@ -4423,10 +4414,7 @@ pub(crate) async fn handle_command(
                 Ok(result) => {
                     ui.send(AppEvent::Log {
                         page: "settings",
-                        line: format!(
-                            "Opened archive: {}\n",
-                            archive_path.display()
-                        ),
+                        line: format!("Opened archive: {}\n", archive_path.display()),
                     })
                     .ok();
                     ui.send(AppEvent::Log {
@@ -4440,10 +4428,7 @@ pub(crate) async fn handle_command(
                     if !result.preserved_dirs.is_empty() {
                         ui.send(AppEvent::Log {
                             page: "settings",
-                            line: format!(
-                                "Preserved: {}\n",
-                                result.preserved_dirs.join(", ")
-                            ),
+                            line: format!("Preserved: {}\n", result.preserved_dirs.join(", ")),
                         })
                         .ok();
                     }
@@ -4461,8 +4446,7 @@ pub(crate) async fn handle_command(
                         })
                         .ok();
                     }
-                    ui.send(AppEvent::ConfigReloaded { cfg: new_cfg })
-                        .ok();
+                    ui.send(AppEvent::ConfigReloaded { cfg: new_cfg }).ok();
                 }
                 Err(err) => {
                     ui.send(AppEvent::Log {

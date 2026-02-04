@@ -13,18 +13,17 @@ use aadk_proto::aadk::v1::{
     JobEventKind, JobFilter, JobHistoryFilter, JobState, KeyValue, ListArtifactsRequest,
     ListJobHistoryRequest, ListJobsRequest, ListProvidersRequest, ListRecentProjectsRequest,
     ListRunOutputsRequest, ListRunsRequest, ListTargetsRequest, ListTemplatesRequest,
-    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ReloadStateRequest, RunFilter,
-    RunId, RunOutputFilter, RunOutputKind, SetActiveToolchainSetRequest,
-    SetDefaultTargetRequest, SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest,
-    StopCuttlefishRequest, StreamJobEventsRequest, StreamRunEventsRequest,
-    UninstallToolchainRequest, UpdateToolchainRequest, WorkflowPipelineOptions,
-    WorkflowPipelineRequest,
+    ListToolchainSetsRequest, OpenProjectRequest, Pagination, ReloadStateRequest, RunFilter, RunId,
+    RunOutputFilter, RunOutputKind, SetActiveToolchainSetRequest, SetDefaultTargetRequest,
+    SetProjectConfigRequest, StartCuttlefishRequest, StartJobRequest, StopCuttlefishRequest,
+    StreamJobEventsRequest, StreamRunEventsRequest, UninstallToolchainRequest,
+    UpdateToolchainRequest, WorkflowPipelineOptions, WorkflowPipelineRequest,
 };
 use aadk_telemetry as telemetry;
 use aadk_util::{
     collect_job_history, data_dir, default_export_path, expand_user, now_millis,
-    open_state_archive, save_state_archive_to, state_export_path, StateArchiveOptions,
-    StateOpGuard, write_json_atomic, DEFAULT_BUILD_ADDR, DEFAULT_JOB_ADDR, DEFAULT_OBSERVE_ADDR,
+    open_state_archive, save_state_archive_to, state_export_path, write_json_atomic,
+    StateArchiveOptions, StateOpGuard, DEFAULT_BUILD_ADDR, DEFAULT_JOB_ADDR, DEFAULT_OBSERVE_ADDR,
     DEFAULT_PROJECT_ADDR, DEFAULT_TARGETS_ADDR, DEFAULT_TOOLCHAIN_ADDR, DEFAULT_WORKFLOW_ADDR,
 };
 use clap::{Parser, Subcommand};
@@ -2971,9 +2970,7 @@ fn print_state_exclusions(opts: &StateArchiveOptions) {
     println!("  excluded={}", excluded.join(", "));
 }
 
-async fn ensure_no_running_jobs(
-    job_addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn ensure_no_running_jobs(job_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = JobServiceClient::new(connect(job_addr).await?);
     let resp = client
         .list_jobs(ListJobsRequest {
@@ -3000,7 +2997,12 @@ async fn ensure_no_running_jobs(
     let latest = resp
         .jobs
         .iter()
-        .max_by_key(|job| job.created_at.as_ref().map(|ts| ts.unix_millis).unwrap_or(0))
+        .max_by_key(|job| {
+            job.created_at
+                .as_ref()
+                .map(|ts| ts.unix_millis)
+                .unwrap_or(0)
+        })
         .unwrap();
     let job_id = latest
         .job_id

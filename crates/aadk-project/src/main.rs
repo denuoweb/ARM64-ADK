@@ -15,9 +15,9 @@ use aadk_proto::aadk::v1::{
     JobProgress, JobProgressUpdated, JobState, JobStateChanged, KeyValue,
     ListRecentProjectsRequest, ListRecentProjectsResponse, ListTemplatesRequest,
     ListTemplatesResponse, LogChunk, OpenProjectRequest, OpenProjectResponse, PageInfo, Project,
-    PublishJobEventRequest, ReloadStateRequest, ReloadStateResponse, RunId, SetProjectConfigRequest,
-    SetProjectConfigResponse, StartJobRequest, StreamJobEventsRequest, Template, Timestamp,
-    ToolchainKind,
+    PublishJobEventRequest, ReloadStateRequest, ReloadStateResponse, RunId,
+    SetProjectConfigRequest, SetProjectConfigResponse, StartJobRequest, StreamJobEventsRequest,
+    Template, Timestamp, ToolchainKind,
 };
 use aadk_util::{
     expand_user, job_addr, now_millis, now_ts, serve_grpc_with_telemetry, write_json_atomic,
