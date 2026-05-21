@@ -441,3 +441,11 @@ Notes:
   unless you already set those args in `APKW_CUTTLEFISH_START_ARGS`.
 - TargetService also patches empty `usr/share/webrtc/assets/custom.css` files in local Cuttlefish
   installs to avoid intermittent Web UI stylesheet dropouts on refresh.
+
+## Portfolio Case Study
+
+This repository is part of Jaron Rosenau's implementation, developer-support, and integration engineering portfolio. The public case study summarizes the problem, delivery scope, architecture, and operational result.
+
+- Case study: [APK Workbench implementation case study](https://rosenau.info/projects/5phdbvm9zjsJugRVH62R)
+- Full portfolio: [Jaron Rosenau](https://rosenau.info)
+- Summary: Linux ARM64 Android tooling with Rust services, GTK UI, gRPC orchestration, packaged releases, and support-oriented docs.
